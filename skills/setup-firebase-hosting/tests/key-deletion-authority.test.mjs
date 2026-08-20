@@ -1,664 +1,424 @@
-// key-deletion-authority.test.mjs — Issue #3 の回帰テスト。
+// key-deletion-authority.test.mjs — Issue #3 の回帰テスト（挙動テスト）。
+//
+// ## 検証する不変条件
 //
 // 上流 PR（agent-cli-skills#63）の codex レビューで P0 指摘された論点:
-// SA 鍵の世代交代（旧鍵の自動削除）の根拠として GitHub Actions 変数
-// （FIREBASE_SA_KEY_IDS）を使うと、GitHub 側の誤設定・改ざん・トークン
-// 侵害が実行者の GCP 権限を通じて任意の既存鍵の失効へ波及する
-// （可用性攻撃・DoS の経路になる）。
+// SA 鍵の世代交代（旧鍵の自動削除）の根拠として GitHub 側の可変データ
+// （Actions 変数等）を使うと、GitHub 側の誤設定・改ざん・トークン侵害が
+// 実行者の GCP 権限を通じて任意の既存鍵の失効へ波及する（可用性攻撃・DoS）。
 //
-// 本リポジトリの現行実装（bootstrap-firebase.sh）は削除根拠を GCP 側の
-// 記録（専用 SA の description に持つ発行記録。書き換えに GCP IAM の
-// iam.serviceAccounts.update 権限を要し、鍵管理と同一の信頼境界にある）
-// のみに限定する設計を既に採用している。このテストはその設計が退行
-// しないことを静的検査で固定化する。
+// 本リポジトリの bootstrap-firebase.sh は削除根拠を GCP 側の記録（専用 SA の
+// description に持つ発行記録。書き換えに iam.serviceAccounts.update 権限を
+// 要し、鍵管理と同一の信頼境界にある）のみに限定する。このテストが固定化
+// する不変条件は次の 1 点に集約される:
 //
-// このテストは:
-//   1. GitHub 側可変データ（FIREBASE_SA_KEY_IDS）が bootstrap-firebase.sh /
-//      SKILL.md のどちらにも出現しないこと
-//   2. bootstrap-firebase.sh に GitHub 側から値を読み出す経路
-//      （gh variable get / gh api）が存在しないこと（gh variable set /
-//      gh secret set の書き込みは許可）
-//   3. GCP 側記録アンカー（KEY_RECORD_MARKER）が定義され、SA description
-//      から発行記録（recorded_key_ids）を導出していること
-//   4. `iam service-accounts keys delete` のすべての出現箇所が、
-//      (a) 案内文言（die/echo の文字列リテラル内、$( ) のネストを考慮して
-//      構造的に判定）、(b) 発行記録ガード（`case ",${recorded_key_ids}," in`
-//      の鍵 ID 一致アームに厳密に属する）、(c) 今回発行した鍵のロールバック
-//      （cleanup() 内かつ削除対象が厳密に "${rollback_key_name}"）の
-//      いずれか 1 つに分類できること（許可リスト方式。いずれにも分類でき
-//      ない出現＝ガード外の削除経路として fail-closed で失敗させる）
-//   5. 記録に無い鍵を削除しない fail-safe 分岐と、ROTATE_EXISTING_KEYS
-//      による opt-out 分岐が存在すること
+//   **削除される鍵は、GCP 側の発行記録にある鍵（+ 今回の実行が発行した鍵の
+//   ロールバック）に限られる。記録に無い鍵はどのシナリオでも削除されない。**
+//
+// ## 検証方式（なぜ静的解析ではなく挙動テストか）
+//
+// 旧版はスクリプト本文を正規表現・行走査で静的解析していたが、シェルの
+// 表現力（行分割・ラッパー関数・変数組み立て・バッククォート置換・引用符
+// 分割・同一行複数呼び出し等）に対して迂回経路を塞ぎきれないという P1 指摘
+// が反復した（PR #5 レビュー）。本版はアプローチを変え、**スクリプトを実際に
+// 実行して観測された削除呼び出しだけを検証する**。
+//
+//   1. PATH 先頭にフェイク `gcloud` / `gh` / `curl` の shim を置く。shim は
+//      SHIM_STATE_DIR 配下のファイルを疑似 GCP/GitHub 状態として読み書きし、
+//      鍵削除の呼び出しを deletions.log / delete-attempts.log へ記録する。
+//      未知のサブコマンドは fail-closed（exit 1 → set -e で本体停止）。
+//   2. bootstrap-firebase.sh 全体を一時ディレクトリへコピーして実行し
+//      （.firebaserc 生成でリポジトリを汚さないため）、終了コード・削除
+//      ログ・残存鍵・発行記録（description）の終状態を assert する。
+//
+// この方式では「スクリプトがどう書かれているか」ではなく「実際に何を削除
+// したか」を検証するため、シェル構文による迂回はそのまま削除ログに現れて
+// テストが失敗する（削除を隠すには shim を迂回して本物の gcloud を呼ぶしか
+// なく、それは PATH 制御下では起きない）。
+//
+// ## シナリオ
+//
+//   (a) 正常系: 発行記録にある旧鍵のみ削除され、記録は現行鍵のみに更新される
+//   (b) 記録外の鍵が混在 + GitHub 側データ（FIREBASE_SA_KEY_IDS 環境変数）が
+//       記録外の鍵を指しても、その鍵は削除されない（fail-safe + Issue #3 本体）
+//   (c) Secret 登録失敗: 今回発行した鍵だけがロールバック削除され、旧鍵は残る
+//   (d) 削除 API が 403: スクリプトは停止し、発行記録が保持される（次回再試行可能）
+//   (e) 鍵数上限（10 個）: 記録にある鍵のみで空きを作り、最後に記録した鍵
+//       （現行 Secret が指す可能性が高い鍵）は事前削除しない
+//   (f) ROTATE_EXISTING_KEYS=false: 削除が一切行われない（opt-out）
+//   (g) 上限だが記録にある鍵が無い: 何も削除せず fail-closed で停止する
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..')
-const SKILL_MD_PATH = join(SKILL_DIR, 'SKILL.md')
 const BOOTSTRAP_SCRIPT_PATH = join(SKILL_DIR, 'scripts', 'bootstrap-firebase.sh')
 
-const skillMd = readFileSync(SKILL_MD_PATH, 'utf8')
-const script = readFileSync(BOOTSTRAP_SCRIPT_PATH, 'utf8')
+// スクリプトへ渡す設定値。shim もこの値でフル鍵名を組み立てる。
+const PROJECT_ID = 'test-proj'
+const SITE_ID = 'test-site'
+const GITHUB_REPO = 'owner/repo'
+const SA_EMAIL = `github-actions-hosting@${PROJECT_ID}.iam.gserviceaccount.com`
+// shim の keys create が発行する鍵 ID（決定的にして assert 可能にする）
+const NEW_KEY_ID = 'newly-issued-key'
+const MARKER = 'firebase-bootstrap-issued-keys='
 
-test('GitHub Actions 変数 FIREBASE_SA_KEY_IDS が SKILL.md / bootstrap-firebase.sh のどちらにも出現しない', () => {
-  assert.ok(
-    !skillMd.includes('FIREBASE_SA_KEY_IDS'),
-    'SKILL.md に FIREBASE_SA_KEY_IDS が出現している（GitHub 側可変データを削除根拠に戻す退行の可能性）'
-  )
-  assert.ok(
-    !script.includes('FIREBASE_SA_KEY_IDS'),
-    'bootstrap-firebase.sh に FIREBASE_SA_KEY_IDS が出現している（GitHub 側可変データを削除根拠に戻す退行の可能性）'
-  )
-})
+const keyName = (id) =>
+  `projects/${PROJECT_ID}/serviceAccounts/${SA_EMAIL}/keys/${id}`
 
-test('bootstrap-firebase.sh に GitHub 側から値を読み出す経路（gh variable get / gh api）が無い', () => {
-  assert.ok(
-    !/\bgh\s+variable\s+get\b/.test(script),
-    'bootstrap-firebase.sh に `gh variable get` が存在する（GitHub 側可変データの読み出し経路）'
-  )
-  assert.ok(
-    !/\bgh\s+api\b/.test(script),
-    'bootstrap-firebase.sh に `gh api` が存在する（GitHub 側可変データの読み出し経路の可能性）'
-  )
-  // 書き込み（gh variable set / gh secret set）は許可対象であり、退行検知の
-  // 誤検出でないことを確認する（抽出ロジックの破損検知）
-  assert.match(script, /\bgh\s+variable\s+set\b/, 'gh variable set が見つからない（抽出ロジックの破損の可能性）')
-  assert.match(script, /\bgh\s+secret\s+set\b/, 'gh secret set が見つからない（抽出ロジックの破損の可能性）')
-})
+// --- shim 本体 -------------------------------------------------------------
+// 疑似 GCP 状態（SHIM_STATE_DIR）:
+//   description         SA の description（発行記録の置き場）
+//   keys                現存する USER_MANAGED 鍵のフル名（1 行 1 鍵）
+//   next-key-id         keys create が発行する鍵 ID
+//   deletions.log       実際に削除された鍵（成功した delete のみ）
+//   delete-attempts.log 削除が試行された鍵（失敗含む）
+//   fail-delete         存在すると keys delete が 403 相当で失敗する
+//   fail-secret         存在すると gh secret set が失敗する
+//   secret-payload.json gh secret set が受け取った鍵ファイルの内容
 
-test('GCP 側記録アンカー（KEY_RECORD_MARKER）が定義され、SA description から発行記録を導出している', () => {
-  assert.match(
-    script,
-    /KEY_RECORD_MARKER="[^"]+"/,
-    'KEY_RECORD_MARKER の定義が見つからない'
-  )
-  // 単一の複雑な正規表現で代入文全体を貫通させると、printf の引数に
-  // `)` を含む変更（例: 関数呼び出しの追加）だけで正規表現が途中で
-  // 止まり誤検出（偽陽性の PASS）する。行を特定してから要素ごとに
-  // 存在確認する方式にして、この種の脆さを避ける（Bugbot 指摘）。
-  const recordedKeyIdsLine = script
-    .split('\n')
-    .find((line) => line.includes('recorded_key_ids="$('))
-  assert.ok(
-    recordedKeyIdsLine,
-    'recorded_key_ids="$(...)" の代入行が見つからない'
-  )
-  assert.match(
-    recordedKeyIdsLine,
-    /\bprintf\b/,
-    'recorded_key_ids の代入に printf が使われていない'
-  )
-  assert.match(
-    recordedKeyIdsLine,
-    /\$\{sa_description\}/,
-    'recorded_key_ids が sa_description（SA description の取得結果）から導出されていない'
-  )
-  assert.match(
-    recordedKeyIdsLine,
-    /sed\s+-n\s+"s\/\^\$\{KEY_RECORD_MARKER\}/,
-    'recorded_key_ids が KEY_RECORD_MARKER 行の sed 抽出を経由していない'
-  )
-  assert.match(
-    recordedKeyIdsLine,
-    /head\s+-1\b/,
-    'recorded_key_ids の抽出に head -1（マーカー行の一意化）が使われていない'
-  )
-})
+const GCLOUD_SHIM = `#!/usr/bin/env bash
+# gcloud shim — 本物の gcloud を呼ばず SHIM_STATE_DIR を疑似 GCP として読み書き
+# する。未知のサブコマンドは fail-closed で失敗させ、想定外の API 呼び出しが
+# 追加された場合にテストが必ず気付けるようにする。
+set -euo pipefail
+state="\${SHIM_STATE_DIR:?}"
+printf 'gcloud %s\\n' "$*" >> "\${state}/gcloud-calls.log"
+args="$*"
+case "\${args}" in
+  "auth list "*) echo "tester@example.com" ;;
+  "auth print-access-token"*) echo "fake-token" ;;
+  "billing projects describe "*) echo "False" ;;
+  "projects describe "*) : ;;
+  "services enable "*) : ;;
+  "projects add-iam-policy-binding "*) : ;;
+  "iam service-accounts describe "*)
+    if [[ "\${args}" == *"--format=value(description)"* ]]; then
+      cat "\${state}/description"
+    fi
+    ;;
+  "iam service-accounts create "*|"iam service-accounts update "*)
+    for a in "$@"; do
+      case "\${a}" in
+        --description=*) printf '%s\\n' "\${a#--description=}" > "\${state}/description" ;;
+      esac
+    done
+    ;;
+  "iam service-accounts keys list "*) cat "\${state}/keys" ;;
+  "iam service-accounts keys create "*)
+    key_file="$5"
+    key_id="$(cat "\${state}/next-key-id")"
+    printf '{"type":"service_account","private_key_id":"%s"}\\n' "\${key_id}" > "\${key_file}"
+    printf 'projects/%s/serviceAccounts/%s/keys/%s\\n' "\${FAKE_PROJECT_ID:?}" "\${FAKE_SA_EMAIL:?}" "\${key_id}" >> "\${state}/keys"
+    ;;
+  "iam service-accounts keys delete "*)
+    key_name="$5"
+    printf '%s\\n' "\${key_name}" >> "\${state}/delete-attempts.log"
+    if [[ -f "\${state}/fail-delete" ]]; then
+      echo "ERROR: (gcloud.iam.service-accounts.keys.delete) PERMISSION_DENIED: 403" >&2
+      exit 1
+    fi
+    printf '%s\\n' "\${key_name}" >> "\${state}/deletions.log"
+    grep -vFx "\${key_name}" "\${state}/keys" > "\${state}/keys.tmp" || true
+    mv "\${state}/keys.tmp" "\${state}/keys"
+    ;;
+  *)
+    echo "gcloud shim: unhandled args: \${args}" >&2
+    exit 1
+    ;;
+esac
+`
 
-// 行末バックスラッシュによる行継続を論理行へ結合する。`gcloud iam
-// service-accounts keys \` + 次行 `delete "${key_name}" ...` のように
-// `keys` と `delete` が物理行をまたいで分割されると、単純な行走査では
-// `iam\s+service-accounts\s+keys\s+delete\b` に一致せず検査対象から漏れる
-// （codex-review P1 指摘）。継続行は結合後の先頭インデックスへ内容を集約し、
-// 後続の物理行は空文字へ置き換えることで、他の走査（case/esac/;; の判定・
-// 関数境界の判定）に使う行インデックスの対応関係は変えずに済む。
-function buildLogicalLines(content) {
-  const raw = content.split('\n')
-  const logical = raw.slice()
-  for (let i = 0; i < logical.length; i++) {
-    let j = i + 1
-    while (/\\\s*$/.test(logical[i]) && j < raw.length) {
-      logical[i] = logical[i].replace(/\\\s*$/, ' ') + raw[j].trim()
-      logical[j] = ''
-      j++
-    }
+const GH_SHIM = `#!/usr/bin/env bash
+# gh shim — Secret / 変数の登録を記録するだけで GitHub へは一切通信しない。
+set -euo pipefail
+state="\${SHIM_STATE_DIR:?}"
+printf 'gh %s\\n' "$*" >> "\${state}/gh-calls.log"
+case "$*" in
+  "auth status"*) : ;;
+  "repo view "*) echo "ADMIN" ;;
+  "secret set "*)
+    cat > "\${state}/secret-payload.json"
+    if [[ -f "\${state}/fail-secret" ]]; then
+      echo "gh shim: secret set failed (simulated)" >&2
+      exit 1
+    fi
+    ;;
+  "variable set "*) : ;;
+  *) echo "gh shim: unhandled args: $*" >&2; exit 1 ;;
+esac
+`
+
+const CURL_SHIM = `#!/usr/bin/env bash
+# curl shim — Firebase API 経路を最短で通過させる（addFirebase は 409 =
+# 追加済み、サイト作成は 200）。鍵管理は curl を経由しないため、それ以外の
+# URL が現れたら設計変更なので fail-closed で失敗させる。
+set -euo pipefail
+state="\${SHIM_STATE_DIR:?}"
+printf 'curl %s\\n' "$*" >> "\${state}/curl-calls.log"
+case "$*" in
+  *":addFirebase"*) printf '{}\\nHTTP_STATUS:409' ;;
+  *"/sites?siteId="*) printf '{"name":"ok"}\\nHTTP_STATUS:200' ;;
+  *) echo "curl shim: unhandled args: $*" >&2; exit 1 ;;
+esac
+`
+
+// node / npx は前提ツール確認（command -v）に応答するだけで実行されない
+const NOOP_SHIM = '#!/bin/sh\nexit 0\n'
+
+// --- シナリオ構築・実行 -----------------------------------------------------
+
+// 一時ディレクトリへスクリプトと shim を配置し、疑似 GCP 状態を初期化する。
+// scripts/ サブディレクトリへコピーするのは、スクリプトが project_root
+// （= scripts の親）へ .firebaserc を書くため。
+function setupScenario({ recordedKeyIds, existingKeyIds, failSecret = false, failDelete = false }) {
+  const root = mkdtempSync(join(tmpdir(), 'key-deletion-authority-'))
+  const bin = join(root, 'bin')
+  const state = join(root, 'state')
+  const scripts = join(root, 'scripts')
+  const work = join(root, 'work')
+  for (const dir of [bin, state, scripts, work]) mkdirSync(dir)
+
+  copyFileSync(BOOTSTRAP_SCRIPT_PATH, join(scripts, 'bootstrap-firebase.sh'))
+  for (const [name, body] of [
+    ['gcloud', GCLOUD_SHIM],
+    ['gh', GH_SHIM],
+    ['curl', CURL_SHIM],
+    ['node', NOOP_SHIM],
+    ['npx', NOOP_SHIM],
+  ]) {
+    const path = join(bin, name)
+    writeFileSync(path, body)
+    chmodSync(path, 0o755)
   }
-  return logical
-}
 
-// 「keys delete」の出現箇所を、実行不能と断定できる条件による**除外**では
-// なく、実行され得ない案内文言だと構造的に断定できる場合のみ拾う**許可
-// リスト**方式で判定する（fail-closed）。
-//
-// 以前は「行頭が echo で始まる」「行に <KEY_ID> を含む」という部分文字列・
-// 行 prefix ベースの除外を使っていたが、これは容易にすり抜けられる
-// （`echo ... && gcloud ... keys delete ...`・`echo "$(gcloud ... keys
-// delete ...)"` は行頭が echo でも実際に削除を実行する。コメントに
-// `<KEY_ID>` を足すだけでも実行可能な削除行を除外できてしまう。
-// codex-review P1 指摘）。
-//
-// 本スクリプトの案内文言（die/echo のメッセージ文字列）は必ず
-// `die "..."` / `echo "..."` という二重引用符で囲われた文字列リテラル
-// なので、対象の出現位置が「その文字列リテラルが開いてから閉じるまでの
-// 範囲内」にあるかどうかを、`$( ... )` によるコマンド置換のネストを
-// 考慮しながら実際に走査して判定する（`$(shq "${x}")` のように置換内部に
-// 二重引用符が現れても、それは外側の文字列を閉じない）。この判定を通った
-// 場合のみ「案内文言（非実行）」として扱い、それ以外はすべて実行行の
-// 候補として後続のガード検証に回す。
-function findEnclosingGuidanceString(lines, occLineIdx) {
-  for (let start = occLineIdx; start >= 0; start--) {
-    const openMatch = /^\s*(?:echo|die)\s+"/.exec(lines[start])
-    if (!openMatch) continue
-    const openCol = lines[start].indexOf('"')
-    let depth = 0
-    for (let i = start; i < lines.length; i++) {
-      const text = lines[i]
-      const fromCol = i === start ? openCol + 1 : 0
-      for (let ci = fromCol; ci < text.length; ci++) {
-        if (text[ci] === '$' && text[ci + 1] === '(') {
-          depth++
-          ci++
-          continue
-        }
-        if (text[ci] === ')' && depth > 0) {
-          depth--
-          continue
-        }
-        if (text[ci] === '"' && depth === 0) {
-          return { start, closeLine: i, closeCol: ci }
-        }
-      }
+  writeFileSync(join(state, 'description'), `${MARKER}${recordedKeyIds}\n`)
+  writeFileSync(
+    join(state, 'keys'),
+    existingKeyIds.map((id) => `${keyName(id)}\n`).join('')
+  )
+  writeFileSync(join(state, 'next-key-id'), `${NEW_KEY_ID}\n`)
+  if (failSecret) writeFileSync(join(state, 'fail-secret'), '')
+  if (failDelete) writeFileSync(join(state, 'fail-delete'), '')
+
+  const run = (envOverrides = {}) => {
+    const env = { ...process.env }
+    // 外側の環境から漏れてシナリオを変え得る変数は明示的に排除する
+    for (const name of [
+      'ROTATE_EXISTING_KEYS',
+      'ADOPT_EXISTING_SA',
+      'ALLOW_BLAZE',
+      'FIREBASE_SA_KEY_IDS',
+    ]) {
+      delete env[name]
     }
-    // 閉じ引用符に到達できなかった（不整形）。案内文言とは断定できない
-    // ため、ここでは扱わず候補として残す（fail-closed）。
-    return null
+    Object.assign(env, {
+      PATH: `${bin}:${process.env.PATH}`,
+      PROJECT_ID,
+      SITE_ID,
+      GITHUB_REPO,
+      SHIM_STATE_DIR: state,
+      FAKE_PROJECT_ID: PROJECT_ID,
+      FAKE_SA_EMAIL: SA_EMAIL,
+      TMPDIR: work,
+      ...envOverrides,
+    })
+    const result = spawnSync('bash', [join(scripts, 'bootstrap-firebase.sh')], {
+      env,
+      encoding: 'utf8',
+      timeout: 60_000,
+    })
+    assert.equal(result.error, undefined, `スクリプトの起動に失敗: ${result.error}`)
+    return result
   }
-  return null
-}
 
-// 文字列リテラルの範囲内であっても、`$( ... )` コマンド置換の内側は
-// 実際にシェルへ渡されて実行される（`echo "$(gcloud ... keys delete
-// ...)"` は置換結果を echo するだけでなく、置換自体として `gcloud ...
-// keys delete` を実際に実行する。codex-review P1 指摘）。そのため出現
-// 位置がガード文字列の範囲内でも、置換ネストの深さが 0（＝置換の外＝
-// 純粋な表示テキスト）である場合に限り「案内文言」として扱う。
-function guidanceStringDepthAt(lines, range, targetIdx, targetCol) {
-  let depth = 0
-  for (let i = range.start; i <= targetIdx; i++) {
-    const text = lines[i]
-    const fromCol = i === range.start ? lines[range.start].indexOf('"') + 1 : 0
-    const toCol = i === targetIdx ? targetCol : text.length
-    for (let ci = fromCol; ci < toCol; ci++) {
-      if (text[ci] === '$' && text[ci + 1] === '(') {
-        depth++
-        ci++
-        continue
-      }
-      if (text[ci] === ')' && depth > 0) {
-        depth--
-        continue
-      }
-    }
+  const readLines = (name) => {
+    const path = join(state, name)
+    if (!existsSync(path)) return []
+    return readFileSync(path, 'utf8').split('\n').filter((line) => line !== '')
   }
-  return depth
-}
 
-// `$( ... )` の深さを `)` の出現だけで数えると、`case` 文のパターン終端
-// （例: `x)`）に含まれる `)` を置換の終端と取り違え、深さを誤って早く 0 へ
-// 戻してしまう。そうなると、実際にはまだ置換の内側（＝実行される領域）に
-// ある `keys delete` が、深さ 0（＝表示テキスト）と誤判定されて案内文言
-// 扱いになる（`echo "$(case x in x) ... keys delete ... ;; esac)"` のような
-// 行。codex-review P1 指摘）。
-//
-// この種の誤認は case 文の構文（パターンラベル vs 通常の閉じ括弧）を正しく
-// 解析しない限り正確には解消できない。正確な shell parser を実装する
-// 代わりに、fail-closed な方針を採る: 案内文字列の開始から対象出現までの
-// 範囲に `case` キーワードが一度でも現れていた場合、その時点で深さ計算の
-// 信頼性が崩れているとみなし、深さの値に関わらず「案内文言ではない
-// （＝実行行候補）」として扱う。実際の bootstrap-firebase.sh の案内文字列
-// （die/echo のメッセージ）には `case` キーワードは出現しないため、この
-// 判定は現行スクリプトの検査結果には影響しない。
-function guidanceTextBetween(lines, range, targetIdx, targetCol) {
-  let text = ''
-  for (let i = range.start; i <= targetIdx; i++) {
-    const line = lines[i]
-    const fromCol = i === range.start ? line.indexOf('"') + 1 : 0
-    const toCol = i === targetIdx ? targetCol : line.length
-    text += line.slice(fromCol, toCol) + '\n'
+  return {
+    root,
+    run,
+    deletions: () => readLines('deletions.log'),
+    deleteAttempts: () => readLines('delete-attempts.log'),
+    remainingKeys: () => readLines('keys'),
+    description: () => readFileSync(join(state, 'description'), 'utf8').trim(),
+    secretPayload: () => readFileSync(join(state, 'secret-payload.json'), 'utf8'),
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
   }
-  return text
 }
 
-function isGuidanceOccurrence(lines, idx, matchCol) {
-  const range = findEnclosingGuidanceString(lines, idx)
-  if (!range) return false
-  if (idx < range.start || idx > range.closeLine) return false
-  if (idx === range.closeLine && matchCol >= range.closeCol) return false
-  if (guidanceStringDepthAt(lines, range, idx, matchCol) > 0) return false
-  if (/\bcase\b/.test(guidanceTextBetween(lines, range, idx, matchCol))) return false
-  return true
-}
+// --- シナリオ (a): 正常系 ---------------------------------------------------
 
-// 同一（論理）行に `keys delete` が複数回現れる場合（例: 案内文言の echo
-// と、その後ろに `&&` で連結された実際の実行が同一行に並ぶ攻撃パターン）
-// に、最初の 1 件しか見つけない非 global 正規表現の `exec` だと 2 件目以降
-// が検査から漏れる（codex-review P1 指摘）。`g` フラグ + `matchAll` で
-// 各行内の全出現位置を収集する。
-function findKeyDeleteOccurrences(lines) {
-  const DELETE_RE = /iam\s+service-accounts\s+keys\s+delete\b/g
-  const occurrences = []
-  lines.forEach((line, i) => {
-    for (const m of line.matchAll(DELETE_RE)) {
-      occurrences.push({ idx: i, col: m.index })
-    }
+test('発行記録にある旧鍵のみ削除され、記録が現行鍵のみへ更新される（正常系）', () => {
+  const s = setupScenario({
+    recordedKeyIds: 'old-key-1',
+    existingKeyIds: ['old-key-1'],
   })
-  return occurrences
-}
-
-function extractKeyDeleteExecLines(content) {
-  const lines = buildLogicalLines(content)
-  return findKeyDeleteOccurrences(lines)
-    .filter(({ idx, col }) => !isGuidanceOccurrence(lines, idx, col))
-    .map(({ idx }) => lines[idx])
-}
-
-test('gcloud iam service-accounts keys delete の実行行が案内文言以外に最低限存在する（抽出ロジックの破損検知）', () => {
-  const execLines = extractKeyDeleteExecLines(script)
-  assert.ok(
-    execLines.length >= 3,
-    `鍵削除の実行行が想定より少ない（世代交代ループ 2 箇所・ロールバック cleanup 1 箇所の計 3 箇所を期待）: ${execLines.length} 件`
-  )
+  try {
+    const r = s.run()
+    assert.equal(r.status, 0, `正常終了するはず: ${r.stdout}\n${r.stderr}`)
+    // 削除されたのは記録にある旧鍵ちょうど 1 件
+    assert.deepEqual(s.deletions(), [keyName('old-key-1')])
+    // 残存するのは今回発行した鍵のみ
+    assert.deepEqual(s.remainingKeys(), [keyName(NEW_KEY_ID)])
+    // 発行記録は現行鍵 ID のみへ更新される
+    assert.equal(s.description(), `${MARKER}${NEW_KEY_ID}`)
+    // GitHub Secret へ登録されたのは今回発行した鍵ファイル
+    assert.match(s.secretPayload(), new RegExp(`"private_key_id":"${NEW_KEY_ID}"`))
+    // 記録外鍵の警告は出ない
+    assert.ok(!r.stdout.includes('記録に無い鍵が残っています'), r.stdout)
+  } finally {
+    s.cleanup()
+  }
 })
 
-// 削除行が `case ",${recorded_key_ids}," in` ブロックの「内側にあるか」
-// だけでなく、実際に鍵 ID 一致アーム（`*",${key_id},"*)`）に属している
-// かを構造的に検証する。ブロック内側判定だけだと、同じ case 文に
-// ガードなしの default アーム（`*)`）を新設して削除を追加しても通過して
-// しまう（codex-review P1 指摘）。
-//
-// アームラベルは「鍵 ID 一致パターンそのもの」であることを要求し、
-// `${key_id}` を含んでさえいれば良いという緩い判定は使わない。緩い判定
-// だと `*",${key_id},"*|*)` のように `|`（代替パターン）で default アーム
-// を併記したラベルも「鍵 ID を含む」という理由だけで安全と誤判定して
-// しまう（このラベルは記録に一致しない任意の鍵でも default 側で実行
-// される＝ガードになっていない。codex-review P1 指摘）。
-const RECORDED_KEY_ARM_LABEL_RE = /^\*",\$\{key_id\},"\*\)$/
+// --- シナリオ (b): 記録外の鍵は削除されない（Issue #3 の本体） ---------------
 
-function isGuardedByRecordedKeys(lines, idx) {
-  let armLabel = null
-  for (let i = idx - 1; i >= 0; i--) {
-    const line = lines[i]
-    if (/^\s*;;\s*$/.test(line)) {
-      // 直前のアームの終端に達した＝自分のアーム開始ラベルより先に
-      // case 開始行へは到達できない（アーム境界をまたいでいる）。
-      return false
-    }
-    if (/^\s*esac\s*$/.test(line)) {
-      return false
-    }
-    if (armLabel === null && !/^\s*case\b/.test(line) && /\)\s*$/.test(line.trim())) {
-      // このアームの開始ラベル行（例: `*",${key_id},"*)`）
-      armLabel = line.trim()
-      continue
-    }
-    if (/^\s*case\s+",\$\{recorded_key_ids\},"\s+in\s*$/.test(line)) {
-      // 発行記録との一致を判定する case 文の開始行へ到達した。
-      // アームラベルが鍵 ID 一致パターンそのものと厳密一致することを
-      // 確認する（`|` を含む代替パターン・default アーム単独を排除）。
-      return Boolean(armLabel) && RECORDED_KEY_ARM_LABEL_RE.test(armLabel)
-    }
-    if (/^\s*case\b/.test(line)) {
-      // 別の case 文の開始行に達した＝目的の case の内側ではない。
-      return false
-    }
+test('発行記録に無い鍵は、GitHub 側データがその鍵を指しても削除されない', () => {
+  const s = setupScenario({
+    recordedKeyIds: 'old-key-1',
+    existingKeyIds: ['old-key-1', 'foreign-key-1'],
+  })
+  try {
+    // FIREBASE_SA_KEY_IDS は上流 PR で P0 指摘された GitHub Actions 変数の
+    // 名前。GitHub 側で改ざんされ得るデータが記録外の鍵を指す状況を環境変数
+    // で再現し、削除根拠として一切参照されないことを実測する。
+    const r = s.run({ FIREBASE_SA_KEY_IDS: 'old-key-1,foreign-key-1' })
+    assert.equal(r.status, 0, `正常終了するはず: ${r.stdout}\n${r.stderr}`)
+    // 削除は記録にある鍵だけ。記録外の foreign-key-1 は試行すらされない
+    assert.deepEqual(s.deletions(), [keyName('old-key-1')])
+    assert.deepEqual(s.deleteAttempts(), [keyName('old-key-1')])
+    // 記録外の鍵は残存し、手動整理の警告が出る
+    assert.deepEqual(s.remainingKeys().sort(), [keyName('foreign-key-1'), keyName(NEW_KEY_ID)].sort())
+    assert.ok(r.stdout.includes('自動削除しません'), r.stdout)
+    assert.ok(r.stdout.includes(keyName('foreign-key-1')), r.stdout)
+  } finally {
+    s.cleanup()
   }
-  return false
-}
+})
 
-// 削除呼び出しがラッパー関数経由で間接化されると、静的な行走査ではその
-// 関数の「呼び出し側」（`delete_key "${x}"` のようなテキスト）が
-// `keys delete` という文字列を含まないため検査対象に現れず、ガード外の
-// 呼び出しを見逃す（codex-review P1 指摘）。この経路は正規表現ベースの
-// 静的検査では原理的に閉じきれない（呼び出しグラフの解析が要る）ため、
-// 「`keys delete` は `cleanup()` 内、またはトップレベル（いずれの関数
-// 定義にも属さない場所）にしか出現してはならない」という不変条件を課す
-// ことで間接化そのものを禁止し、実質的に塞ぐ。新規のラッパー関数を
-// 定義した時点で、その定義行が cleanup() 以外の関数内に属することを
-// 検知して fail-closed で失敗させる。
-// 関数定義の許容形式は 2 つに限定する（下記「関数定義はすべて許容された
-// 2 形式のいずれかに厳密一致する」テストで、この 2 形式以外の定義構文
-// （インデント定義・`function name {`・`name () {` 等）はスクリプト側に
-// 存在しないことを別途 fail-closed で保証する）。
-//   (a) 複数行形式: 列0開始の `name() {` で始まり、列0の `}` 単独行で終わる
-//   (b) 自己完結ワンライナー形式: 列0開始で `name() { ...; }` が単一行に
-//       完結する（本体内に改行が無い）
-// この不変条件があるため、enclosingFunctionName は (a)(b) の 2 パターンだけ
-// を認識すれば、間接化された削除呼び出しの遡及判定として健全になる
-// （codex-review P1 指摘: 列0開始の `name() {` のみ認識し、インデント定義・
-// `function name {` 等を見逃す、への対応）。
-const ONE_LINER_FUNC_RE = /^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{.*;\s*\}\s*$/
-const MULTI_LINE_FUNC_OPEN_RE = /^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*$/
+// --- シナリオ (c): Secret 登録失敗時のロールバック ---------------------------
 
-function enclosingFunctionName(lines, idx) {
-  // (b) 自己完結ワンライナー: idx 自身の行が定義行であれば、その関数名を
-  // 直接返す（本体が単一行に閉じているため、遡っての探索は不要かつ誤り）。
-  const oneLiner = ONE_LINER_FUNC_RE.exec(lines[idx])
-  if (oneLiner) return oneLiner[1]
-
-  for (let i = idx; i >= 0; i--) {
-    const m = MULTI_LINE_FUNC_OPEN_RE.exec(lines[i])
-    if (m) {
-      let closeIdx = -1
-      for (let j = i + 1; j < lines.length; j++) {
-        if (/^\}\s*$/.test(lines[j])) {
-          closeIdx = j
-          break
-        }
-      }
-      if (closeIdx !== -1 && idx > i && idx < closeIdx) return m[1]
-      // idx はこの（直前に見つかった）関数定義の本体範囲外。本スクリプトの
-      // 関数定義は入れ子にならないため、これより前を遡っても idx を囲む
-      // 関数は存在しない。
-      return null
-    }
-    // (b) の自己完結ワンライナー定義行は、遡及探索の途中で通過しても
-    // idx を囲む複数行定義の開始行ではないため無視して良い（無視しないと
-    // 「直前の関数定義」と誤認して探索を打ち切ってしまう）。
-    if (ONE_LINER_FUNC_RE.test(lines[i])) continue
+test('Secret 登録に失敗すると今回発行した鍵のみロールバック削除され、旧鍵は残る', () => {
+  const s = setupScenario({
+    recordedKeyIds: 'old-key-1',
+    existingKeyIds: ['old-key-1'],
+    failSecret: true,
+  })
+  try {
+    const r = s.run()
+    assert.notEqual(r.status, 0, '登録失敗時は異常終了するはず')
+    // ロールバックで削除されるのは今回発行した鍵ちょうど 1 件
+    assert.deepEqual(s.deletions(), [keyName(NEW_KEY_ID)])
+    // 現行 Secret が指し得る旧鍵は失効しない（可用性の保全）
+    assert.deepEqual(s.remainingKeys(), [keyName('old-key-1')])
+    assert.ok(r.stderr.includes('ロールバック'), r.stderr)
+    // 発行記録に旧鍵が残っており、再実行で世代交代を再試行できる
+    assert.ok(s.description().includes('old-key-1'), s.description())
+  } finally {
+    s.cleanup()
   }
-  return null
-}
+})
 
-// ロールバック判定: 削除対象引数が厳密に `"${rollback_key_name}"` である
-// ことを要求する（削除行に文字列 `rollback_key_name` が含まれるだけの
-// 単純な文字列一致だと、ガード外の削除行のコメント・案内文言などに同語を
-// 混ぜるだけで誤って PASS してしまう＝偽陰性経路になる。codex-review P1
-// 指摘）。加えて、その行が `cleanup()` 関数の本体内にあることも確認する。
-// cleanup() は今回発行した鍵のロールバック専用の関数であり、所有が実行
-// そのものに自明（同一実行内で発行した鍵）なため発行記録ガードを要しない
-// という前提は「cleanup() 内に限る」ことで初めて成り立つ。
-// 出現位置（col、`iam service-accounts keys delete` の先頭）から始まる
-// 部分文字列に対して照合するため `^` で先頭固定する（同一行内の別の
-// 出現の削除対象を誤って拾わないようにするため）。
-const ROLLBACK_DELETE_ARG_RE = /^iam\s+service-accounts\s+keys\s+delete\s+"\$\{rollback_key_name\}"(?:\s|\\|$)/
+// --- シナリオ (d): 削除 API の失敗（403 等） --------------------------------
 
-function isWithinFunction(lines, idx, functionName) {
-  const startRe = new RegExp(`^${functionName}\\(\\)\\s*\\{\\s*$`)
-  let start = -1
-  for (let i = idx; i >= 0; i--) {
-    if (startRe.test(lines[i])) {
-      start = i
-      break
-    }
+test('旧鍵の削除が失敗するとスクリプトは停止し、発行記録が保持される（次回再試行可能）', () => {
+  const s = setupScenario({
+    recordedKeyIds: 'old-key-1',
+    existingKeyIds: ['old-key-1'],
+    failDelete: true,
+  })
+  try {
+    const r = s.run()
+    assert.notEqual(r.status, 0, '削除失敗はエラー抑制せず停止するはず（set -e）')
+    // 試行はされたが削除は成立していない
+    assert.deepEqual(s.deleteAttempts(), [keyName('old-key-1')])
+    assert.deepEqual(s.deletions(), [])
+    // 発行記録は現行鍵のみへ更新されず、旧鍵 ID が残る（次回実行で再削除）
+    assert.ok(s.description().includes('old-key-1'), s.description())
+    assert.ok(s.remainingKeys().includes(keyName('old-key-1')))
+  } finally {
+    s.cleanup()
   }
-  if (start === -1) return false
-  // 関数開始直後から idx までの間に、関数本体を閉じる行頭 `}` 単独行が
-  // 現れていないことを確認する（現れていれば idx は既に関数の外）。
-  for (let i = start + 1; i < idx; i++) {
-    if (/^\}\s*$/.test(lines[i])) return false
-  }
-  return true
-}
+})
 
-// 判定は行全体に対してではなく、対象の出現位置（col）から始まる部分
-// 文字列に対して行う。行全体への判定だと、同一行に正当なロールバック
-// 削除と別の（不正な）削除が並んでいる場合、両方の出現がロールバック
-// として誤って PASS してしまう（codex-review「同一行の2件目以降」指摘と
-// 同種の見逃し経路。fail-closed の観点から出現単位で厳密化する）。
-function isRollbackDelete(lines, idx, col) {
-  return ROLLBACK_DELETE_ARG_RE.test(lines[idx].slice(col)) && isWithinFunction(lines, idx, 'cleanup')
-}
+// --- シナリオ (e): 鍵数上限時の事前削除 --------------------------------------
 
-test('鍵削除の出現箇所はすべて「案内文言」「発行記録の一致アーム」「ロールバック cleanup」のいずれかに分類できる', () => {
-  const lines = buildLogicalLines(script)
-  const occurrences = findKeyDeleteOccurrences(lines)
-
-  assert.ok(occurrences.length > 0, '鍵削除の出現箇所が抽出できていない（抽出ロジックの破損の可能性）')
-
-  const execOccurrences = occurrences.filter(({ idx, col }) => !isGuidanceOccurrence(lines, idx, col))
-  assert.ok(
-    execOccurrences.length > 0,
-    '案内文言以外の鍵削除実行行が 1 件も抽出できていない（抽出ロジックの破損の可能性）'
-  )
-
-  for (const { idx, col } of execOccurrences) {
-    const enclosingFn = enclosingFunctionName(lines, idx)
-    assert.ok(
-      enclosingFn === null || enclosingFn === 'cleanup',
-      `keys delete が cleanup() 以外の関数（${enclosingFn}）内に定義されている（ラッパー関数経由の間接化はガード検証をすり抜けるため禁止。行 ${idx + 1}）: ${lines[idx].trim()}`
+test('鍵数上限時も削除は記録にある鍵のみで、最後に記録した鍵は事前削除しない', () => {
+  const unrecorded = Array.from({ length: 7 }, (_, i) => `unrec-${i + 1}`)
+  const s = setupScenario({
+    recordedKeyIds: 'rec-1,rec-2,rec-3',
+    existingKeyIds: ['rec-1', 'rec-2', 'rec-3', ...unrecorded],
+  })
+  try {
+    const r = s.run()
+    assert.equal(r.status, 0, `正常終了するはず: ${r.stdout}\n${r.stderr}`)
+    assert.ok(r.stdout.includes('上限'), r.stdout)
+    // 事前削除は rec-1, rec-2（rec-3 = 最後に記録した鍵 = 現行 Secret が指す
+    // 可能性が高い鍵は温存）。rec-3 は Secret 登録成功後の世代交代で削除される
+    assert.deepEqual(s.deletions(), [keyName('rec-1'), keyName('rec-2'), keyName('rec-3')])
+    // 記録外の 7 鍵はすべて残存する
+    assert.deepEqual(
+      s.remainingKeys().sort(),
+      [...unrecorded.map(keyName), keyName(NEW_KEY_ID)].sort()
     )
-
-    const inRecordedGuardArm = isGuardedByRecordedKeys(lines, idx)
-
-    assert.ok(
-      isRollbackDelete(lines, idx, col) || inRecordedGuardArm,
-      `ガード外（発行記録の一致アーム内でも厳密な rollback_key_name 削除でもない）の鍵削除出現を検出（行 ${idx + 1}, 列 ${col + 1}）: ${lines[idx].trim()}`
-    )
+    assert.equal(s.description(), `${MARKER}${NEW_KEY_ID}`)
+  } finally {
+    s.cleanup()
   }
 })
 
-test('コマンド置換内の case パターン終端 ) を $( ... ) の終端と誤認しない（fail-closed。codex-review P1 指摘の回帰テスト）', () => {
-  // 案内文言（echo/die の文字列リテラル）を装いつつ、$( ... ) の内側に
-  // case 文を仕込むことで、単純な ) の深さカウントに実行可能な鍵削除を
-  // 「表示テキスト（深さ 0）」と誤認させようとする攻撃パターン。
-  const maliciousLine =
-    'echo "$(case "${x}" in x) gcloud iam service-accounts keys delete "${key_name}" ;; esac)"'
-  const lines = buildLogicalLines(maliciousLine)
-  const occurrences = findKeyDeleteOccurrences(lines)
-  assert.ok(occurrences.length > 0, '攻撃パターンから keys delete の出現が抽出できていない（テスト自体の破損の可能性）')
-  for (const { idx, col } of occurrences) {
-    assert.equal(
-      isGuidanceOccurrence(lines, idx, col),
-      false,
-      `case パターン終端 ) の誤カウントにより案内文言として誤って除外されている（行 ${idx + 1}, 列 ${col + 1}）`
-    )
+// --- シナリオ (f): ROTATE_EXISTING_KEYS=false（opt-out） --------------------
+
+test('ROTATE_EXISTING_KEYS=false では鍵の削除が一切行われない', () => {
+  const s = setupScenario({
+    recordedKeyIds: 'old-key-1',
+    existingKeyIds: ['old-key-1'],
+  })
+  try {
+    const r = s.run({ ROTATE_EXISTING_KEYS: 'false' })
+    assert.equal(r.status, 0, `正常終了するはず: ${r.stdout}\n${r.stderr}`)
+    assert.deepEqual(s.deleteAttempts(), [])
+    assert.deepEqual(s.deletions(), [])
+    assert.ok(r.stdout.includes('旧鍵の削除をスキップします'), r.stdout)
+    assert.ok(s.remainingKeys().includes(keyName('old-key-1')))
+  } finally {
+    s.cleanup()
   }
 })
 
-// 「関数定義に見える行」を、許容される 2 正準形式（複数行 / 自己完結
-// ワンライナー）に限定せず広く拾う候補検出。インデント定義・`function
-// name {`・`name () {`・`function name() {` のいずれも候補として拾い、
-// 正準形式との厳密一致を後段で要求することで、enclosingFunctionName が
-// 認識できない形式の関数定義そのものをスクリプトに存在させない
-// （codex-review P1 指摘の恒久対応: 個々の非正準形式を逐一パターンへ
-// 追加するのではなく、正準形式以外の存在を許さない方針にする）。
-const FUNC_DEF_CANDIDATE_RE = /^\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/
+// --- シナリオ (g): 上限だが記録にある鍵が無い場合は fail-closed --------------
 
-function findNonConformingFunctionDefs(rawLines) {
-  return rawLines
-    .map((line, i) => ({ line, i }))
-    .filter(({ line }) => FUNC_DEF_CANDIDATE_RE.test(line))
-    .filter(({ line }) => !MULTI_LINE_FUNC_OPEN_RE.test(line) && !ONE_LINER_FUNC_RE.test(line))
-}
-
-test('関数定義はすべて許容された2形式（複数行 / 自己完結ワンライナー）のいずれかに厳密一致する（インデント定義・function name {}構文等の非正準形式を拒否）', () => {
-  const rawLines = script.split('\n')
-  const nonConforming = findNonConformingFunctionDefs(rawLines)
-  assert.deepEqual(
-    nonConforming.map(({ i, line }) => `行${i + 1}: ${line.trim()}`),
-    [],
-    '正準形式（列0開始の `name() {`...`}` 単独行、または列0開始の自己完結 `name() { ...; }`）に厳密一致しない関数定義が存在する' +
-      '（ラッパー関数が enclosingFunctionName の走査から漏れ、ガード外の削除呼び出しを見逃す経路になる）'
-  )
-})
-
-test('（回帰）インデント定義・function name {} 構文の関数定義は非正準形式として検出される', () => {
-  const malicious = [
-    '  delete_key() {',
-    '    gcloud iam service-accounts keys delete "${1}"',
-    '  }',
-    'function wrapper {',
-    '  gcloud iam service-accounts keys delete "${1}"',
-    '}',
-  ]
-  const nonConforming = findNonConformingFunctionDefs(malicious)
-  assert.ok(
-    nonConforming.length >= 2,
-    'インデント定義・function name {} 構文が非正準形式として検出されていない（テスト自体の破損の可能性）'
-  )
-})
-
-// `gcloud ... service-accounts keys <verb>` の <verb>（list/create/delete/
-// update）が変数展開・コマンド置換・文字列連結で動的に構築されると、
-// リテラル文字列 `iam service-accounts keys delete` への一致検査では
-// 検出できない（例: `operation=delete; gcloud iam service-accounts keys
-// "${operation}" ...`）。`service-accounts keys` の直後に必ずリテラルな
-// 既知の verb（バリアント無し）が続くことを要求する許可リスト方式にし、
-// 続かない出現（＝動的構築の疑い）を fail-closed で検出する
-// （codex-review P1 指摘）。
-const SA_KEYS_OCCURRENCE_RE = /service-accounts\s+keys\b/g
-const SA_KEYS_KNOWN_VERB_RE = /^\s+(list|create|delete|update)\b/
-
-function findDynamicKeysSubcommands(lines) {
-  const problems = []
-  lines.forEach((line, i) => {
-    for (const m of line.matchAll(SA_KEYS_OCCURRENCE_RE)) {
-      const rest = line.slice(m.index + m[0].length)
-      if (!SA_KEYS_KNOWN_VERB_RE.test(rest)) {
-        problems.push({ idx: i, snippet: line.trim() })
-      }
-    }
+test('鍵数上限で記録にある鍵が無い場合、何も削除せず停止する（fail-closed）', () => {
+  const s = setupScenario({
+    recordedKeyIds: '',
+    existingKeyIds: Array.from({ length: 10 }, (_, i) => `unrec-${i + 1}`),
   })
-  return problems
-}
-
-test('eval を使用しない、かつ gcloud のサブコマンド verb（keys の直後）が変数展開・動的構築でない', () => {
-  assert.ok(
-    !/\beval\b/.test(script),
-    'bootstrap-firebase.sh に eval が存在する（任意コマンド構築・実行の経路になり得る）'
-  )
-  const lines = buildLogicalLines(script)
-  const problems = findDynamicKeysSubcommands(lines)
-  assert.deepEqual(
-    problems.map(({ idx, snippet }) => `行${idx + 1}: ${snippet}`),
-    [],
-    '`service-accounts keys` の直後がリテラルな既知 verb（list/create/delete/update）でない出現がある' +
-      '（動的サブコマンド構築により削除経路の静的検査をすり抜ける可能性）'
-  )
-})
-
-test('（回帰）変数・文字列連結による動的サブコマンド構築は検出される', () => {
-  const malicious = buildLogicalLines(
-    'operation=delete; gcloud iam service-accounts keys "${operation}" "${key_name}" --project="${PROJECT_ID}"'
-  )
-  const problems = findDynamicKeysSubcommands(malicious)
-  assert.ok(
-    problems.length > 0,
-    '変数展開によるサブコマンド構築が検出されていない（テスト自体の破損の可能性）'
-  )
-})
-
-// バッククォート形式のコマンド置換（`gcloud ...`）は、`$( ... )` の
-// ネスト深さを追跡する既存の案内文言判定（findEnclosingGuidanceString /
-// guidanceStringDepthAt）が想定していない実行経路である。深さ計算を
-// バッククォートにも対応させて追いかける方法は、エスケープ済み
-// バッククォート（`\`` として文字通りの記号を表示するためのもの。本
-// スクリプトの die メッセージが Markdown 風の強調に使用している）との
-// 判別を誤ると案内文言の終端検出そのものを壊しかねない（codex-review
-// 指摘後のレビューで判明）。正確な shell parser を書く代わりに、
-// バッククォートによるコマンド置換をスクリプト全体で禁止し、許可する
-// 用途をエスケープ済み（`\`` ）のものだけに限定する（fail-closed。
-// codex-review P1 指摘の恒久対応）。これにより、バッククォート内に
-// 隠された鍵削除は「案内文言かどうか」を判定するまでもなく、出現した
-// 時点で検査が失敗する。
-const UNESCAPED_BACKTICK_RE = /(^|[^\\])`/g
-
-function findUnescapedBackticks(rawLines) {
-  const problems = []
-  rawLines.forEach((line, i) => {
-    // 純粋なコメント行（`#` 始まり）はシェルとして解釈されないため対象外
-    if (/^\s*#/.test(line)) return
-    for (const m of line.matchAll(UNESCAPED_BACKTICK_RE)) {
-      problems.push({ idx: i, snippet: line.trim() })
-    }
-  })
-  return problems
-}
-
-test('エスケープされていないバッククォート（コマンド置換）が存在しない（案内文言中の \\` のみ許可。fail-closed。codex-review P1 指摘の恒久対応）', () => {
-  const rawLines = script.split('\n')
-  const problems = findUnescapedBackticks(rawLines)
-  assert.deepEqual(
-    problems.map(({ idx, snippet }) => `行${idx + 1}: ${snippet}`),
-    [],
-    'エスケープされていないバッククォートが存在する（バッククォート形式のコマンド置換は許可しない。' +
-      'その内側に実行可能な鍵削除を隠す経路になり得るため）'
-  )
-})
-
-test('（回帰）エスケープされていないバッククォートは検出される', () => {
-  const malicious = ['echo "`gcloud iam service-accounts keys delete \\"${key_name}\\"`"']
-  const problems = findUnescapedBackticks(malicious)
-  assert.ok(
-    problems.length > 0,
-    'バッククォート形式のコマンド置換が検出されていない（テスト自体の破損の可能性）'
-  )
-})
-
-// 引用符でトークンを分割する迂回（`"service-accounts" "keys" delete` 等）は、
-// 正規表現による連続一致（`service-accounts\s+keys\s+delete` のような
-// パターン）を素通りできてしまう。個々の迂回パターンを追加のパターンで
-// 塞ぐのではなく、`service-accounts` サブコマンドの形式そのものを許可
-// リスト化する: 生の行テキスト（引用符を除去しない）に対して、
-// `service-accounts` の直後が空白を挟んで `describe` / `update` /
-// `create` / `keys <list|create|delete|update>` のいずれかへ**引用符を
-// 一切挟まず**厳密一致することを要求し、一致しない出現（動的構築・
-// 引用符分割のいずれも該当）を fail-closed で検出する（codex-review P1
-// 指摘の恒久対応）。引用符を除去してから照合すると引用符分割そのものを
-// 見逃す（除去後は正準形式に見えてしまう）ため、判定は必ず生テキストへ
-// 対して行う。
-const CANONICAL_SA_SUBCOMMAND_RE =
-  /service-accounts\s+(?:describe|update|create|keys\s+(?:list|create|delete|update))\b/g
-const SA_WORD_RE = /service-accounts\b/g
-
-function findNonCanonicalServiceAccountsUsages(content) {
-  const lines = buildLogicalLines(content)
-  const problems = []
-  lines.forEach((line, i) => {
-    const canonicalSpans = [...line.matchAll(CANONICAL_SA_SUBCOMMAND_RE)].map((m) => [
-      m.index,
-      m.index + m[0].length,
-    ])
-    for (const m of line.matchAll(SA_WORD_RE)) {
-      const covered = canonicalSpans.some(([s, e]) => m.index >= s && m.index < e)
-      if (!covered) {
-        problems.push({ idx: i, snippet: line.trim() })
-      }
-    }
-  })
-  return problems
-}
-
-test('service-accounts サブコマンドはすべて引用符を挟まない正準形式（describe/update/create/keys <verb>）に一致する（fail-closed。codex-review P1 指摘の恒久対応）', () => {
-  const problems = findNonCanonicalServiceAccountsUsages(script)
-  assert.deepEqual(
-    problems.map(({ idx, snippet }) => `行${idx + 1}: ${snippet}`),
-    [],
-    '正準形式に一致しない service-accounts の出現がある' +
-      '（引用符でトークンを分割する・動的にサブコマンドを構築する等の迂回で、実行可能な鍵削除を静的検査から隠す経路になり得る）'
-  )
-})
-
-test('（回帰）引用符でトークンを分割した service-accounts keys 呼び出しは非正準形式として検出される', () => {
-  const malicious = 'gcloud iam "service-accounts" "keys" delete "${key_name}" --project="${PROJECT_ID}"'
-  const problems = findNonCanonicalServiceAccountsUsages(malicious)
-  assert.ok(
-    problems.length > 0,
-    '引用符によるトークン分割が非正準形式として検出されていない（テスト自体の破損の可能性）'
-  )
-})
-
-test('記録に無い鍵を削除しない fail-safe 分岐と ROTATE_EXISTING_KEYS opt-out 分岐が存在する', () => {
-  assert.match(
-    script,
-    /unrecorded_keys=/,
-    '記録に無い鍵を退避する unrecorded_keys 分岐が見つからない（fail-safe の退行の可能性）'
-  )
-  assert.match(
-    script,
-    /ROTATE_EXISTING_KEYS:-true/,
-    'ROTATE_EXISTING_KEYS の opt-out 分岐（既定 true）が見つからない'
-  )
+  try {
+    const r = s.run()
+    assert.notEqual(r.status, 0, '記録に無い鍵しか無いなら自動削除せず停止するはず')
+    assert.deepEqual(s.deleteAttempts(), [])
+    assert.deepEqual(s.deletions(), [])
+    assert.ok(r.stderr.includes('安全に削除できる鍵がありません'), r.stderr)
+    // 10 鍵すべて残存する
+    assert.equal(s.remainingKeys().length, 10)
+  } finally {
+    s.cleanup()
+  }
 })

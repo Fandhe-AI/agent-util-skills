@@ -46,7 +46,8 @@ jobs:
   skill-tests:
     name: Skill tests (node:test)
     runs-on: ubuntu-latest
-    # 外部ネットワークを使わない静的ファイル検査のみのため軽量。structure
+    # 静的ファイル検査と、フェイク gcloud / gh / curl の shim で外部通信を
+    # 遮断した挙動テスト（key-deletion-authority）のみのため軽量。structure
     # job と同じ 5 分打ち切りを踏襲する。
     timeout-minutes: 5
     permissions:
