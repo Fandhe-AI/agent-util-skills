@@ -214,12 +214,18 @@ function isGuidanceOccurrence(lines, idx, matchCol) {
   return true
 }
 
+// 同一（論理）行に `keys delete` が複数回現れる場合（例: 案内文言の echo
+// と、その後ろに `&&` で連結された実際の実行が同一行に並ぶ攻撃パターン）
+// に、最初の 1 件しか見つけない非 global 正規表現の `exec` だと 2 件目以降
+// が検査から漏れる（codex-review P1 指摘）。`g` フラグ + `matchAll` で
+// 各行内の全出現位置を収集する。
 function findKeyDeleteOccurrences(lines) {
-  const DELETE_RE = /iam\s+service-accounts\s+keys\s+delete\b/
+  const DELETE_RE = /iam\s+service-accounts\s+keys\s+delete\b/g
   const occurrences = []
   lines.forEach((line, i) => {
-    const m = DELETE_RE.exec(line)
-    if (m) occurrences.push({ idx: i, col: m.index })
+    for (const m of line.matchAll(DELETE_RE)) {
+      occurrences.push({ idx: i, col: m.index })
+    }
   })
   return occurrences
 }
@@ -323,7 +329,10 @@ function enclosingFunctionName(lines, idx) {
 // cleanup() は今回発行した鍵のロールバック専用の関数であり、所有が実行
 // そのものに自明（同一実行内で発行した鍵）なため発行記録ガードを要しない
 // という前提は「cleanup() 内に限る」ことで初めて成り立つ。
-const ROLLBACK_DELETE_ARG_RE = /keys\s+delete\s+"\$\{rollback_key_name\}"(?:\s|\\|$)/
+// 出現位置（col、`iam service-accounts keys delete` の先頭）から始まる
+// 部分文字列に対して照合するため `^` で先頭固定する（同一行内の別の
+// 出現の削除対象を誤って拾わないようにするため）。
+const ROLLBACK_DELETE_ARG_RE = /^iam\s+service-accounts\s+keys\s+delete\s+"\$\{rollback_key_name\}"(?:\s|\\|$)/
 
 function isWithinFunction(lines, idx, functionName) {
   const startRe = new RegExp(`^${functionName}\\(\\)\\s*\\{\\s*$`)
@@ -343,8 +352,13 @@ function isWithinFunction(lines, idx, functionName) {
   return true
 }
 
-function isRollbackDelete(lines, idx) {
-  return ROLLBACK_DELETE_ARG_RE.test(lines[idx]) && isWithinFunction(lines, idx, 'cleanup')
+// 判定は行全体に対してではなく、対象の出現位置（col）から始まる部分
+// 文字列に対して行う。行全体への判定だと、同一行に正当なロールバック
+// 削除と別の（不正な）削除が並んでいる場合、両方の出現がロールバック
+// として誤って PASS してしまう（codex-review「同一行の2件目以降」指摘と
+// 同種の見逃し経路。fail-closed の観点から出現単位で厳密化する）。
+function isRollbackDelete(lines, idx, col) {
+  return ROLLBACK_DELETE_ARG_RE.test(lines[idx].slice(col)) && isWithinFunction(lines, idx, 'cleanup')
 }
 
 test('鍵削除の出現箇所はすべて「案内文言」「発行記録の一致アーム」「ロールバック cleanup」のいずれかに分類できる', () => {
@@ -359,7 +373,7 @@ test('鍵削除の出現箇所はすべて「案内文言」「発行記録の�
     '案内文言以外の鍵削除実行行が 1 件も抽出できていない（抽出ロジックの破損の可能性）'
   )
 
-  for (const { idx } of execOccurrences) {
+  for (const { idx, col } of execOccurrences) {
     const enclosingFn = enclosingFunctionName(lines, idx)
     assert.ok(
       enclosingFn === null || enclosingFn === 'cleanup',
@@ -369,8 +383,8 @@ test('鍵削除の出現箇所はすべて「案内文言」「発行記録の�
     const inRecordedGuardArm = isGuardedByRecordedKeys(lines, idx)
 
     assert.ok(
-      isRollbackDelete(lines, idx) || inRecordedGuardArm,
-      `ガード外（発行記録の一致アーム内でも厳密な rollback_key_name 削除でもない）の鍵削除行を検出（行 ${idx + 1}）: ${lines[idx].trim()}`
+      isRollbackDelete(lines, idx, col) || inRecordedGuardArm,
+      `ガード外（発行記録の一致アーム内でも厳密な rollback_key_name 削除でもない）の鍵削除出現を検出（行 ${idx + 1}, 列 ${col + 1}）: ${lines[idx].trim()}`
     )
   }
 })
