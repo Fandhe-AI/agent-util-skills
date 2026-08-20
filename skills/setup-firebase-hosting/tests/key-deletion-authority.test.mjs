@@ -327,9 +327,28 @@ function isGuardedByRecordedKeys(lines, idx) {
 // ことで間接化そのものを禁止し、実質的に塞ぐ。新規のラッパー関数を
 // 定義した時点で、その定義行が cleanup() 以外の関数内に属することを
 // 検知して fail-closed で失敗させる。
+// 関数定義の許容形式は 2 つに限定する（下記「関数定義はすべて許容された
+// 2 形式のいずれかに厳密一致する」テストで、この 2 形式以外の定義構文
+// （インデント定義・`function name {`・`name () {` 等）はスクリプト側に
+// 存在しないことを別途 fail-closed で保証する）。
+//   (a) 複数行形式: 列0開始の `name() {` で始まり、列0の `}` 単独行で終わる
+//   (b) 自己完結ワンライナー形式: 列0開始で `name() { ...; }` が単一行に
+//       完結する（本体内に改行が無い）
+// この不変条件があるため、enclosingFunctionName は (a)(b) の 2 パターンだけ
+// を認識すれば、間接化された削除呼び出しの遡及判定として健全になる
+// （codex-review P1 指摘: 列0開始の `name() {` のみ認識し、インデント定義・
+// `function name {` 等を見逃す、への対応）。
+const ONE_LINER_FUNC_RE = /^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{.*;\s*\}\s*$/
+const MULTI_LINE_FUNC_OPEN_RE = /^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*$/
+
 function enclosingFunctionName(lines, idx) {
+  // (b) 自己完結ワンライナー: idx 自身の行が定義行であれば、その関数名を
+  // 直接返す（本体が単一行に閉じているため、遡っての探索は不要かつ誤り）。
+  const oneLiner = ONE_LINER_FUNC_RE.exec(lines[idx])
+  if (oneLiner) return oneLiner[1]
+
   for (let i = idx; i >= 0; i--) {
-    const m = lines[i].match(/^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*$/)
+    const m = MULTI_LINE_FUNC_OPEN_RE.exec(lines[i])
     if (m) {
       let closeIdx = -1
       for (let j = i + 1; j < lines.length; j++) {
@@ -344,6 +363,10 @@ function enclosingFunctionName(lines, idx) {
       // 関数は存在しない。
       return null
     }
+    // (b) の自己完結ワンライナー定義行は、遡及探索の途中で通過しても
+    // idx を囲む複数行定義の開始行ではないため無視して良い（無視しないと
+    // 「直前の関数定義」と誤認して探索を打ち切ってしまう）。
+    if (ONE_LINER_FUNC_RE.test(lines[i])) continue
   }
   return null
 }
@@ -432,6 +455,99 @@ test('コマンド置換内の case パターン終端 ) を $( ... ) の終端�
       `case パターン終端 ) の誤カウントにより案内文言として誤って除外されている（行 ${idx + 1}, 列 ${col + 1}）`
     )
   }
+})
+
+// 「関数定義に見える行」を、許容される 2 正準形式（複数行 / 自己完結
+// ワンライナー）に限定せず広く拾う候補検出。インデント定義・`function
+// name {`・`name () {`・`function name() {` のいずれも候補として拾い、
+// 正準形式との厳密一致を後段で要求することで、enclosingFunctionName が
+// 認識できない形式の関数定義そのものをスクリプトに存在させない
+// （codex-review P1 指摘の恒久対応: 個々の非正準形式を逐一パターンへ
+// 追加するのではなく、正準形式以外の存在を許さない方針にする）。
+const FUNC_DEF_CANDIDATE_RE = /^\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/
+
+function findNonConformingFunctionDefs(rawLines) {
+  return rawLines
+    .map((line, i) => ({ line, i }))
+    .filter(({ line }) => FUNC_DEF_CANDIDATE_RE.test(line))
+    .filter(({ line }) => !MULTI_LINE_FUNC_OPEN_RE.test(line) && !ONE_LINER_FUNC_RE.test(line))
+}
+
+test('関数定義はすべて許容された2形式（複数行 / 自己完結ワンライナー）のいずれかに厳密一致する（インデント定義・function name {}構文等の非正準形式を拒否）', () => {
+  const rawLines = script.split('\n')
+  const nonConforming = findNonConformingFunctionDefs(rawLines)
+  assert.deepEqual(
+    nonConforming.map(({ i, line }) => `行${i + 1}: ${line.trim()}`),
+    [],
+    '正準形式（列0開始の `name() {`...`}` 単独行、または列0開始の自己完結 `name() { ...; }`）に厳密一致しない関数定義が存在する' +
+      '（ラッパー関数が enclosingFunctionName の走査から漏れ、ガード外の削除呼び出しを見逃す経路になる）'
+  )
+})
+
+test('（回帰）インデント定義・function name {} 構文の関数定義は非正準形式として検出される', () => {
+  const malicious = [
+    '  delete_key() {',
+    '    gcloud iam service-accounts keys delete "${1}"',
+    '  }',
+    'function wrapper {',
+    '  gcloud iam service-accounts keys delete "${1}"',
+    '}',
+  ]
+  const nonConforming = findNonConformingFunctionDefs(malicious)
+  assert.ok(
+    nonConforming.length >= 2,
+    'インデント定義・function name {} 構文が非正準形式として検出されていない（テスト自体の破損の可能性）'
+  )
+})
+
+// `gcloud ... service-accounts keys <verb>` の <verb>（list/create/delete/
+// update）が変数展開・コマンド置換・文字列連結で動的に構築されると、
+// リテラル文字列 `iam service-accounts keys delete` への一致検査では
+// 検出できない（例: `operation=delete; gcloud iam service-accounts keys
+// "${operation}" ...`）。`service-accounts keys` の直後に必ずリテラルな
+// 既知の verb（バリアント無し）が続くことを要求する許可リスト方式にし、
+// 続かない出現（＝動的構築の疑い）を fail-closed で検出する
+// （codex-review P1 指摘）。
+const SA_KEYS_OCCURRENCE_RE = /service-accounts\s+keys\b/g
+const SA_KEYS_KNOWN_VERB_RE = /^\s+(list|create|delete|update)\b/
+
+function findDynamicKeysSubcommands(lines) {
+  const problems = []
+  lines.forEach((line, i) => {
+    for (const m of line.matchAll(SA_KEYS_OCCURRENCE_RE)) {
+      const rest = line.slice(m.index + m[0].length)
+      if (!SA_KEYS_KNOWN_VERB_RE.test(rest)) {
+        problems.push({ idx: i, snippet: line.trim() })
+      }
+    }
+  })
+  return problems
+}
+
+test('eval を使用しない、かつ gcloud のサブコマンド verb（keys の直後）が変数展開・動的構築でない', () => {
+  assert.ok(
+    !/\beval\b/.test(script),
+    'bootstrap-firebase.sh に eval が存在する（任意コマンド構築・実行の経路になり得る）'
+  )
+  const lines = buildLogicalLines(script)
+  const problems = findDynamicKeysSubcommands(lines)
+  assert.deepEqual(
+    problems.map(({ idx, snippet }) => `行${idx + 1}: ${snippet}`),
+    [],
+    '`service-accounts keys` の直後がリテラルな既知 verb（list/create/delete/update）でない出現がある' +
+      '（動的サブコマンド構築により削除経路の静的検査をすり抜ける可能性）'
+  )
+})
+
+test('（回帰）変数・文字列連結による動的サブコマンド構築は検出される', () => {
+  const malicious = buildLogicalLines(
+    'operation=delete; gcloud iam service-accounts keys "${operation}" "${key_name}" --project="${PROJECT_ID}"'
+  )
+  const problems = findDynamicKeysSubcommands(malicious)
+  assert.ok(
+    problems.length > 0,
+    '変数展開によるサブコマンド構築が検出されていない（テスト自体の破損の可能性）'
+  )
 })
 
 test('記録に無い鍵を削除しない fail-safe 分岐と ROTATE_EXISTING_KEYS opt-out 分岐が存在する', () => {
