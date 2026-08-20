@@ -36,6 +36,32 @@ jobs:
         run: bash .github/scripts/check-skill-structure.sh
 
   # --------------------------------------------------
+  # skill-tests（各スキルの node:test 回帰テスト）
+  # --------------------------------------------------
+  # skills/*/tests/*.test.mjs を実行する。ubuntu-latest には Node.js が
+  # 同梱されるため setup-node の追加（新規 action の SHA 固定管理）は不要。
+  # 対象: skills/setup-firebase-hosting/tests/version-pin.test.mjs（Issue
+  # #393）・key-deletion-authority.test.mjs（Issue #3）等。手動実行前提
+  # だったこれらのテストを CI で恒久実行する。
+  skill-tests:
+    name: Skill tests (node:test)
+    runs-on: ubuntu-latest
+    # 外部ネットワークを使わない静的ファイル検査のみのため軽量。structure
+    # job と同じ 5 分打ち切りを踏襲する。
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # actions/checkout v5.0.1
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Run node:test
+        run: node --test skills/*/tests/*.test.mjs
+
+  # --------------------------------------------------
   # lint-docs（ドキュメント／設定ファイル系 lint）
   # --------------------------------------------------
   # Fandhe-AI/actions の lint-docs reusable workflow（lint ツールバージョンは共通側で
