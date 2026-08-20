@@ -86,9 +86,17 @@ const keyName = (id) =>
 //   next-key-id         keys create が発行する鍵 ID
 //   deletions.log       実際に削除された鍵（成功した delete のみ）
 //   delete-attempts.log 削除が試行された鍵（失敗含む）
+//   events.log          鍵管理イベントの時系列（delete / keys-create /
+//                       secret-set。shim 横断の実行順序を assert するための
+//                       単一ログ。成功したイベントのみ記録する）
 //   fail-delete         存在すると keys delete が 403 相当で失敗する
 //   fail-secret         存在すると gh secret set が失敗する
 //   secret-payload.json gh secret set が受け取った鍵ファイルの内容
+//
+// keys create は実 GCP と同様に **USER_MANAGED 鍵 10 個の上限を実装する**
+// （上限到達のまま create すると FAILED_PRECONDITION で失敗）。これにより
+// 「上限時の事前削除経路を落とす」退行は、最終状態の検査を待たず create
+// 失敗として必ず検知される（Cursor Bugbot Medium 指摘への対応）。
 
 const GCLOUD_SHIM = `#!/usr/bin/env bash
 # gcloud shim — 本物の gcloud を呼ばず SHIM_STATE_DIR を疑似 GCP として読み書き
@@ -119,10 +127,19 @@ case "\${args}" in
     ;;
   "iam service-accounts keys list "*) cat "\${state}/keys" ;;
   "iam service-accounts keys create "*)
+    # 実 GCP と同じ SA あたり USER_MANAGED 鍵 10 個の上限を再現する。上限
+    # 到達のまま create へ進む＝事前削除経路が働いていない退行なので、実環境
+    # 同様に失敗させてテストを必ず落とす。
+    key_count="$(grep -c . "\${state}/keys" || true)"
+    if [[ "\${key_count}" -ge 10 ]]; then
+      echo "ERROR: (gcloud.iam.service-accounts.keys.create) FAILED_PRECONDITION: Maximum number of keys on account reached." >&2
+      exit 1
+    fi
     key_file="$5"
     key_id="$(cat "\${state}/next-key-id")"
     printf '{"type":"service_account","private_key_id":"%s"}\\n' "\${key_id}" > "\${key_file}"
     printf 'projects/%s/serviceAccounts/%s/keys/%s\\n' "\${FAKE_PROJECT_ID:?}" "\${FAKE_SA_EMAIL:?}" "\${key_id}" >> "\${state}/keys"
+    printf 'keys-create %s\\n' "\${key_id}" >> "\${state}/events.log"
     ;;
   "iam service-accounts keys delete "*)
     key_name="$5"
@@ -132,6 +149,7 @@ case "\${args}" in
       exit 1
     fi
     printf '%s\\n' "\${key_name}" >> "\${state}/deletions.log"
+    printf 'delete %s\\n' "\${key_name}" >> "\${state}/events.log"
     grep -vFx "\${key_name}" "\${state}/keys" > "\${state}/keys.tmp" || true
     mv "\${state}/keys.tmp" "\${state}/keys"
     ;;
@@ -156,6 +174,7 @@ case "$*" in
       echo "gh shim: secret set failed (simulated)" >&2
       exit 1
     fi
+    printf 'secret-set\\n' >> "\${state}/events.log"
     ;;
   "variable set "*) : ;;
   *) echo "gh shim: unhandled args: $*" >&2; exit 1 ;;
@@ -256,6 +275,8 @@ function setupScenario({ recordedKeyIds, existingKeyIds, failSecret = false, fai
     run,
     deletions: () => readLines('deletions.log'),
     deleteAttempts: () => readLines('delete-attempts.log'),
+    // 鍵管理イベント（delete / keys-create / secret-set）の shim 横断の時系列
+    events: () => readLines('events.log'),
     remainingKeys: () => readLines('keys'),
     description: () => readFileSync(join(state, 'description'), 'utf8').trim(),
     secretPayload: () => readFileSync(join(state, 'secret-payload.json'), 'utf8'),
@@ -281,6 +302,12 @@ test('発行記録にある旧鍵のみ削除され、記録が現行鍵のみ�
     assert.equal(s.description(), `${MARKER}${NEW_KEY_ID}`)
     // GitHub Secret へ登録されたのは今回発行した鍵ファイル
     assert.match(s.secretPayload(), new RegExp(`"private_key_id":"${NEW_KEY_ID}"`))
+    // 実行順序: 旧鍵の削除は新鍵の発行・Secret 登録が完了した後にのみ起きる
+    assert.deepEqual(s.events(), [
+      `keys-create ${NEW_KEY_ID}`,
+      'secret-set',
+      `delete ${keyName('old-key-1')}`,
+    ])
     // 記録外鍵の警告は出ない
     assert.ok(!r.stdout.includes('記録に無い鍵が残っています'), r.stdout)
   } finally {
@@ -370,8 +397,19 @@ test('鍵数上限時も削除は記録にある鍵のみで、最後に記録�
     const r = s.run()
     assert.equal(r.status, 0, `正常終了するはず: ${r.stdout}\n${r.stderr}`)
     assert.ok(r.stdout.includes('上限'), r.stdout)
-    // 事前削除は rec-1, rec-2（rec-3 = 最後に記録した鍵 = 現行 Secret が指す
-    // 可能性が高い鍵は温存）。rec-3 は Secret 登録成功後の世代交代で削除される
+    // 実行順序を時系列ログで検証する（shim の keys create は鍵 10 個のまま
+    // だと実 GCP 同様に失敗するため、事前削除の省略はここへ到達する前に
+    // create 失敗として検知される）:
+    //   1. 事前削除は rec-1, rec-2 のみで、**新鍵の発行より前**に起きる
+    //   2. rec-3（最後に記録した鍵 = 現行 Secret が指す可能性が高い鍵）は
+    //      新鍵の Secret 登録（secret-set）が完了するまで削除されない
+    assert.deepEqual(s.events(), [
+      `delete ${keyName('rec-1')}`,
+      `delete ${keyName('rec-2')}`,
+      `keys-create ${NEW_KEY_ID}`,
+      'secret-set',
+      `delete ${keyName('rec-3')}`,
+    ])
     assert.deepEqual(s.deletions(), [keyName('rec-1'), keyName('rec-2'), keyName('rec-3')])
     // 記録外の 7 鍵はすべて残存する
     assert.deepEqual(
