@@ -205,12 +205,39 @@ function guidanceStringDepthAt(lines, range, targetIdx, targetCol) {
   return depth
 }
 
+// `$( ... )` の深さを `)` の出現だけで数えると、`case` 文のパターン終端
+// （例: `x)`）に含まれる `)` を置換の終端と取り違え、深さを誤って早く 0 へ
+// 戻してしまう。そうなると、実際にはまだ置換の内側（＝実行される領域）に
+// ある `keys delete` が、深さ 0（＝表示テキスト）と誤判定されて案内文言
+// 扱いになる（`echo "$(case x in x) ... keys delete ... ;; esac)"` のような
+// 行。codex-review P1 指摘）。
+//
+// この種の誤認は case 文の構文（パターンラベル vs 通常の閉じ括弧）を正しく
+// 解析しない限り正確には解消できない。正確な shell parser を実装する
+// 代わりに、fail-closed な方針を採る: 案内文字列の開始から対象出現までの
+// 範囲に `case` キーワードが一度でも現れていた場合、その時点で深さ計算の
+// 信頼性が崩れているとみなし、深さの値に関わらず「案内文言ではない
+// （＝実行行候補）」として扱う。実際の bootstrap-firebase.sh の案内文字列
+// （die/echo のメッセージ）には `case` キーワードは出現しないため、この
+// 判定は現行スクリプトの検査結果には影響しない。
+function guidanceTextBetween(lines, range, targetIdx, targetCol) {
+  let text = ''
+  for (let i = range.start; i <= targetIdx; i++) {
+    const line = lines[i]
+    const fromCol = i === range.start ? line.indexOf('"') + 1 : 0
+    const toCol = i === targetIdx ? targetCol : line.length
+    text += line.slice(fromCol, toCol) + '\n'
+  }
+  return text
+}
+
 function isGuidanceOccurrence(lines, idx, matchCol) {
   const range = findEnclosingGuidanceString(lines, idx)
   if (!range) return false
   if (idx < range.start || idx > range.closeLine) return false
   if (idx === range.closeLine && matchCol >= range.closeCol) return false
   if (guidanceStringDepthAt(lines, range, idx, matchCol) > 0) return false
+  if (/\bcase\b/.test(guidanceTextBetween(lines, range, idx, matchCol))) return false
   return true
 }
 
@@ -385,6 +412,24 @@ test('鍵削除の出現箇所はすべて「案内文言」「発行記録の�
     assert.ok(
       isRollbackDelete(lines, idx, col) || inRecordedGuardArm,
       `ガード外（発行記録の一致アーム内でも厳密な rollback_key_name 削除でもない）の鍵削除出現を検出（行 ${idx + 1}, 列 ${col + 1}）: ${lines[idx].trim()}`
+    )
+  }
+})
+
+test('コマンド置換内の case パターン終端 ) を $( ... ) の終端と誤認しない（fail-closed。codex-review P1 指摘の回帰テスト）', () => {
+  // 案内文言（echo/die の文字列リテラル）を装いつつ、$( ... ) の内側に
+  // case 文を仕込むことで、単純な ) の深さカウントに実行可能な鍵削除を
+  // 「表示テキスト（深さ 0）」と誤認させようとする攻撃パターン。
+  const maliciousLine =
+    'echo "$(case "${x}" in x) gcloud iam service-accounts keys delete "${key_name}" ;; esac)"'
+  const lines = buildLogicalLines(maliciousLine)
+  const occurrences = findKeyDeleteOccurrences(lines)
+  assert.ok(occurrences.length > 0, '攻撃パターンから keys delete の出現が抽出できていない（テスト自体の破損の可能性）')
+  for (const { idx, col } of occurrences) {
+    assert.equal(
+      isGuidanceOccurrence(lines, idx, col),
+      false,
+      `case パターン終端 ) の誤カウントにより案内文言として誤って除外されている（行 ${idx + 1}, 列 ${col + 1}）`
     )
   }
 })
