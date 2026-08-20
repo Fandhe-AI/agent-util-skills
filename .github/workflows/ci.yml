@@ -60,7 +60,15 @@ jobs:
           persist-credentials: false
 
       - name: Run node:test
-        run: node --test skills/*/tests/*.test.mjs
+        # `shopt -s failglob` で skills/*/tests/*.test.mjs が1件もマッチしない場合に
+        # シェルを即座にエラー終了させる。failglob なしだとグロブがマッチしない場合
+        # 展開されずリテラル文字列のまま node --test に渡り、node は該当ファイルを
+        # 発見できず 0 tests / 0 pass / 0 fail・終了コード0 で「成功」してしまう
+        # （鍵削除回帰テスト等の安全機構を守るゲート自体が無自覚に無効化される
+        # fail-open。Issue #3 レビュー指摘）。
+        run: |
+          shopt -s failglob
+          node --test skills/*/tests/*.test.mjs
 
   # --------------------------------------------------
   # lint-docs（ドキュメント／設定ファイル系 lint）
