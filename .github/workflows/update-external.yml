@@ -1,0 +1,67 @@
+# 外部ソース（エージェントスキル）の自動追従ワークフロー。
+#
+# 実装本体は Fandhe-AI/actions の reusable workflow `.github/workflows/update-external.yml`。
+# 本ファイルはリポジトリ固有の設定だけを持つ薄い wrapper であり、fail-closed ガード・
+# `persist-credentials`・`source-token`・外部 action の pin・Node / skills CLI の版数は
+# 共通側で集中管理される（agent-reference-skills の同名 wrapper と同型）。
+#
+# 本リポジトリは vendored スキル（.agents/skills/ + skills-lock.json）を
+# Fandhe-AI/agent-cli-skills / agent-reference-skills から日次で追従する。
+# submodule は持たないため、上流の submodule ジョブは存在判定で skip される。
+#
+# runner 選択の根拠:
+# 本リポジトリは public のため、組織の runner 方針に従い GitHub ホステッド
+# （ubuntu-latest）を使う。
+
+name: Update external sources
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 00:00 UTC = 09:00 JST
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '更新対象（手動実行時のみ有効。schedule は常に all）'
+        type: choice
+        required: false
+        default: all
+        options:
+          - all
+          - submodule
+          - skill
+
+permissions:
+  contents: read
+
+# reusable workflow のトップレベル concurrency は機能しないため呼び出し側で設定する
+concurrency:
+  group: update-external
+  cancel-in-progress: false
+
+jobs:
+  update-external:
+    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@latest
+    permissions:
+      contents: read
+    with:
+      # schedule 起動では inputs が null になるため all へフォールバックする
+      target: ${{ inputs.target || 'all' }}
+      # runs-on へ渡す JSON リテラル（素の self-hosted は fromJSON が失敗する）
+      runner-json: '"ubuntu-latest"'
+      # 日次で {prefix}-{YYYYMMDD} の新ブランチを作り直す設計のため、マージされずに
+      # 残った過去日付の PR は常に superseded になる。最新日付の 1 件だけ残して close する
+      # （上流の既定は 'false' のオプトイン。意図として明示する）。
+      submodule-close-superseded: 'true'
+      skills-close-superseded: 'true'
+      # auto-merge はマージ可否を左右する設定のため、組織変数を呼び出し側で解決して渡す。
+      # 未設定（null/空）を有効と解釈する composite action の非対称設計に合わせ、
+      # 明示的に 'false' へフォールバックしオプトイン運用とする。
+      submodule-auto-merge: ${{ vars.SUBMODULE_AUTO_MERGE || 'false' }}
+      submodule-auto-merge-allowlist: ${{ vars.SUBMODULE_AUTO_MERGE_ALLOWLIST }}
+      skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
+      skills-auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
+    secrets:
+      # 未登録の secret は空文字となり、共通側のガードが checkout 前に fail-closed で止める。
+      # SKILLS_PAT 未登録時は共通側が SUBMODULE_PAT へフォールバックする。
+      SUBMODULE_PAT: ${{ secrets.SUBMODULE_PAT }}
+      SKILLS_PAT: ${{ secrets.SKILLS_PAT }}

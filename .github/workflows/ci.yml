@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------
+  # スキル構造検証（依存なし・全 PR / push 共通）
+  # --------------------------------------------------
+  # 各 skills/<name>/SKILL.md の frontmatter (name / description / user-invocable)、
+  # name とディレクトリ名の一致、skills-lock.json の JSON 妥当性を bash で検証する。
+  structure:
+    name: Skill structure check
+    runs-on: ubuntu-latest
+    # bash + grep のみの軽量ジョブ。hang 検知の保険として 5 分で打ち切る。
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # actions/checkout v5.0.1
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Validate skill structure
+        run: bash .github/scripts/check-skill-structure.sh
+
+  # --------------------------------------------------
+  # lint-docs（ドキュメント／設定ファイル系 lint）
+  # --------------------------------------------------
+  # Fandhe-AI/actions の lint-docs reusable workflow（lint ツールバージョンは共通側で
+  # 固定）を呼び出す薄い wrapper。markdownlint の設定は `.markdownlint.jsonc`、除外は
+  # `.markdownlintignore`、その他はそれぞれ `.editorconfig` / `.yamllint` /
+  # `commitlint.config.mjs` を参照する。structure 等リポジトリ固有ジョブは個別実装。
+  lint-docs:
+    uses: Fandhe-AI/actions/.github/workflows/lint-docs.yml@latest
+    permissions:
+      contents: read
+    with:
+      # public リポジトリのため GitHub ホステッド runner を明示指定（組織 runner 方針）
+      runner-label: ubuntu-latest
+      markdownlint: true
+      editorconfig: true
+      yamllint: true
+      # commitlint は PR の base/head から commit 範囲を取るため pull_request 専用
+      # （reusable 側は他イベントを fail-closed で拒否する）。push でも動く本
+      # workflow では event で切り替え、main への push では実行しない
+      commitlint: ${{ github.event_name == 'pull_request' }}
