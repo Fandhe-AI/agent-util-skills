@@ -130,9 +130,29 @@ function isExcludableAsNonExecutable(line) {
   return false
 }
 
+// 行末バックスラッシュによる行継続を論理行へ結合する。`gcloud iam
+// service-accounts keys \` + 次行 `delete "${key_name}" ...` のように
+// `keys` と `delete` が物理行をまたいで分割されると、単純な行走査では
+// `iam\s+service-accounts\s+keys\s+delete\b` に一致せず検査対象から漏れる
+// （codex-review P1 指摘）。継続行は結合後の先頭インデックスへ内容を集約し、
+// 後続の物理行は空文字へ置き換えることで、他の走査（case/esac/;; の判定・
+// 関数境界の判定）に使う行インデックスの対応関係は変えずに済む。
+function buildLogicalLines(content) {
+  const raw = content.split('\n')
+  const logical = raw.slice()
+  for (let i = 0; i < logical.length; i++) {
+    let j = i + 1
+    while (/\\\s*$/.test(logical[i]) && j < raw.length) {
+      logical[i] = logical[i].replace(/\\\s*$/, ' ') + raw[j].trim()
+      logical[j] = ''
+      j++
+    }
+  }
+  return logical
+}
+
 function extractKeyDeleteExecLines(content) {
-  return content
-    .split('\n')
+  return buildLogicalLines(content)
     .filter((line) => /iam\s+service-accounts\s+keys\s+delete\b/.test(line))
     .filter((line) => !isExcludableAsNonExecutable(line))
 }
@@ -146,10 +166,19 @@ test('gcloud iam service-accounts keys delete の実行行が案内文言以外�
 })
 
 // 削除行が `case ",${recorded_key_ids}," in` ブロックの「内側にあるか」
-// だけでなく、実際に鍵 ID 一致アーム（`*",${key_id},"*)` 等）に属して
-// いるかを構造的に検証する。ブロック内側判定だけだと、同じ case 文に
+// だけでなく、実際に鍵 ID 一致アーム（`*",${key_id},"*)`）に属している
+// かを構造的に検証する。ブロック内側判定だけだと、同じ case 文に
 // ガードなしの default アーム（`*)`）を新設して削除を追加しても通過して
 // しまう（codex-review P1 指摘）。
+//
+// アームラベルは「鍵 ID 一致パターンそのもの」であることを要求し、
+// `${key_id}` を含んでさえいれば良いという緩い判定は使わない。緩い判定
+// だと `*",${key_id},"*|*)` のように `|`（代替パターン）で default アーム
+// を併記したラベルも「鍵 ID を含む」という理由だけで安全と誤判定して
+// しまう（このラベルは記録に一致しない任意の鍵でも default 側で実行
+// される＝ガードになっていない。codex-review P1 指摘）。
+const RECORDED_KEY_ARM_LABEL_RE = /^\*",\$\{key_id\},"\*\)$/
+
 function isGuardedByRecordedKeys(lines, idx) {
   let armLabel = null
   for (let i = idx - 1; i >= 0; i--) {
@@ -169,9 +198,9 @@ function isGuardedByRecordedKeys(lines, idx) {
     }
     if (/^\s*case\s+",\$\{recorded_key_ids\},"\s+in\s*$/.test(line)) {
       // 発行記録との一致を判定する case 文の開始行へ到達した。
-      // アームラベルが鍵 ID を参照しており、かつ default アーム
-      // （`*)` 単独）でないことを確認する。
-      return Boolean(armLabel) && armLabel !== '*)' && /\$\{key_id\}/.test(armLabel)
+      // アームラベルが鍵 ID 一致パターンそのものと厳密一致することを
+      // 確認する（`|` を含む代替パターン・default アーム単独を排除）。
+      return Boolean(armLabel) && RECORDED_KEY_ARM_LABEL_RE.test(armLabel)
     }
     if (/^\s*case\b/.test(line)) {
       // 別の case 文の開始行に達した＝目的の case の内側ではない。
@@ -179,6 +208,37 @@ function isGuardedByRecordedKeys(lines, idx) {
     }
   }
   return false
+}
+
+// 削除呼び出しがラッパー関数経由で間接化されると、静的な行走査ではその
+// 関数の「呼び出し側」（`delete_key "${x}"` のようなテキスト）が
+// `keys delete` という文字列を含まないため検査対象に現れず、ガード外の
+// 呼び出しを見逃す（codex-review P1 指摘）。この経路は正規表現ベースの
+// 静的検査では原理的に閉じきれない（呼び出しグラフの解析が要る）ため、
+// 「`keys delete` は `cleanup()` 内、またはトップレベル（いずれの関数
+// 定義にも属さない場所）にしか出現してはならない」という不変条件を課す
+// ことで間接化そのものを禁止し、実質的に塞ぐ。新規のラッパー関数を
+// 定義した時点で、その定義行が cleanup() 以外の関数内に属することを
+// 検知して fail-closed で失敗させる。
+function enclosingFunctionName(lines, idx) {
+  for (let i = idx; i >= 0; i--) {
+    const m = lines[i].match(/^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*$/)
+    if (m) {
+      let closeIdx = -1
+      for (let j = i + 1; j < lines.length; j++) {
+        if (/^\}\s*$/.test(lines[j])) {
+          closeIdx = j
+          break
+        }
+      }
+      if (closeIdx !== -1 && idx > i && idx < closeIdx) return m[1]
+      // idx はこの（直前に見つかった）関数定義の本体範囲外。本スクリプトの
+      // 関数定義は入れ子にならないため、これより前を遡っても idx を囲む
+      // 関数は存在しない。
+      return null
+    }
+  }
+  return null
 }
 
 // ロールバック判定: 削除対象引数が厳密に `"${rollback_key_name}"` である
@@ -214,7 +274,7 @@ function isRollbackDelete(lines, idx) {
 }
 
 test('鍵削除の実行行はすべて発行記録の一致アーム内、またはロールバック cleanup 内に属する', () => {
-  const lines = script.split('\n')
+  const lines = buildLogicalLines(script)
   const execLineIndexes = []
   lines.forEach((line, i) => {
     if (
@@ -228,6 +288,12 @@ test('鍵削除の実行行はすべて発行記録の一致アーム内、ま�
   assert.ok(execLineIndexes.length > 0, '鍵削除の実行行が抽出できていない（抽出ロジックの破損の可能性）')
 
   for (const idx of execLineIndexes) {
+    const enclosingFn = enclosingFunctionName(lines, idx)
+    assert.ok(
+      enclosingFn === null || enclosingFn === 'cleanup',
+      `keys delete が cleanup() 以外の関数（${enclosingFn}）内に定義されている（ラッパー関数経由の間接化はガード検証をすり抜けるため禁止。行 ${idx + 1}）: ${lines[idx].trim()}`
+    )
+
     const inRecordedGuardArm = isGuardedByRecordedKeys(lines, idx)
 
     assert.ok(
