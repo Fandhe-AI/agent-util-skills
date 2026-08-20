@@ -550,6 +550,106 @@ test('（回帰）変数・文字列連結による動的サブコマンド構�
   )
 })
 
+// バッククォート形式のコマンド置換（`gcloud ...`）は、`$( ... )` の
+// ネスト深さを追跡する既存の案内文言判定（findEnclosingGuidanceString /
+// guidanceStringDepthAt）が想定していない実行経路である。深さ計算を
+// バッククォートにも対応させて追いかける方法は、エスケープ済み
+// バッククォート（`\`` として文字通りの記号を表示するためのもの。本
+// スクリプトの die メッセージが Markdown 風の強調に使用している）との
+// 判別を誤ると案内文言の終端検出そのものを壊しかねない（codex-review
+// 指摘後のレビューで判明）。正確な shell parser を書く代わりに、
+// バッククォートによるコマンド置換をスクリプト全体で禁止し、許可する
+// 用途をエスケープ済み（`\`` ）のものだけに限定する（fail-closed。
+// codex-review P1 指摘の恒久対応）。これにより、バッククォート内に
+// 隠された鍵削除は「案内文言かどうか」を判定するまでもなく、出現した
+// 時点で検査が失敗する。
+const UNESCAPED_BACKTICK_RE = /(^|[^\\])`/g
+
+function findUnescapedBackticks(rawLines) {
+  const problems = []
+  rawLines.forEach((line, i) => {
+    // 純粋なコメント行（`#` 始まり）はシェルとして解釈されないため対象外
+    if (/^\s*#/.test(line)) return
+    for (const m of line.matchAll(UNESCAPED_BACKTICK_RE)) {
+      problems.push({ idx: i, snippet: line.trim() })
+    }
+  })
+  return problems
+}
+
+test('エスケープされていないバッククォート（コマンド置換）が存在しない（案内文言中の \\` のみ許可。fail-closed。codex-review P1 指摘の恒久対応）', () => {
+  const rawLines = script.split('\n')
+  const problems = findUnescapedBackticks(rawLines)
+  assert.deepEqual(
+    problems.map(({ idx, snippet }) => `行${idx + 1}: ${snippet}`),
+    [],
+    'エスケープされていないバッククォートが存在する（バッククォート形式のコマンド置換は許可しない。' +
+      'その内側に実行可能な鍵削除を隠す経路になり得るため）'
+  )
+})
+
+test('（回帰）エスケープされていないバッククォートは検出される', () => {
+  const malicious = ['echo "`gcloud iam service-accounts keys delete \\"${key_name}\\"`"']
+  const problems = findUnescapedBackticks(malicious)
+  assert.ok(
+    problems.length > 0,
+    'バッククォート形式のコマンド置換が検出されていない（テスト自体の破損の可能性）'
+  )
+})
+
+// 引用符でトークンを分割する迂回（`"service-accounts" "keys" delete` 等）は、
+// 正規表現による連続一致（`service-accounts\s+keys\s+delete` のような
+// パターン）を素通りできてしまう。個々の迂回パターンを追加のパターンで
+// 塞ぐのではなく、`service-accounts` サブコマンドの形式そのものを許可
+// リスト化する: 生の行テキスト（引用符を除去しない）に対して、
+// `service-accounts` の直後が空白を挟んで `describe` / `update` /
+// `create` / `keys <list|create|delete|update>` のいずれかへ**引用符を
+// 一切挟まず**厳密一致することを要求し、一致しない出現（動的構築・
+// 引用符分割のいずれも該当）を fail-closed で検出する（codex-review P1
+// 指摘の恒久対応）。引用符を除去してから照合すると引用符分割そのものを
+// 見逃す（除去後は正準形式に見えてしまう）ため、判定は必ず生テキストへ
+// 対して行う。
+const CANONICAL_SA_SUBCOMMAND_RE =
+  /service-accounts\s+(?:describe|update|create|keys\s+(?:list|create|delete|update))\b/g
+const SA_WORD_RE = /service-accounts\b/g
+
+function findNonCanonicalServiceAccountsUsages(content) {
+  const lines = buildLogicalLines(content)
+  const problems = []
+  lines.forEach((line, i) => {
+    const canonicalSpans = [...line.matchAll(CANONICAL_SA_SUBCOMMAND_RE)].map((m) => [
+      m.index,
+      m.index + m[0].length,
+    ])
+    for (const m of line.matchAll(SA_WORD_RE)) {
+      const covered = canonicalSpans.some(([s, e]) => m.index >= s && m.index < e)
+      if (!covered) {
+        problems.push({ idx: i, snippet: line.trim() })
+      }
+    }
+  })
+  return problems
+}
+
+test('service-accounts サブコマンドはすべて引用符を挟まない正準形式（describe/update/create/keys <verb>）に一致する（fail-closed。codex-review P1 指摘の恒久対応）', () => {
+  const problems = findNonCanonicalServiceAccountsUsages(script)
+  assert.deepEqual(
+    problems.map(({ idx, snippet }) => `行${idx + 1}: ${snippet}`),
+    [],
+    '正準形式に一致しない service-accounts の出現がある' +
+      '（引用符でトークンを分割する・動的にサブコマンドを構築する等の迂回で、実行可能な鍵削除を静的検査から隠す経路になり得る）'
+  )
+})
+
+test('（回帰）引用符でトークンを分割した service-accounts keys 呼び出しは非正準形式として検出される', () => {
+  const malicious = 'gcloud iam "service-accounts" "keys" delete "${key_name}" --project="${PROJECT_ID}"'
+  const problems = findNonCanonicalServiceAccountsUsages(malicious)
+  assert.ok(
+    problems.length > 0,
+    '引用符によるトークン分割が非正準形式として検出されていない（テスト自体の破損の可能性）'
+  )
+})
+
 test('記録に無い鍵を削除しない fail-safe 分岐と ROTATE_EXISTING_KEYS opt-out 分岐が存在する', () => {
   assert.match(
     script,
