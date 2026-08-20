@@ -104,26 +104,37 @@ test('GCP 側記録アンカー（KEY_RECORD_MARKER）が定義され、SA descr
   )
 })
 
-// 実際に実行される gcloud keys delete 呼び出しだけを対象にする。行頭
-// （インデント許容）に `if` / `if !` / `elif` / `while` / `until` /
-// `command` のいずれかの制御構文プレフィックス（0 個以上）を許し、その
-// 直後に `gcloud` が来る行に限定する。`^\s*gcloud\b` のみに限定すると
-// `if ! gcloud ... keys delete` のような正当な行（現行のロールバック
-// cleanup）自体が対象外になり、将来 `if gcloud ...` 形で追加される
-// ガード外の削除も検知できない（codex-review P1 指摘）。
-// `echo`/`printf` によるユーザー向け案内文言（変数展開込みでも実行され
-// ない文字列）は、この位置に `gcloud` が来ないため自然に除外される。
-// `<KEY_ID>` プレースホルダを含む行は die メッセージ内の案内コマンド例
-// として別途除外する。
-const DELETE_INVOCATION_PREFIX_RE =
-  /^\s*(?:command\s+)?(?:if\s+|elif\s+|while\s+|until\s+)?!?\s*gcloud\b/
+// 「keys delete」を含む行のうち、実行され得ない行だけを除外し、それ以外は
+// すべて「実行行の候補」として扱う（fail-closed。除外条件に当てはまらない
+// 限り検査対象に含める）。
+//
+// 除外して良いのは以下の 2 パターンのみ（いずれも実行行になり得ないと
+// 静的に断定できる）:
+//   1. `<KEY_ID>` プレースホルダを含む行 — die メッセージ内の案内コマンド
+//      例で、実引数が存在しないため実行不能
+//   2. 行頭（インデント許容）が `echo` で始まる行 — ユーザー向け案内文言
+//      として文字列を出力するだけで、その文字列中の `gcloud ...` は実行
+//      されない
+//
+// 旧実装は逆に「行頭が if/elif/while/until/command の限定 prefix 直後に
+// gcloud が来る行」だけを実行行として拾っていたため、`env gcloud ...` や
+// 変数代入付き呼び出し（`FOO=bar gcloud ...`）、ラッパー関数経由の削除
+// （関数定義側の行はそもそも prefix 一致しない）を検査対象から除外して
+// しまっていた（codex-review P1 指摘）。除外条件を「実行不能と断定できる
+// 場合のみ」に絞ることで、認識できない削除呼び出し形式は候補から漏れず、
+// 後続のガード検証（isRollbackDelete / isGuardedByRecordedKeys）に必ず
+// 通過させ、いずれにも該当しなければ test を失敗させる。
+function isExcludableAsNonExecutable(line) {
+  if (line.includes('<KEY_ID>')) return true
+  if (/^\s*echo\b/.test(line)) return true
+  return false
+}
 
 function extractKeyDeleteExecLines(content) {
   return content
     .split('\n')
     .filter((line) => /iam\s+service-accounts\s+keys\s+delete\b/.test(line))
-    .filter((line) => !line.includes('<KEY_ID>'))
-    .filter((line) => DELETE_INVOCATION_PREFIX_RE.test(line))
+    .filter((line) => !isExcludableAsNonExecutable(line))
 }
 
 test('gcloud iam service-accounts keys delete の実行行が案内文言以外に最低限存在する（抽出ロジックの破損検知）', () => {
@@ -170,14 +181,45 @@ function isGuardedByRecordedKeys(lines, idx) {
   return false
 }
 
+// ロールバック判定: 削除対象引数が厳密に `"${rollback_key_name}"` である
+// ことを要求する（削除行に文字列 `rollback_key_name` が含まれるだけの
+// 単純な文字列一致だと、ガード外の削除行のコメント・案内文言などに同語を
+// 混ぜるだけで誤って PASS してしまう＝偽陰性経路になる。codex-review P1
+// 指摘）。加えて、その行が `cleanup()` 関数の本体内にあることも確認する。
+// cleanup() は今回発行した鍵のロールバック専用の関数であり、所有が実行
+// そのものに自明（同一実行内で発行した鍵）なため発行記録ガードを要しない
+// という前提は「cleanup() 内に限る」ことで初めて成り立つ。
+const ROLLBACK_DELETE_ARG_RE = /keys\s+delete\s+"\$\{rollback_key_name\}"(?:\s|\\|$)/
+
+function isWithinFunction(lines, idx, functionName) {
+  const startRe = new RegExp(`^${functionName}\\(\\)\\s*\\{\\s*$`)
+  let start = -1
+  for (let i = idx; i >= 0; i--) {
+    if (startRe.test(lines[i])) {
+      start = i
+      break
+    }
+  }
+  if (start === -1) return false
+  // 関数開始直後から idx までの間に、関数本体を閉じる行頭 `}` 単独行が
+  // 現れていないことを確認する（現れていれば idx は既に関数の外）。
+  for (let i = start + 1; i < idx; i++) {
+    if (/^\}\s*$/.test(lines[i])) return false
+  }
+  return true
+}
+
+function isRollbackDelete(lines, idx) {
+  return ROLLBACK_DELETE_ARG_RE.test(lines[idx]) && isWithinFunction(lines, idx, 'cleanup')
+}
+
 test('鍵削除の実行行はすべて発行記録の一致アーム内、またはロールバック cleanup 内に属する', () => {
   const lines = script.split('\n')
   const execLineIndexes = []
   lines.forEach((line, i) => {
     if (
       /iam\s+service-accounts\s+keys\s+delete\b/.test(line) &&
-      !line.includes('<KEY_ID>') &&
-      DELETE_INVOCATION_PREFIX_RE.test(line)
+      !isExcludableAsNonExecutable(line)
     ) {
       execLineIndexes.push(i)
     }
@@ -186,16 +228,11 @@ test('鍵削除の実行行はすべて発行記録の一致アーム内、ま�
   assert.ok(execLineIndexes.length > 0, '鍵削除の実行行が抽出できていない（抽出ロジックの破損の可能性）')
 
   for (const idx of execLineIndexes) {
-    // ロールバック判定: 削除対象が rollback_key_name（今回発行し、まだ
-    // Secret へ登録できていない鍵）を指している行。所有が実行そのものに
-    // 自明なため発行記録ガードを要しない。
-    const isRollbackDelete = lines[idx].includes('rollback_key_name')
-
     const inRecordedGuardArm = isGuardedByRecordedKeys(lines, idx)
 
     assert.ok(
-      isRollbackDelete || inRecordedGuardArm,
-      `ガード外（発行記録の一致アーム外）の鍵削除行を検出（行 ${idx + 1}）: ${lines[idx].trim()}`
+      isRollbackDelete(lines, idx) || inRecordedGuardArm,
+      `ガード外（発行記録の一致アーム内でも厳密な rollback_key_name 削除でもない）の鍵削除行を検出（行 ${idx + 1}）: ${lines[idx].trim()}`
     )
   }
 })
