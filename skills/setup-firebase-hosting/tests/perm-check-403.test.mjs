@@ -77,14 +77,26 @@ test('script の required_perms と SKILL.md 記載の必要権限が過不足�
     '退行: 単数形 required_perm=（1 権限しか検査しない旧実装）が再導入されている'
   )
 
-  const scriptMatch = scriptBody.match(/required_perms="([^"]+)"/)
-  assert.ok(scriptMatch, 'script から required_perms=\"...\" を抽出できなかった')
-  const scriptPerms = scriptMatch[1].trim().split(/\s+/).sort()
+  // .match() は最初のマッチしか返さないため、将来 2 つ目の
+  // `required_perms="..."` ブロックが追加されると比較対象が静かにずれる
+  // （テストが無自覚に無意味化する）。matchAll() で全マッチ数を先に検査し、
+  // ちょうど 1 件であることを保証してから中身を比較する。
+  const scriptMatches = [...scriptBody.matchAll(/required_perms="([^"]+)"/g)]
+  assert.equal(
+    scriptMatches.length,
+    1,
+    `script 内の required_perms="..." は 1 件のはずが ${scriptMatches.length} 件見つかった`
+  )
+  const scriptPerms = scriptMatches[0][1].trim().split(/\s+/).sort()
 
   const skillMd = readFileSync(SKILL_MD_PATH, 'utf8')
-  const skillMdMatch = skillMd.match(/"permissions":\[([^\]]+)\]/)
-  assert.ok(skillMdMatch, 'SKILL.md から permissions リストを抽出できなかった')
-  const skillMdPerms = skillMdMatch[1]
+  const skillMdMatches = [...skillMd.matchAll(/"permissions":\[([^\]]+)\]/g)]
+  assert.equal(
+    skillMdMatches.length,
+    1,
+    `SKILL.md 内の "permissions":[...] は 1 件のはずが ${skillMdMatches.length} 件見つかった`
+  )
+  const skillMdPerms = skillMdMatches[0][1]
     .split(',')
     .map((s) => s.trim().replace(/^"|"$/g, ''))
     .sort()
@@ -194,18 +206,24 @@ function setupScenario(permCheckBehavior) {
     TMPDIR: work,
   })
 
-  const result = spawnSync('bash', [join(scripts, 'bootstrap-firebase.sh')], {
-    env,
-    encoding: 'utf8',
-    timeout: 60_000,
-  })
-  assert.equal(result.error, undefined, `スクリプトの起動に失敗: ${result.error}`)
+  // 一時ディレクトリ（mkdtempSync 済みの root）のクリーンアップは、この後の
+  // readFileSync が例外を投げても必ず実行されるよう try/finally で保護する
+  // （姉妹ファイル key-deletion-authority.test.mjs と同じ方針）。
+  try {
+    const result = spawnSync('bash', [join(scripts, 'bootstrap-firebase.sh')], {
+      env,
+      encoding: 'utf8',
+      timeout: 60_000,
+    })
+    assert.equal(result.error, undefined, `スクリプトの起動に失敗: ${result.error}`)
 
-  const gcloudCallsPath = join(state, 'gcloud-calls.log')
-  const gcloudCalls = readFileSync(gcloudCallsPath, 'utf8')
+    const gcloudCallsPath = join(state, 'gcloud-calls.log')
+    const gcloudCalls = readFileSync(gcloudCallsPath, 'utf8')
 
-  rmSync(root, { recursive: true, force: true })
-  return { result, gcloudCalls }
+    return { result, gcloudCalls }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 }
 
 // 3 分岐を判別する固有文言（script L267-330）
