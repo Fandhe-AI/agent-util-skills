@@ -47,6 +47,12 @@
 //       （現行 Secret が指す可能性が高い鍵）は事前削除しない
 //   (f) ROTATE_EXISTING_KEYS=false: 削除が一切行われない（opt-out）
 //   (g) 上限だが記録にある鍵が無い: 何も削除せず fail-closed で停止する
+//   (h) 既存 SA に管理証跡（マーカー）が無い: 鍵削除・description 上書きの
+//       どちらにも進まず fail-closed で停止する（Issue #4 P0。email 完全一致
+//       だけを所有権の根拠にしない設計の中核）
+//   (i) (h) と同じ状況で ADOPT_EXISTING_SA=true: 明示採用として description を
+//       マーカーのみへ上書きし、採用時点で存在した鍵は発行記録に無いため削除
+//       されない（fail-safe）
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -203,7 +209,15 @@ const NOOP_SHIM = '#!/bin/sh\nexit 0\n'
 // 一時ディレクトリへスクリプトと shim を配置し、疑似 GCP 状態を初期化する。
 // scripts/ サブディレクトリへコピーするのは、スクリプトが project_root
 // （= scripts の親）へ .firebaserc を書くため。
-function setupScenario({ recordedKeyIds, existingKeyIds, failSecret = false, failDelete = false }) {
+function setupScenario({
+  recordedKeyIds,
+  existingKeyIds,
+  failSecret = false,
+  failDelete = false,
+  // true にすると description にマーカー行を書かず、シナリオ (h)/(i) の
+  // 「既存 SA に管理証跡が無い」状態を再現する。
+  noMarker = false,
+}) {
   const root = mkdtempSync(join(tmpdir(), 'key-deletion-authority-'))
   const bin = join(root, 'bin')
   const state = join(root, 'state')
@@ -224,7 +238,10 @@ function setupScenario({ recordedKeyIds, existingKeyIds, failSecret = false, fai
     chmodSync(path, 0o755)
   }
 
-  writeFileSync(join(state, 'description'), `${MARKER}${recordedKeyIds}\n`)
+  writeFileSync(
+    join(state, 'description'),
+    noMarker ? 'some-other-owner-description\n' : `${MARKER}${recordedKeyIds}\n`
+  )
   writeFileSync(
     join(state, 'keys'),
     existingKeyIds.map((id) => `${keyName(id)}\n`).join('')
@@ -456,6 +473,53 @@ test('鍵数上限で記録にある鍵が無い場合、何も削除せず停�
     assert.ok(r.stderr.includes('安全に削除できる鍵がありません'), r.stderr)
     // 10 鍵すべて残存する
     assert.equal(s.remainingKeys().length, 10)
+  } finally {
+    s.cleanup()
+  }
+})
+
+// --- シナリオ (h): 管理証跡が無い既存 SA は fail-closed --------------------
+
+test('既存 SA に管理証跡（マーカー）が無い場合、鍵削除にも description 上書きにも進まず停止する', () => {
+  const s = setupScenario({
+    recordedKeyIds: '',
+    existingKeyIds: ['foreign-key-1'],
+    noMarker: true,
+  })
+  try {
+    const r = s.run()
+    assert.notEqual(r.status, 0, '管理証跡が無い SA は fail-closed で停止するはず')
+    assert.ok(r.stderr.includes('ADOPT_EXISTING_SA'), r.stderr)
+    // update（description 上書き）にも delete にも一切進んでいない
+    assert.deepEqual(s.deleteAttempts(), [])
+    assert.deepEqual(s.deletions(), [])
+    assert.equal(s.description(), 'some-other-owner-description')
+    assert.deepEqual(s.remainingKeys(), [keyName('foreign-key-1')])
+  } finally {
+    s.cleanup()
+  }
+})
+
+// --- シナリオ (i): ADOPT_EXISTING_SA=true による明示採用 --------------------
+
+test('ADOPT_EXISTING_SA=true では既存 SA を採用し、採用時点の鍵は発行記録に無いため削除されない', () => {
+  const s = setupScenario({
+    recordedKeyIds: '',
+    existingKeyIds: ['foreign-key-1'],
+    noMarker: true,
+  })
+  try {
+    const r = s.run({ ADOPT_EXISTING_SA: 'true' })
+    assert.equal(r.status, 0, `採用後は正常終了するはず: ${r.stdout}\n${r.stderr}`)
+    // 採用時点の鍵は発行記録に無いので削除されない（fail-safe）。今回発行した
+    // 鍵は世代交代の対象外（記録にあるのは新鍵のみ）
+    assert.deepEqual(s.deletions(), [])
+    assert.deepEqual(s.remainingKeys().sort(), [keyName('foreign-key-1'), keyName(NEW_KEY_ID)].sort())
+    // description はマーカー + 新鍵 ID のみへ更新され、旧オーナーの記述は消える
+    assert.equal(s.description(), `${MARKER}${NEW_KEY_ID}`)
+    assert.ok(r.stdout.includes('採用します'), r.stdout)
+    // 記録外の foreign-key-1 が残るため、手動整理の警告が出る
+    assert.ok(r.stdout.includes(keyName('foreign-key-1')), r.stdout)
   } finally {
     s.cleanup()
   }
