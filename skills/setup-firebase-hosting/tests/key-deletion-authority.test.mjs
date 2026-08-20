@@ -20,10 +20,13 @@
 //      gh secret set の書き込みは許可）
 //   3. GCP 側記録アンカー（KEY_RECORD_MARKER）が定義され、SA description
 //      から発行記録（recorded_key_ids）を導出していること
-//   4. `gcloud iam service-accounts keys delete` として実行されるコマンド
-//      行が、(a) 発行記録ガード（`case ",${recorded_key_ids}," in` の内側）
-//      または (b) 今回発行した鍵のロールバック用 cleanup のいずれかに
-//      属すること（ガード外の削除経路が新設されていないか）
+//   4. `iam service-accounts keys delete` のすべての出現箇所が、
+//      (a) 案内文言（die/echo の文字列リテラル内、$( ) のネストを考慮して
+//      構造的に判定）、(b) 発行記録ガード（`case ",${recorded_key_ids}," in`
+//      の鍵 ID 一致アームに厳密に属する）、(c) 今回発行した鍵のロールバック
+//      （cleanup() 内かつ削除対象が厳密に "${rollback_key_name}"）の
+//      いずれか 1 つに分類できること（許可リスト方式。いずれにも分類でき
+//      ない出現＝ガード外の削除経路として fail-closed で失敗させる）
 //   5. 記録に無い鍵を削除しない fail-safe 分岐と、ROTATE_EXISTING_KEYS
 //      による opt-out 分岐が存在すること
 import { test } from 'node:test'
@@ -104,32 +107,6 @@ test('GCP 側記録アンカー（KEY_RECORD_MARKER）が定義され、SA descr
   )
 })
 
-// 「keys delete」を含む行のうち、実行され得ない行だけを除外し、それ以外は
-// すべて「実行行の候補」として扱う（fail-closed。除外条件に当てはまらない
-// 限り検査対象に含める）。
-//
-// 除外して良いのは以下の 2 パターンのみ（いずれも実行行になり得ないと
-// 静的に断定できる）:
-//   1. `<KEY_ID>` プレースホルダを含む行 — die メッセージ内の案内コマンド
-//      例で、実引数が存在しないため実行不能
-//   2. 行頭（インデント許容）が `echo` で始まる行 — ユーザー向け案内文言
-//      として文字列を出力するだけで、その文字列中の `gcloud ...` は実行
-//      されない
-//
-// 旧実装は逆に「行頭が if/elif/while/until/command の限定 prefix 直後に
-// gcloud が来る行」だけを実行行として拾っていたため、`env gcloud ...` や
-// 変数代入付き呼び出し（`FOO=bar gcloud ...`）、ラッパー関数経由の削除
-// （関数定義側の行はそもそも prefix 一致しない）を検査対象から除外して
-// しまっていた（codex-review P1 指摘）。除外条件を「実行不能と断定できる
-// 場合のみ」に絞ることで、認識できない削除呼び出し形式は候補から漏れず、
-// 後続のガード検証（isRollbackDelete / isGuardedByRecordedKeys）に必ず
-// 通過させ、いずれにも該当しなければ test を失敗させる。
-function isExcludableAsNonExecutable(line) {
-  if (line.includes('<KEY_ID>')) return true
-  if (/^\s*echo\b/.test(line)) return true
-  return false
-}
-
 // 行末バックスラッシュによる行継続を論理行へ結合する。`gcloud iam
 // service-accounts keys \` + 次行 `delete "${key_name}" ...` のように
 // `keys` と `delete` が物理行をまたいで分割されると、単純な行走査では
@@ -151,10 +128,107 @@ function buildLogicalLines(content) {
   return logical
 }
 
+// 「keys delete」の出現箇所を、実行不能と断定できる条件による**除外**では
+// なく、実行され得ない案内文言だと構造的に断定できる場合のみ拾う**許可
+// リスト**方式で判定する（fail-closed）。
+//
+// 以前は「行頭が echo で始まる」「行に <KEY_ID> を含む」という部分文字列・
+// 行 prefix ベースの除外を使っていたが、これは容易にすり抜けられる
+// （`echo ... && gcloud ... keys delete ...`・`echo "$(gcloud ... keys
+// delete ...)"` は行頭が echo でも実際に削除を実行する。コメントに
+// `<KEY_ID>` を足すだけでも実行可能な削除行を除外できてしまう。
+// codex-review P1 指摘）。
+//
+// 本スクリプトの案内文言（die/echo のメッセージ文字列）は必ず
+// `die "..."` / `echo "..."` という二重引用符で囲われた文字列リテラル
+// なので、対象の出現位置が「その文字列リテラルが開いてから閉じるまでの
+// 範囲内」にあるかどうかを、`$( ... )` によるコマンド置換のネストを
+// 考慮しながら実際に走査して判定する（`$(shq "${x}")` のように置換内部に
+// 二重引用符が現れても、それは外側の文字列を閉じない）。この判定を通った
+// 場合のみ「案内文言（非実行）」として扱い、それ以外はすべて実行行の
+// 候補として後続のガード検証に回す。
+function findEnclosingGuidanceString(lines, occLineIdx) {
+  for (let start = occLineIdx; start >= 0; start--) {
+    const openMatch = /^\s*(?:echo|die)\s+"/.exec(lines[start])
+    if (!openMatch) continue
+    const openCol = lines[start].indexOf('"')
+    let depth = 0
+    for (let i = start; i < lines.length; i++) {
+      const text = lines[i]
+      const fromCol = i === start ? openCol + 1 : 0
+      for (let ci = fromCol; ci < text.length; ci++) {
+        if (text[ci] === '$' && text[ci + 1] === '(') {
+          depth++
+          ci++
+          continue
+        }
+        if (text[ci] === ')' && depth > 0) {
+          depth--
+          continue
+        }
+        if (text[ci] === '"' && depth === 0) {
+          return { start, closeLine: i, closeCol: ci }
+        }
+      }
+    }
+    // 閉じ引用符に到達できなかった（不整形）。案内文言とは断定できない
+    // ため、ここでは扱わず候補として残す（fail-closed）。
+    return null
+  }
+  return null
+}
+
+// 文字列リテラルの範囲内であっても、`$( ... )` コマンド置換の内側は
+// 実際にシェルへ渡されて実行される（`echo "$(gcloud ... keys delete
+// ...)"` は置換結果を echo するだけでなく、置換自体として `gcloud ...
+// keys delete` を実際に実行する。codex-review P1 指摘）。そのため出現
+// 位置がガード文字列の範囲内でも、置換ネストの深さが 0（＝置換の外＝
+// 純粋な表示テキスト）である場合に限り「案内文言」として扱う。
+function guidanceStringDepthAt(lines, range, targetIdx, targetCol) {
+  let depth = 0
+  for (let i = range.start; i <= targetIdx; i++) {
+    const text = lines[i]
+    const fromCol = i === range.start ? lines[range.start].indexOf('"') + 1 : 0
+    const toCol = i === targetIdx ? targetCol : text.length
+    for (let ci = fromCol; ci < toCol; ci++) {
+      if (text[ci] === '$' && text[ci + 1] === '(') {
+        depth++
+        ci++
+        continue
+      }
+      if (text[ci] === ')' && depth > 0) {
+        depth--
+        continue
+      }
+    }
+  }
+  return depth
+}
+
+function isGuidanceOccurrence(lines, idx, matchCol) {
+  const range = findEnclosingGuidanceString(lines, idx)
+  if (!range) return false
+  if (idx < range.start || idx > range.closeLine) return false
+  if (idx === range.closeLine && matchCol >= range.closeCol) return false
+  if (guidanceStringDepthAt(lines, range, idx, matchCol) > 0) return false
+  return true
+}
+
+function findKeyDeleteOccurrences(lines) {
+  const DELETE_RE = /iam\s+service-accounts\s+keys\s+delete\b/
+  const occurrences = []
+  lines.forEach((line, i) => {
+    const m = DELETE_RE.exec(line)
+    if (m) occurrences.push({ idx: i, col: m.index })
+  })
+  return occurrences
+}
+
 function extractKeyDeleteExecLines(content) {
-  return buildLogicalLines(content)
-    .filter((line) => /iam\s+service-accounts\s+keys\s+delete\b/.test(line))
-    .filter((line) => !isExcludableAsNonExecutable(line))
+  const lines = buildLogicalLines(content)
+  return findKeyDeleteOccurrences(lines)
+    .filter(({ idx, col }) => !isGuidanceOccurrence(lines, idx, col))
+    .map(({ idx }) => lines[idx])
 }
 
 test('gcloud iam service-accounts keys delete の実行行が案内文言以外に最低限存在する（抽出ロジックの破損検知）', () => {
@@ -273,21 +347,19 @@ function isRollbackDelete(lines, idx) {
   return ROLLBACK_DELETE_ARG_RE.test(lines[idx]) && isWithinFunction(lines, idx, 'cleanup')
 }
 
-test('鍵削除の実行行はすべて発行記録の一致アーム内、またはロールバック cleanup 内に属する', () => {
+test('鍵削除の出現箇所はすべて「案内文言」「発行記録の一致アーム」「ロールバック cleanup」のいずれかに分類できる', () => {
   const lines = buildLogicalLines(script)
-  const execLineIndexes = []
-  lines.forEach((line, i) => {
-    if (
-      /iam\s+service-accounts\s+keys\s+delete\b/.test(line) &&
-      !isExcludableAsNonExecutable(line)
-    ) {
-      execLineIndexes.push(i)
-    }
-  })
+  const occurrences = findKeyDeleteOccurrences(lines)
 
-  assert.ok(execLineIndexes.length > 0, '鍵削除の実行行が抽出できていない（抽出ロジックの破損の可能性）')
+  assert.ok(occurrences.length > 0, '鍵削除の出現箇所が抽出できていない（抽出ロジックの破損の可能性）')
 
-  for (const idx of execLineIndexes) {
+  const execOccurrences = occurrences.filter(({ idx, col }) => !isGuidanceOccurrence(lines, idx, col))
+  assert.ok(
+    execOccurrences.length > 0,
+    '案内文言以外の鍵削除実行行が 1 件も抽出できていない（抽出ロジックの破損の可能性）'
+  )
+
+  for (const { idx } of execOccurrences) {
     const enclosingFn = enclosingFunctionName(lines, idx)
     assert.ok(
       enclosingFn === null || enclosingFn === 'cleanup',
