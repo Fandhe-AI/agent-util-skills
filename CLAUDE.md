@@ -21,11 +21,11 @@ skills/                               -- 本リポジトリが上流ソースと
                                          perm-check-403.test.mjs）
   create-pitch-deck/
     references/                       -- deck-spec.md（deck spec スキーマ）・concept-brief-schema.md（create-design-doc と共有）
-    samples/                          -- deck spec の JSON 例
+    samples/                          -- deck spec の JSON 例（screens/ に埋め込み用サンプル画像を含む）
     scripts/                          -- build_deck.py（spec→PPTX renderer）、validate_deck.py（はみ出し・フォント・必須スライド検証）
   create-design-doc/
     references/                       -- design-doc-structure.md・wireframe-guidelines.md・concept-brief-schema.md（create-pitch-deck と共有）
-    templates/                        -- flow-diagram-template.html・wireframe-template.html
+    templates/                        -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
     scripts/                          -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
 .agents/skills/                       -- vendored スキル（消費専用。npx skills update で同期・直接編集しない）
   comment-code/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/

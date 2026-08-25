@@ -45,18 +45,20 @@ npx skills add github:Fandhe-AI/agent-util-skills --all
 
 ### create-pitch-deck
 
-事業企画の専門家として、アイデア・要件文書から企画提案スライド（PPTX・16:9・Google スライド取込可）を生成する。「ピッチデック作って」「企画スライドにまとめて」「プレゼン資料作って」「勝ち筋を整理して」などで使用する。
+事業企画の専門家として、アイデア・要件文書から PO（プロダクトオーナー）承認会向け企画提案スライド（PPTX・16:9・Google スライド取込可）を生成する。「ピッチデック作って」「企画スライドにまとめて」「プレゼン資料作って」「承認会用の資料を作って」などで使用する。
 
-- 表紙 / 前提と解釈 / 課題 / 解決アプローチ / 対象範囲（In/Out） / 勝ち筋 / 利用ストーリー / 検証計画・現在地 / フィードバック観点の 9 枚固定構成
+- 前半（前提と解釈・課題・解決アプローチ・対象範囲・勝ち筋）→後半（画面と操作の流れ・検証計画・承認いただきたい事項）の 10〜14 枚可変構成
+- 「画面と操作の流れ」（`screen_flow`、2〜4枚）は `create-design-doc` が生成した storyboard/screenshot を画像として取り込み、シナリオの場面ごとに「この画面がこう使われる」を説明する
 - `scripts/build_deck.py` が deck spec（JSON）から python-pptx で PPTX を生成し、`scripts/validate_deck.py` がスライド境界のはみ出し・日本語フォント fallback（`a:latin`/`a:ea`）・必須スライド配置を機械検証する
-- `create-design-doc` と共有合意文書 `concept-brief.md` を介して整合し、事業企画とデザイン設計の食い違いを防ぐ
+- `create-design-doc` と共有合意文書 `concept-brief.md` を介して整合し、事業企画とデザイン設計の食い違いを防ぐ（推奨実行順序: `create-design-doc` → `create-pitch-deck`）
 - 詳細は [skills/create-pitch-deck/SKILL.md](skills/create-pitch-deck/SKILL.md)、deck spec の仕様は `references/deck-spec.md` を参照
 
 ### create-design-doc
 
-UX/UI デザイナーの専門家として、アイデア・要件文書から UI/UX 設計資料一式（design-doc.md・画面遷移図・HTML ワイヤーフレーム・PC/モバイルスクリーンショット）を生成する。「UI設計して」「ワイヤーフレーム作って」「画面遷移図作って」などで使用する。
+UX/UI デザイナーの専門家として、アイデア・要件文書から UI/UX 設計資料一式（design-doc.md・画面遷移図・ストーリーボード・HTML ワイヤーフレーム・PC/モバイルスクリーンショット）を生成する。「UI設計して」「ワイヤーフレーム作って」「画面遷移図作って」「PO承認会用の画面説明資料を作って」などで使用する。
 
-- Figma ではなく自己完結 HTML ワイヤーフレームを採用し、Playwright（Chromium）でスクリーンショット・画面遷移図の PNG を生成する
+- 主役成果物は `storyboard.png`（縦長1枚。主要シナリオの流れに沿って各画面のスクリーンショット・表示要素の日本語説明・遷移条件を並べる）。`wireframes/*.html` / `screens/*.png` は実装用素材、`flow.png` は画面遷移の全体俯瞰という役割分担
+- Figma ではなく自己完結 HTML ワイヤーフレームを採用し、Playwright（Chromium）でスクリーンショット・画面遷移図・ストーリーボードの PNG を生成する
 - `scripts/check_overflow.py` が PC/モバイル双方の横スクロール崩れ・外部 CDN 依存の有無を機械検証する
 - `create-pitch-deck` と共有合意文書 `concept-brief.md` を介して整合する
 - 詳細は [skills/create-design-doc/SKILL.md](skills/create-design-doc/SKILL.md) を参照
@@ -79,12 +81,12 @@ skills/                                -- 本リポジトリが上流ソース�
   create-pitch-deck/
     SKILL.md                           -- 事業企画の専門家として deck spec（JSON）から企画提案 PPTX を生成
     references/                        -- deck-spec.md・concept-brief-schema.md（create-design-doc と共有）
-    samples/                           -- deck spec の JSON 例
+    samples/                           -- deck spec の JSON 例（screens/ に埋め込み用サンプル画像を含む）
     scripts/                           -- build_deck.py（spec→PPTX renderer）、validate_deck.py（はみ出し・フォント・必須スライド検証）
   create-design-doc/
     SKILL.md                           -- UX/UI デザイナーの専門家として design-doc.md・画面遷移図・HTML ワイヤーフレーム・スクショを生成
     references/                        -- design-doc-structure.md・wireframe-guidelines.md・concept-brief-schema.md（create-pitch-deck と共有）
-    templates/                         -- flow-diagram-template.html・wireframe-template.html
+    templates/                         -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
     scripts/                           -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
 .agents/skills/                        -- vendored スキル（消費専用・編集は上流で）
   <開発ワークフロー20件>                 -- Fandhe-AI/agent-cli-skills から日次同期
