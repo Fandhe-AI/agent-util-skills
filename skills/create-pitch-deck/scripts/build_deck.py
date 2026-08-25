@@ -2,8 +2,12 @@
 """deck spec (JSON) から 16:9 の企画提案スライド (PPTX) を生成する renderer。
 
 役割: report spec -> HTML の create-html-report/scripts/render_report.py と対になる
-存在。座標計算・フォント設定 (a:latin と a:ea の両方) は本スクリプトの責務とし、
-呼び出し側 (SKILL.md の手順) は spec の内容判断にのみ集中できるようにする。
+存在。座標計算・フォント設定 (a:latin と a:ea の両方)・画像はめ込みは本スクリプトの
+責務とし、呼び出し側 (SKILL.md の手順) は spec の内容判断にのみ集中できるようにする。
+
+スライド構成（PO 承認会向け）: 前半 = 課題・解決アプローチ・スコープ・勝ち筋、
+後半 = 画面と操作の流れ（screen_flow, 2〜4枚。create-design-doc の storyboard/
+screens 画像を取り込む）→ 検証計画 → 承認いただきたい事項＋確認事項。
 
 依存: python-pptx (標準ライブラリ外。venv へインストールしてから実行する)
 """
@@ -24,24 +28,22 @@ try:
 except ImportError:
     print(
         "python-pptx が見つからない。venv を作成し `pip install python-pptx` を"
-        "実行してから再実行すること（SKILL.md の Step 3 参照）。",
+        "実行してから再実行すること（SKILL.md の Step 5 参照）。",
         file=sys.stderr,
     )
     sys.exit(1)
 
-REQUIRED_ROLE_ORDER = [
-    "cover",
-    "premise",
-    "problem",
-    "solution",
-    "scope",
-    "winning",
-    "story",
-    "validation",
-    "feedback",
-]
-FEEDBACK_ITEM_MIN = 3
-FEEDBACK_ITEM_MAX = 5
+# 前半（固定・この順序）: 課題認識から勝ち筋まで
+FRONT_HALF_ROLES = ["cover", "premise", "problem", "solution", "scope", "winning"]
+# 後半固定末尾（screen_flow の直後、この順序・この2枚で終わること）
+BACK_HALF_TAIL_ROLES = ["validation", "approval"]
+SCREEN_FLOW_ROLE = "screen_flow"
+SCREEN_FLOW_MIN = 2
+SCREEN_FLOW_MAX = 4
+
+APPROVAL_ITEM_MIN = 3
+APPROVAL_ITEM_MAX = 5
+APPROVAL_KINDS = {"承認", "確認"}
 WINNING_LABELS = {"事実", "仮説"}
 
 DEFAULT_BRAND = {
@@ -75,31 +77,42 @@ def load_spec(path: Path) -> dict:
 
 
 def validate_spec(spec: dict) -> None:
-    """generate 前の構造チェック。前提と解釈・フィードバック観点の必須要件を含む。"""
+    """generate 前の構造チェック。
+
+    構成契約: 前半 [cover, premise, problem, solution, scope, winning]
+    （この順・各1枚）→ screen_flow 2〜4枚（連続） → [validation, approval]
+    （この順・各1枚、これで終わること）。
+    """
     slides = spec.get("slides")
     if not isinstance(slides, list) or not slides:
         raise SpecError("spec.slides は 1 件以上の配列であること")
 
     roles = [s.get("role") for s in slides if isinstance(s, dict)]
-    missing = [r for r in REQUIRED_ROLE_ORDER if r not in roles]
-    if missing:
-        raise SpecError(f"必須スライド role が不足: {missing}")
 
-    dup = {r for r in roles if roles.count(r) > 1}
-    if dup:
-        raise SpecError(f"role が重複している（各 role は1枚のみ）: {sorted(dup)}")
-
-    if roles[0] != "cover":
-        raise SpecError("1枚目は role=cover であること")
-    if roles[1] != "premise":
+    prefix = roles[: len(FRONT_HALF_ROLES)]
+    if prefix != FRONT_HALF_ROLES:
         raise SpecError(
-            "2枚目は role=premise（前提と解釈）であること。"
-            "入力文書からの解釈をスライド冒頭で明示する契約のため"
+            f"前半 {len(FRONT_HALF_ROLES)}枚は role={FRONT_HALF_ROLES} の順であること"
+            f"（現在: {prefix}）"
         )
-    if roles[-1] != "feedback":
+
+    idx = len(FRONT_HALF_ROLES)
+    n_flow = 0
+    while idx < len(roles) and roles[idx] == SCREEN_FLOW_ROLE:
+        n_flow += 1
+        idx += 1
+    if not (SCREEN_FLOW_MIN <= n_flow <= SCREEN_FLOW_MAX):
         raise SpecError(
-            "最終スライドは role=feedback（フィードバック観点）であること。"
-            "期待値ずれ検出のための必須要件"
+            f"role={SCREEN_FLOW_ROLE}（画面と操作の流れ）は"
+            f"{SCREEN_FLOW_MIN}〜{SCREEN_FLOW_MAX}枚連続で配置すること"
+            f"（現在 {n_flow}枚）。PO 承認会でシナリオごとに画面の使われ方を説明する枠"
+        )
+
+    suffix = roles[idx:]
+    if suffix != BACK_HALF_TAIL_ROLES:
+        raise SpecError(
+            f"role={SCREEN_FLOW_ROLE} の直後は role={BACK_HALF_TAIL_ROLES} の順で"
+            f"終わること（現在: {suffix}）"
         )
 
     for slide in slides:
@@ -126,29 +139,45 @@ def validate_spec(spec: dict) -> None:
                 if label not in WINNING_LABELS:
                     raise SpecError(
                         "winning.items の各要素は label に "
-                        f"{sorted(WINNING_LABELS)} のいずれかを指定すること"
-                        "（文書に根拠がない主張は '仮説' と明示する契約）"
+                        f"{sorted(WINNING_LABELS)} のいずれかを指定すること。"
+                        "'事実' は入力文書に記録された実測・調査結果に限る"
+                        "（留保がある場合は text に併記する）。それ以外は '仮説'"
                     )
-        elif role == "story":
-            steps = slide.get("steps")
-            if not isinstance(steps, list) or not steps:
-                raise SpecError("role=story に steps (1件以上) が必要")
-            for step in steps:
-                if not isinstance(step, dict) or not step.get("title"):
-                    raise SpecError("story.steps の各要素は title を持つこと")
-        elif role == "feedback":
+        elif role == SCREEN_FLOW_ROLE:
+            narrative = slide.get("narrative")
+            if not narrative or not isinstance(narrative, str):
+                raise SpecError(
+                    f"role={SCREEN_FLOW_ROLE} に narrative (string) が必要。"
+                    "「この場面で・この画面が・こう使われる」を説明する文"
+                )
+            image = slide.get("image")
+            if image is not None and not isinstance(image, str):
+                raise SpecError(f"role={SCREEN_FLOW_ROLE}.image は string か null であること")
+            if not image:
+                note = slide.get("note")
+                if not note or not isinstance(note, str):
+                    raise SpecError(
+                        f"role={SCREEN_FLOW_ROLE} で image が無い場合は note (string) が必要。"
+                        "例: 'create-design-doc 未実行のためテキスト概略のみ'"
+                    )
+        elif role == "approval":
             items = slide.get("items")
             if not isinstance(items, list):
-                raise SpecError("role=feedback に items (配列) が必要")
-            if not (FEEDBACK_ITEM_MIN <= len(items) <= FEEDBACK_ITEM_MAX):
+                raise SpecError("role=approval に items (配列) が必要")
+            if not (APPROVAL_ITEM_MIN <= len(items) <= APPROVAL_ITEM_MAX):
                 raise SpecError(
-                    "role=feedback の items は"
-                    f"{FEEDBACK_ITEM_MIN}〜{FEEDBACK_ITEM_MAX}件であること"
+                    "role=approval の items は"
+                    f"{APPROVAL_ITEM_MIN}〜{APPROVAL_ITEM_MAX}件であること"
                     f"（現在 {len(items)}件）"
                 )
             for item in items:
-                if not isinstance(item, str) or not item.strip():
-                    raise SpecError("feedback.items の各要素は非空文字列であること")
+                if not isinstance(item, dict) or not item.get("text"):
+                    raise SpecError("approval.items の各要素は text を持つこと")
+                if item.get("kind") not in APPROVAL_KINDS:
+                    raise SpecError(
+                        f"approval.items の各要素は kind に {sorted(APPROVAL_KINDS)} の"
+                        "いずれかを指定すること"
+                    )
 
 
 def _require_str_list(slide: dict, key: str, role: str, min_len: int = 1) -> None:
@@ -213,6 +242,24 @@ def add_rect(slide, left, top, width, height, fill_hex):
     return shape
 
 
+def add_picture_fit(slide, path, left, top, max_w, max_h):
+    """画像を (max_w, max_h) の枠内にアスペクト比を保ったまま収めて配置する。
+
+    Pillow に依存せず python-pptx 自身のネイティブサイズ計算だけで完結させる:
+    まず width 基準で仮配置して自然な height を得る。height が枠を超える場合
+    （storyboard.png のような縦長画像）は一度削除し height 基準で再配置する
+    （結果の width は枠内に収まることが幅と高さの比の性質上保証される）。
+    """
+    pic = slide.shapes.add_picture(path, Inches(left), Inches(top), width=Inches(max_w))
+    if pic.height > Inches(max_h):
+        pic._element.getparent().remove(pic._element)  # noqa: SLF001
+        pic = slide.shapes.add_picture(path, Inches(left), Inches(top), height=Inches(max_h))
+    # 枠内で中央寄せする
+    pic.left = Inches(left) + (Inches(max_w) - pic.width) // 2
+    pic.top = Inches(top) + (Inches(max_h) - pic.height) // 2
+    return pic
+
+
 def add_title_bar(slide, title, brand, subtitle=None):
     """cover 以外の全スライド共通のヘッダー（アクセントバー + タイトル）。"""
     add_rect(slide, 0, 0, SLIDE_W_IN, 0.12, brand["primary"])
@@ -226,7 +273,7 @@ def add_title_bar(slide, title, brand, subtitle=None):
 def add_footer(slide, index, total, brand, deck_title):
     _, tf = add_textbox(slide, 0.6, SLIDE_H_IN - 0.45, SLIDE_W_IN - 1.6, 0.35)
     add_paragraph_text(tf, deck_title, brand, size=9, color=brand["muted"], first=True)
-    _, page_tf = add_textbox(slide, SLIDE_W_IN - 1.0, SLIDE_H_IN - 0.45, 0.6, 0.35, align_right := None)
+    _, page_tf = add_textbox(slide, SLIDE_W_IN - 1.0, SLIDE_H_IN - 0.45, 0.6, 0.35)
     page_tf.paragraphs[0].alignment = PP_ALIGN.RIGHT
     add_paragraph_text(page_tf, f"{index}/{total}", brand, size=9, color=brand["muted"], first=True)
 
@@ -303,38 +350,53 @@ def build_winning(prs, slide_spec, brand):
     return slide
 
 
-def build_story(prs, slide_spec, brand):
+def build_screen_flow(prs, slide_spec, brand):
+    """「画面と操作の流れ」スライド。左に画面画像（storyboard/screens 由来）、
+    右にナラティブ（この場面で・この画面が・こう使われる）。画像が無い場合は
+    テキスト概略＋注記のみで構成する（create-design-doc 未実行時）。
+    """
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_title_bar(slide, slide_spec["title"], brand)
-    steps = slide_spec["steps"]
-    n = len(steps)
-    gap = 0.3
-    box_w = (SLIDE_W_IN - 1.2 - gap * (n - 1)) / n
-    top = 1.8
-    box_h = SLIDE_H_IN - top - 0.7
-    for i, step in enumerate(steps):
-        left = 0.6 + i * (box_w + gap)
-        add_rect(slide, left, top, box_w, box_h, brand["surface"])
-        _, num_tf = add_textbox(slide, left + 0.15, top + 0.1, box_w - 0.3, 0.5)
-        add_paragraph_text(num_tf, f"STEP {i + 1}", brand, size=12, bold=True, color=brand["primary"], first=True)
-        _, title_tf = add_textbox(slide, left + 0.15, top + 0.55, box_w - 0.3, 0.6)
-        add_paragraph_text(title_tf, step["title"], brand, size=15, bold=True, color=brand["text"], first=True)
-        desc = step.get("desc")
-        if desc:
-            _, desc_tf = add_textbox(slide, left + 0.15, top + 1.15, box_w - 0.3, box_h - 1.3)
-            add_paragraph_text(desc_tf, desc, brand, size=12, color=brand["muted"], first=True)
+
+    image = slide_spec.get("image")
+    top = 1.6
+    bottom_margin = 0.7
+    box_h = SLIDE_H_IN - top - bottom_margin
+    image_w = 5.0
+    gap = 0.4
+    narrative_left = 0.6 + image_w + gap
+    narrative_w = SLIDE_W_IN - narrative_left - 0.6
+
+    if image:
+        add_rect(slide, 0.6, top, image_w, box_h, brand["surface"])
+        add_picture_fit(slide, image, 0.6 + 0.1, top + 0.1, image_w - 0.2, box_h - 0.2)
+    else:
+        add_rect(slide, 0.6, top, image_w, box_h, brand["surface"])
+        _, note_tf = add_textbox(slide, 0.8, top, image_w - 0.4, box_h, anchor=MSO_ANCHOR.MIDDLE)
+        add_paragraph_text(
+            note_tf, slide_spec.get("note", ""), brand, size=13, color=brand["muted"],
+            align=PP_ALIGN.CENTER, first=True,
+        )
+        narrative_left = 0.6 + image_w + gap
+
+    _, narrative_tf = add_textbox(slide, narrative_left, top, narrative_w, box_h)
+    add_paragraph_text(
+        narrative_tf, slide_spec["narrative"], brand, size=16, color=brand["text"], first=True,
+    )
     return slide
 
 
-def build_feedback(prs, slide_spec, brand):
+def build_approval(prs, slide_spec, brand):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_rect(slide, 0, 0, SLIDE_W_IN, SLIDE_H_IN, brand["secondary"])
     _, title_tf = add_textbox(slide, 0.6, 0.5, SLIDE_W_IN - 1.2, 0.9)
     add_paragraph_text(title_tf, slide_spec["title"], brand, size=28, bold=True, color="#FFFFFF", first=True)
     _, tf = add_textbox(slide, 0.6, 1.6, SLIDE_W_IN - 1.2, SLIDE_H_IN - 2.3)
-    for i, text in enumerate(slide_spec["items"]):
-        add_paragraph_text(tf, f"{i + 1}. {text}", brand, size=18, color="#FFFFFF", first=(i == 0))
-        if i < len(slide_spec["items"]) - 1:
+    items = slide_spec["items"]
+    for i, item in enumerate(items):
+        text = f"{i + 1}. [{item['kind']}] {item['text']}"
+        add_paragraph_text(tf, text, brand, size=18, color="#FFFFFF", first=(i == 0))
+        if i < len(items) - 1:
             tf.paragraphs[-1].space_after = Pt(12)
     return slide
 
@@ -346,9 +408,9 @@ BUILDERS = {
     "solution": build_bullets_slide,
     "scope": build_scope,
     "winning": build_winning,
-    "story": build_story,
+    "screen_flow": build_screen_flow,
     "validation": build_bullets_slide,
-    "feedback": None,  # 個別処理
+    "approval": None,  # 個別処理
 }
 
 
@@ -367,8 +429,8 @@ def build_deck(spec: dict, output: Path) -> None:
         if role == "cover":
             build_cover(prs, slide_spec, brand, spec)
             continue
-        if role == "feedback":
-            build_feedback(prs, slide_spec, brand)
+        if role == "approval":
+            build_approval(prs, slide_spec, brand)
             continue
         builder = BUILDERS[role]
         slide = builder(prs, slide_spec, brand)

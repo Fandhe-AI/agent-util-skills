@@ -3,8 +3,8 @@
 
 役割と境界:
 - build_deck.py（または手直しした pptx）の出力が SKILL.md の契約
-  （はみ出しなし / 日本語フォント fallback / 前提と解釈・フィードバック観点の
-  必須配置）を満たすかを、生成された .pptx ファイルそのものから検証する。
+  （はみ出しなし / 日本語フォント fallback / 前提と解釈・承認事項の必須配置）を
+  満たすかを、生成された .pptx ファイルそのものから検証する。
   create-html-report/scripts/validate_report.py と同じく、spec ではなく
   「出力された成果物」を検証対象にする（spec を信頼しない）。
 - 検証のみを行い、ファイルの修正は行わない。
@@ -31,10 +31,10 @@ except ImportError:
     )
     sys.exit(1)
 
-MIN_SLIDES = 8
+MIN_SLIDES = 10
 MAX_SLIDES = 14
-FEEDBACK_ITEM_MIN = 3
-FEEDBACK_ITEM_MAX = 5
+APPROVAL_ITEM_MIN = 3
+APPROVAL_ITEM_MAX = 5
 NUMBERED_ITEM_RE = re.compile(r"^\s*\d+\.\s*\S")
 
 
@@ -49,7 +49,7 @@ def check_slide_count(prs, failures):
     n = len(prs.slides)
     if not (MIN_SLIDES <= n <= MAX_SLIDES):
         failures.append(
-            f"スライド枚数が範囲外: {n}枚（想定 {MIN_SLIDES}〜{MAX_SLIDES}枚 = 10枚前後）"
+            f"スライド枚数が範囲外: {n}枚（想定 {MIN_SLIDES}〜{MAX_SLIDES}枚）"
         )
 
 
@@ -117,21 +117,21 @@ def check_premise_slide(prs, failures):
         failures.append("2枚目（前提と解釈スライド）に「前提」という語が含まれない")
 
 
-def check_feedback_slide(prs, failures):
+def check_approval_slide(prs, failures):
     slides = list(prs.slides)
     if not slides:
-        failures.append("スライドが0枚で「フィードバック観点」スライドを検証できない")
+        failures.append("スライドが0枚で「承認いただきたい事項」スライドを検証できない")
         return
     last = slides[-1]
     text = slide_text(last)
-    if "フィードバック" not in text:
-        failures.append("最終スライドに「フィードバック」という語が含まれない")
+    if "承認" not in text:
+        failures.append("最終スライドに「承認」という語が含まれない")
         return
     items = [line for line in text.splitlines() if NUMBERED_ITEM_RE.match(line)]
-    if not (FEEDBACK_ITEM_MIN <= len(items) <= FEEDBACK_ITEM_MAX):
+    if not (APPROVAL_ITEM_MIN <= len(items) <= APPROVAL_ITEM_MAX):
         failures.append(
-            "最終スライドの番号付きフィードバック観点が"
-            f"{FEEDBACK_ITEM_MIN}〜{FEEDBACK_ITEM_MAX}件の範囲外（検出 {len(items)}件）"
+            "最終スライドの番号付き承認・確認事項が"
+            f"{APPROVAL_ITEM_MIN}〜{APPROVAL_ITEM_MAX}件の範囲外（検出 {len(items)}件）"
         )
 
 
@@ -152,7 +152,7 @@ def main() -> int:
     check_bounds(prs, failures)
     check_fonts(prs, failures)
     check_premise_slide(prs, failures)
-    check_feedback_slide(prs, failures)
+    check_approval_slide(prs, failures)
 
     if failures:
         print(f"FAIL: {len(failures)}件の問題を検出")
