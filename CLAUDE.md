@@ -4,12 +4,12 @@ This file provides guidance to Claude Code（claude.ai/code）when working with 
 
 ## Overview
 
-Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
+Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、加えて `create-pitch-deck`（企画提案スライド生成）と `create-design-doc`（UI/UX 設計資料生成）を新規開発して、合わせて 4 スキルを本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
 
 ## Repository Structure
 
 ```text
-skills/                               -- 本リポジトリが上流ソースとして管理する 2 スキル（各ディレクトリに SKILL.md）
+skills/                               -- 本リポジトリが上流ソースとして管理する 4 スキル（各ディレクトリに SKILL.md）
   create-html-report/
     references/                       -- chart 選定・レポート設計・spec schema・a11y/セキュリティ規約
     samples/                          -- report spec の JSON 例（comparison / gantt / time-series）
@@ -19,6 +19,14 @@ skills/                               -- 本リポジトリが上流ソースと
     tests/                            -- firebase-tools バージョン固定（version-pin.test.mjs）・SA 鍵削除範囲
                                          と 403 全権限検査の回帰テスト（key-deletion-authority.test.mjs /
                                          perm-check-403.test.mjs）
+  create-pitch-deck/
+    references/                       -- deck-spec.md（deck spec スキーマ）・concept-brief-schema.md（create-design-doc と共有）
+    samples/                          -- deck spec の JSON 例
+    scripts/                          -- build_deck.py（spec→PPTX renderer）、validate_deck.py（はみ出し・フォント・必須スライド検証）
+  create-design-doc/
+    references/                       -- design-doc-structure.md・wireframe-guidelines.md・concept-brief-schema.md（create-pitch-deck と共有）
+    templates/                        -- flow-diagram-template.html・wireframe-template.html
+    scripts/                          -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
 .agents/skills/                       -- vendored スキル（消費専用。npx skills update で同期・直接編集しない）
   comment-code/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/
   implement-issue/ implement-issue-tree/ implement-review/ implement-review-pr/ init-claude/
@@ -61,6 +69,8 @@ skills-lock.json                      -- vendored スキルの source・skillPat
   skills/                             -- skills/ と .agents/skills/ へのシンボリックリンク集約
     create-html-report                -- 自前スキル（symlink: ../../skills/create-html-report）
     setup-firebase-hosting            -- 自前スキル（symlink: ../../skills/setup-firebase-hosting）
+    create-pitch-deck                 -- 自前スキル（symlink: ../../skills/create-pitch-deck）
+    create-design-doc                 -- 自前スキル（symlink: ../../skills/create-design-doc）
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
     (他 create-commit 等は .agents/skills/ への symlink)
@@ -155,9 +165,9 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 
 ## Current Skills
 
-### 自前管理スキル（2件・skills/ に配置）
+### 自前管理スキル（4件・skills/ に配置）
 
-create-html-report, setup-firebase-hosting
+create-html-report, setup-firebase-hosting, create-pitch-deck, create-design-doc
 
 ### リポジトリ管理スキル（.claude/skills/ に配置）
 
@@ -186,7 +196,7 @@ vendored スキルは `.github/workflows/update-external.yml` の日次同期で
 
 ### セキュリティレビュー
 
-`skills/create-html-report`・`skills/setup-firebase-hosting` の修正時は OWASP Top 10・ハードコードされた秘密情報・XSS・コマンドインジェクション・入力バリデーションを必須チェックする。セキュリティ問題がある場合はマージをブロックする。
+`skills/create-html-report`・`skills/setup-firebase-hosting`・`skills/create-pitch-deck`・`skills/create-design-doc` の修正時は OWASP Top 10・ハードコードされた秘密情報・XSS・コマンドインジェクション・入力バリデーションを必須チェックする。セキュリティ問題がある場合はマージをブロックする。
 
 ### 日本語出力
 
