@@ -22,7 +22,7 @@ skills/                               -- 本リポジトリが上流ソースと
   create-pitch-deck/
     references/                       -- deck-spec.md（deck spec スキーマ）・concept-brief-schema.md（create-design-doc と共有）
     samples/                          -- deck spec の JSON 例（screens/ に埋め込み用サンプル画像を含む）
-    scripts/                          -- build_deck.py（spec→PPTX renderer）、validate_deck.py（はみ出し・フォント・必須スライド検証）
+    scripts/                          -- build_slides.py（spec→自己完結 HTML renderer）、validate_slides.py（Playwright によるはみ出し・自己完結性・inline JS 安全性・必須スライド検証、全スライド PNG 撮影）
   create-design-doc/
     references/                       -- design-doc-structure.md・wireframe-guidelines.md・concept-brief-schema.md（create-pitch-deck と共有）
     templates/                        -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
