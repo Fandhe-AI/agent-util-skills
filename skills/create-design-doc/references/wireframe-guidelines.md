@@ -3,6 +3,15 @@
 `wireframes/*.html` を作成する際の規約。`templates/wireframe-template.html` をコピーして
 使う。
 
+## 位置づけ（レビューの主役ではない）
+
+`wireframes/*.html` と `screens/*.png` は**実装用素材**として存続する（実装フェーズでの
+そのまま流用・詳細な状態確認に使う）。**レビュー（PO 承認会・フィードバック取得）の主役は
+`storyboard.png`**（[design-doc-structure.md](design-doc-structure.md) 参照）であり、
+wireframes は storyboard を組み立てるための部品という位置づけになる。ユーザーに提示する際は
+まず storyboard.png を見せ、実装詳細を確認したい場合のみ個別の wireframe/screenshot を参照
+する、という順で案内する。
+
 ## 必須要件
 
 - **自己完結**: 外部 CDN・外部フォント・外部画像・外部 JavaScript library を使用しない。
@@ -25,6 +34,24 @@
 - 主要な状態（空・読込中・エラー・正常）をコメントまたは別ブロックで示す
 - 主要操作の遷移先（例: 「クリックで詳細画面へ」）をコメントで示す
 - アクセシビリティの基本（見出し階層・フォーカス可能な操作要素の視認性）を損なわない
+
+## position: sticky / fixed を使わない
+
+下部ナビ等を `position: sticky` / `fixed` にすると、Playwright の full-page screenshot は
+撮影時に viewport 高さを一時的に拡張して撮るため、sticky/fixed 要素が文書の実際の末尾では
+なく元の viewport 高さの位置に取り残され、キャプチャ結果でナビが中途半端な高さに浮いて
+見える不具合が実走で確認されている。下部ナビ等は通常フロー内の静的配置にする
+（`templates/wireframe-template.html` 参照）。
+
+## モバイルスクリーンショットの目視確認観点
+
+`check_overflow.py` は横スクロールの有無しか機械検証できない。PASS した後も、モバイル
+（375px）のスクリーンショットを必ず目視し、以下を確認する。
+
+- `position: sticky` / `fixed` を使った要素が意図しない高さに浮いていないか（上記参照）
+- テキストの折り返しで文字が重なったり、ボタン内の文字がはみ出したりしていないか
+- カード・テーブル等が極端に潰れて崩れていないか（表は横スクロール用ラッパーで囲む等）
+- タップ対象（ボタン・リンク）が隣接要素と密着しすぎていないか
 
 ## Figma ではなく HTML を採用する理由（再掲）
 

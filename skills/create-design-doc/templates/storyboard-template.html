@@ -1,0 +1,162 @@
+<!doctype html>
+<!--
+  ストーリーボード（レビューの主役）テンプレート。
+  主要ユーザーシナリオの遷移順に、フェーズ見出しで区切りながら
+  「①画面のスクリーンショット ②画面名と目的 ③表示要素の日本語説明
+  ④次画面への遷移条件」を縦に並べた 1 枚もの。
+
+  画面の埋め込みは iframe ではなく、既に撮影済みの screens/*.png を
+  <img src="..."> で参照する（スクショ画像埋め込み方式）。
+  wireframes/*.html の markup をそのままインライン結合すると、各画面の
+  :root デザイントークンが衝突し、@media (max-width: 480px) がストーリー
+  ボード自体の viewport 幅に対して発火してしまうため採用しない
+  （wireframe 単体の responsive 挙動と一致しなくなる）。
+
+  相対パスの画像参照（例: screens/xxx-desktop.png）は自己完結契約
+  （外部 CDN 禁止）には抵触しない。https:// 等の外部 URL のみ禁止。
+
+  検証: scripts/check_overflow.py storyboard.html
+  Playwright で PNG 化（縦長 full-page）:
+    scripts/capture_screenshot.py --html storyboard.html --out storyboard.png --width 1000 --full-page
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ストーリーボード</title>
+<style>
+  :root {
+    --color-bg: #ffffff;
+    --color-surface: #f4f6f8;
+    --color-fg: #1c1c1c;
+    --color-muted: #5b6470;
+    --color-border: #d8dee6;
+    --color-primary: #1f3a93;
+    --color-primary-contrast: #ffffff;
+    --space-sm: 8px;
+    --space-md: 16px;
+    --space-lg: 24px;
+    --radius-md: 8px;
+    --font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: var(--space-lg);
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-family);
+    max-width: 1000px;
+  }
+  h1 { font-size: 20px; margin: 0 0 var(--space-lg); }
+
+  /* フェーズ見出し: シナリオの局面（例: 条件確定 → 合意 → 監視 → 保全）で区切る */
+  .phase {
+    margin-bottom: var(--space-lg);
+  }
+  .phase-title {
+    background: var(--color-primary);
+    color: var(--color-primary-contrast);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    display: inline-block;
+    margin: 0 0 var(--space-md);
+  }
+
+  .step {
+    display: flex;
+    gap: var(--space-md);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-md);
+    margin-bottom: var(--space-sm);
+  }
+  .step-visual {
+    flex: 0 0 260px;
+  }
+  .step-visual img {
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    display: block;
+  }
+  .step-info { flex: 1 1 auto; min-width: 0; }
+  .step-info h2 {
+    font-size: 15px;
+    margin: 0 0 4px;
+  }
+  .step-info .step-purpose {
+    color: var(--color-muted);
+    font-size: 12px;
+    margin: 0 0 var(--space-sm);
+  }
+  .step-elements {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* 次画面への遷移条件: 矢印 + ラベル */
+  .transition {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: 4px var(--space-md) var(--space-md);
+    color: var(--color-primary);
+    font-size: 12px;
+  }
+  .transition .arrow {
+    font-size: 16px;
+    line-height: 1;
+  }
+</style>
+</head>
+<body>
+  <h1>ストーリーボード（サンプル。主要ユーザーシナリオに合わせて置き換えること）</h1>
+
+  <section class="phase">
+    <h2 class="phase-title">フェーズ1: 起点</h2>
+
+    <div class="step">
+      <div class="step-visual">
+        <img src="screens/screen-a-desktop.png" alt="画面Aのスクリーンショット" />
+      </div>
+      <div class="step-info">
+        <h2>画面A: 起点画面の名称</h2>
+        <p class="step-purpose">目的: 何のためにこの画面を開くか</p>
+        <ul class="step-elements">
+          <li>表示要素1: 何が表示され、ユーザーは何を見るか</li>
+          <li>表示要素2: 操作できる要素（ボタン・入力欄など）</li>
+          <li>状態変化: 空・読込中・エラー等での見え方の違い</li>
+        </ul>
+      </div>
+    </div>
+    <div class="transition">
+      <span class="arrow">↓</span>
+      <span>遷移条件: 何を操作すると次の画面に進むか</span>
+    </div>
+  </section>
+
+  <section class="phase">
+    <h2 class="phase-title">フェーズ2: 主要操作</h2>
+
+    <div class="step">
+      <div class="step-visual">
+        <img src="screens/screen-b-desktop.png" alt="画面Bのスクリーンショット" />
+      </div>
+      <div class="step-info">
+        <h2>画面B: 次の画面の名称</h2>
+        <p class="step-purpose">目的: 何のためにこの画面を開くか</p>
+        <ul class="step-elements">
+          <li>表示要素1: ...</li>
+          <li>表示要素2: ...</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</body>
+</html>

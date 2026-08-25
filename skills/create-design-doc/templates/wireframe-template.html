@@ -21,6 +21,9 @@
     --color-primary: #1f3a93;
     --color-primary-contrast: #ffffff;
     --color-accent: #e08e45;
+    --color-success: #1e824c;
+    --color-warning: #b7791f;
+    --color-danger: #c0392b;
     --space-xs: 4px;
     --space-sm: 8px;
     --space-md: 16px;
@@ -84,14 +87,17 @@
     display: none;
   }
 
-  /* モバイル: 1カラム化・下部ナビ表示 */
+  /* モバイル: 1カラム化・下部ナビ表示。
+     注意: position: sticky / fixed は使わない。Playwright の full-page
+     screenshot は capture 時に viewport 高さを一時的に拡張するため、
+     sticky/fixed 要素は実際の文書末尾ではなく元の viewport 高さの位置に
+     取り残され、キャプチャ結果でナビが中途半端な位置に浮いて見える
+     （実走で確認済みの不具合）。通常フロー内の静的配置のみを使う。 */
   @media (max-width: 480px) {
     main { padding: var(--space-md); }
     .grid { grid-template-columns: 1fr; }
     nav.bottom-nav {
       display: flex;
-      position: sticky;
-      bottom: 0;
       background: var(--color-bg);
       border-top: 1px solid var(--color-border);
       padding: var(--space-sm);

@@ -1,106 +1,59 @@
 <!doctype html>
 <!--
-  画面遷移図テンプレート。アクター別レーンに分けた HTML + inline SVG。
+  画面遷移図テンプレート（全体俯瞰用）。単一 inline SVG 方式。
+  位置づけ: flow.png は「画面同士がどうつながっているか」を俯瞰する図。
+  各画面の表示要素・操作の詳細説明は storyboard.png（storyboard-template.html）が担当する。
+  両者は役割を分けて重複させない。
+
   実際の画面遷移図を作る際は本ファイルをコピーし、レーン数・ノード・エッジ・凡例を
-  対象アイデアの実際の画面構成に置き換える。外部 CDN・外部フォントは使用しないこと。
-  Playwright で PNG 化する: scripts/capture_screenshot.py --html <this> --out flow.png --full-page
+  対象アイデアの実際の画面構成に置き換える。座標はすべて同一 <svg> の viewBox 座標系に
+  収め、HTML 側の別要素と位置を手動で揃える必要が無いようにする（div レーン + 別 svg
+  矢印のハイブリッド構成は座標ズレの原因になるため採用しない）。
+  外部 CDN・外部フォントは使用しないこと。
+  検証: scripts/check_overflow.py <this-file>（自己完結性・横スクロール崩れの検出。
+  flow.html にも wireframe と同様に必ず実行する）
+  Playwright で PNG 化: scripts/capture_screenshot.py --html <this> --out flow.png --full-page
 -->
 <html lang="ja">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>画面遷移図</title>
+<title>画面遷移図（全体俯瞰）</title>
 <style>
   :root {
     --color-bg: #ffffff;
     --color-fg: #1c1c1c;
-    --color-lane-bg: #f4f6f8;
-    --color-lane-border: #d8dee6;
-    --color-node-bg: #ffffff;
-    --color-node-border: #1f3a93;
+    --font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
     --flow-primary: #1f3a93;   /* 主要フロー */
     --flow-alt: #e08e45;       /* 代替・分岐フロー */
     --flow-error: #c0392b;     /* エラー・離脱フロー */
-    --space-md: 16px;
-    --font-family: "Noto Sans JP", "Hiragino Sans", sans-serif;
   }
+  * { box-sizing: border-box; }
   body {
     margin: 0;
-    padding: var(--space-md);
+    padding: 16px;
     background: var(--color-bg);
     color: var(--color-fg);
     font-family: var(--font-family);
   }
-  h1 { font-size: 18px; margin: 0 0 var(--space-md); }
-  .lanes {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .lane {
-    display: flex;
-    align-items: center;
-    background: var(--color-lane-bg);
-    border: 1px solid var(--color-lane-border);
-    border-radius: 8px;
-    padding: 12px;
-  }
-  .lane-label {
-    width: 120px;
-    flex-shrink: 0;
-    font-weight: bold;
-    font-size: 13px;
-  }
-  .lane-nodes {
-    display: flex;
-    gap: 24px;
-    overflow-x: auto;
-  }
-  .node {
-    min-width: 140px;
-    background: var(--color-node-bg);
-    border: 2px solid var(--color-node-border);
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 13px;
-    text-align: center;
-    white-space: nowrap;
-  }
-  .legend {
-    margin-top: var(--space-md);
-    display: flex;
-    gap: 16px;
-    font-size: 12px;
-  }
-  .legend-item { display: flex; align-items: center; gap: 6px; }
-  .legend-swatch { width: 20px; height: 3px; display: inline-block; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  svg { width: 100%; height: auto; display: block; }
 </style>
 </head>
 <body>
   <h1>画面遷移図（サンプル。実際のアクター・画面に置き換えること）</h1>
-  <div class="lanes">
-    <div class="lane">
-      <div class="lane-label">ユーザー</div>
-      <div class="lane-nodes">
-        <div class="node">画面A: 起点</div>
-        <div class="node">画面B: 一覧</div>
-        <div class="node">画面C: 詳細</div>
-      </div>
-    </div>
-    <div class="lane">
-      <div class="lane-label">システム</div>
-      <div class="lane-nodes">
-        <div class="node">API: 一覧取得</div>
-        <div class="node">API: 詳細取得</div>
-      </div>
-    </div>
-  </div>
 
-  <svg width="100%" height="120" role="img" aria-label="画面間の遷移を示す矢印">
-    <title>遷移フロー</title>
-    <desc>画面Aから画面Bへ主要フロー、画面Bから画面Cへ主要フロー、画面Bからエラー時の離脱フローを示す</desc>
-    <line x1="80" y1="20" x2="260" y2="20" stroke="var(--flow-primary)" stroke-width="2" marker-end="url(#arrow-primary)" />
-    <line x1="80" y1="60" x2="260" y2="60" stroke="var(--flow-alt)" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrow-alt)" />
+  <!--
+    viewBox は "0 0 960 340" のような固定座標系。レーン・ノード・矢印・凡例を
+    すべてこの1つの <svg> 内に配置する。
+  -->
+  <svg viewBox="0 0 960 340" role="img" aria-labelledby="flow-title flow-desc">
+    <title id="flow-title">画面遷移図</title>
+    <desc id="flow-desc">
+      ユーザーレーンとシステムレーンに分け、画面Aから画面Bへの主要フロー、
+      画面Bから画面Cへの主要フロー、画面Bからのエラー時離脱フローを示す。
+    </desc>
+
     <defs>
       <marker id="arrow-primary" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
         <path d="M0,0 L6,3 L0,6 Z" fill="var(--flow-primary)" />
@@ -108,13 +61,54 @@
       <marker id="arrow-alt" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
         <path d="M0,0 L6,3 L0,6 Z" fill="var(--flow-alt)" />
       </marker>
+      <marker id="arrow-error" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L6,3 L0,6 Z" fill="var(--flow-error)" />
+      </marker>
     </defs>
-  </svg>
 
-  <div class="legend">
-    <div class="legend-item"><span class="legend-swatch" style="background: var(--flow-primary);"></span>主要フロー</div>
-    <div class="legend-item"><span class="legend-swatch" style="background: var(--flow-alt); border-top: 2px dashed var(--flow-alt); height: 0;"></span>代替・分岐フロー</div>
-    <div class="legend-item"><span class="legend-swatch" style="background: var(--flow-error);"></span>エラー・離脱フロー</div>
-  </div>
+    <!-- レーン背景 -->
+    <rect x="0" y="10" width="960" height="120" fill="#f4f6f8" stroke="#d8dee6" rx="8" />
+    <rect x="0" y="150" width="960" height="90" fill="#f4f6f8" stroke="#d8dee6" rx="8" />
+    <text x="16" y="35" font-size="13" font-weight="bold">ユーザー</text>
+    <text x="16" y="175" font-size="13" font-weight="bold">システム</text>
+
+    <!-- ノード（ユーザーレーン） -->
+    <rect x="120" y="45" width="150" height="60" rx="6" fill="#ffffff" stroke="var(--flow-primary)" stroke-width="2" />
+    <text x="195" y="80" font-size="13" text-anchor="middle">画面A: 起点</text>
+
+    <rect x="400" y="45" width="150" height="60" rx="6" fill="#ffffff" stroke="var(--flow-primary)" stroke-width="2" />
+    <text x="475" y="80" font-size="13" text-anchor="middle">画面B: 一覧</text>
+
+    <rect x="680" y="45" width="150" height="60" rx="6" fill="#ffffff" stroke="var(--flow-primary)" stroke-width="2" />
+    <text x="755" y="80" font-size="13" text-anchor="middle">画面C: 詳細</text>
+
+    <!-- ノード（システムレーン） -->
+    <rect x="400" y="185" width="150" height="45" rx="6" fill="#ffffff" stroke="#5b6470" stroke-width="1.5" />
+    <text x="475" y="212" font-size="12" text-anchor="middle">API: 一覧取得</text>
+
+    <rect x="680" y="185" width="150" height="45" rx="6" fill="#ffffff" stroke="#5b6470" stroke-width="1.5" />
+    <text x="755" y="212" font-size="12" text-anchor="middle">API: 詳細取得</text>
+
+    <!-- 主要フロー: 画面A -> 画面B -> 画面C -->
+    <line x1="270" y1="75" x2="395" y2="75" stroke="var(--flow-primary)" stroke-width="2" marker-end="url(#arrow-primary)" />
+    <text x="332" y="68" font-size="11" text-anchor="middle" fill="var(--flow-primary)">一覧表示</text>
+
+    <line x1="550" y1="75" x2="675" y2="75" stroke="var(--flow-primary)" stroke-width="2" marker-end="url(#arrow-primary)" />
+    <text x="612" y="68" font-size="11" text-anchor="middle" fill="var(--flow-primary)">詳細を開く</text>
+
+    <!-- 代替フロー: 画面B からエラー離脱 -->
+    <line x1="475" y1="105" x2="475" y2="182" stroke="var(--flow-error)" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrow-error)" />
+    <text x="490" y="145" font-size="11" fill="var(--flow-error)">取得失敗時</text>
+
+    <!-- 凡例 -->
+    <g transform="translate(16, 280)">
+      <line x1="0" y1="0" x2="24" y2="0" stroke="var(--flow-primary)" stroke-width="2" />
+      <text x="32" y="4" font-size="12">主要フロー</text>
+      <line x1="140" y1="0" x2="164" y2="0" stroke="var(--flow-alt)" stroke-width="2" stroke-dasharray="4 3" />
+      <text x="172" y="4" font-size="12">代替・分岐フロー</text>
+      <line x1="320" y1="0" x2="344" y2="0" stroke="var(--flow-error)" stroke-width="2" stroke-dasharray="4 3" />
+      <text x="352" y="4" font-size="12">エラー・離脱フロー</text>
+    </g>
+  </svg>
 </body>
 </html>
