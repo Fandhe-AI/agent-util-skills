@@ -1,29 +1,32 @@
 # deck spec スキーマ
 
-`scripts/build_deck.py` が受け取る JSON spec の仕様。renderer は本スキーマの spec を
-16:9 の自己完結 PPTX へ変換する。`scripts/validate_deck.py` は生成された `.pptx` 自体を
+`scripts/build_slides.py` が受け取る JSON spec の仕様。renderer は本スキーマの spec を
+自己完結・フルスクリーンの HTML スライド（単一ファイル）へ変換する。
+`scripts/validate_slides.py` は生成された `.html` 自体を Playwright で操作しながら
 検証する（spec は信頼しない）。
 
 ## 実行方法
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/scripts/build_deck.py" --spec <spec.json> --output <out.pptx>
-python3 "${CLAUDE_SKILL_DIR}/scripts/validate_deck.py" <out.pptx>   # 生成後必ず実行
+python3 "${CLAUDE_SKILL_DIR}/scripts/build_slides.py" --spec <spec.json> --output <out.html> --theme dark
+python3 "${CLAUDE_SKILL_DIR}/scripts/validate_slides.py" <out.html> --screenshots-dir <dir>   # 生成後必ず実行
 ```
 
 ## トップレベル構造
 
 | フィールド | 必須 | 型 | 意味 |
 |---|---|---|---|
-| `title` | ✅ | string | デッキ全体のタイトル（footer にも使用） |
-| `brand` | — | object | ブランドカラー・フォント。省略時は `DEFAULT_BRAND`（ニュートラルパレット）を使用 |
+| `title` | ✅ | string | デッキ全体のタイトル（`<title>` に使用） |
+| `brand` | — | object | テーマトークンの上書き。省略時は `--theme` の既定値（`DARK_THEME`/`LIGHT_THEME`）をそのまま使う |
 | `slides` | ✅ | array | 後述の「スライド構成」節の順序契約を過不足なく満たすこと |
 
-`brand` のキー: `primary` / `secondary` / `accent` / `background` / `surface` / `text` / `muted`（すべて `#RRGGBB`）、`font_latin` / `font_ea`（typeface 名。既定 `Arial` / `Noto Sans JP`）。
+`brand` のキー（省略した項目のみ `--theme` の既定値を使う）: `primary` / `accent` /
+`success` / `warning` / `danger`（すべて `#RRGGBB`）。`bg` / `surface` / `fg` / `muted` /
+`border` も上書き可能だが、通常は `--theme dark|light` の切替に任せる。
 
 ## スライド構成（PO 承認会向け・前半固定＋後半可変）
 
-`slides` は次の順序契約を満たす（`build_deck.py` の `validate_spec` が強制する）。**枚数は
+`slides` は次の順序契約を満たす（`build_slides.py` の `validate_spec` が強制する）。**枚数は
 10〜14枚**（前半6枚＋固定末尾2枚＋`screen_flow` 2〜4枚）。
 
 | 区間 | role | 枚数 | 必須フィールド | 備考 |
@@ -42,29 +45,55 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_deck.py" <out.pptx>   # 生成後�
 
 - `"事実"`: 入力文書に**記録された実測・調査結果**に限る。数値・出典が無い場合は使わない。
   留保（サンプルサイズが小さい等）がある場合は `text` に併記する
-  （例: 「n=5 の予備調査では…」）
 - `"事実"` に該当しない主張（推測・期待・一般論）はすべて `"仮説"` にする
 
-### `screen_flow` の `image` / `note`
+### `screen_flow` の `image` / `note`（base64 data URI 埋め込み）
 
-- `image`: `create-design-doc` が生成した `storyboard.png` の一部相当、または
-  `screens/<screen>-desktop.png` 等への相対パス／絶対パス。ワイド〜横長画像・縦長画像の
-  いずれもスライド内に収まるよう `add_picture_fit`（幅基準→高さ超過時は高さ基準で再配置）
-  が自動調整する
+- `image`: `create-design-doc` が生成した `screens/<screen>-desktop.png` 等への相対パス
+  （spec ファイルからの相対）または絶対パス。`build_slides.py` が読み込み、
+  **base64 data URI としてスライド HTML に直接埋め込む**（外部ファイル参照にしない。
+  自己完結契約のため）
+- 埋め込み上限: **幅 1600px 以下・ファイルサイズ 2MB 以下**（PNG の IHDR チャンクを自前で
+  パースして判定。Pillow 等の画像ライブラリには依存しない）。超過した場合は
+  `build_slides.py` が `SpecError` で拒否するので、`create-design-doc` の
+  `capture_screenshot.py` で `--width 1440` 程度に再キャプチャしてから指定する
 - `image` が `null`（`create-design-doc` 未実行等で画面素材が無い場合）: `note`
-  （例: `"create-design-doc 未実行のためテキスト概略のみ"`）を必須にする。この場合
-  `narrative` はテキストのみで場面を概略する
+  （例: `"create-design-doc 未実行のためテキスト概略のみ"`）を必須にする
 
 role の順序契約違反・`screen_flow` の連続枚数逸脱・`approval` の件数逸脱・
-`winning.items[].label` 不正・`screen_flow` の `image`/`note` 欠落は `build_deck.py` が
-日本語 `SpecError`（終了コード1）で拒否する。
+`winning.items[].label` 不正・`screen_flow` の `image`/`note` 欠落・画像サイズ超過は
+`build_slides.py` が日本語 `SpecError`（終了コード1）で拒否する。
 
-## 検証ルール（`validate_deck.py` が pptx から直接確認）
+## HTML スライドの操作仕様
 
-- スライド枚数: 10〜14枚
-- 全 shape（画像を含む）がスライド境界（動的取得した `slide_width` / `slide_height`）内に収まる
-- 全ての非空テキストに `a:latin` と `a:ea` の両方の typeface が設定されている（日本語フォント fallback）
-- 2枚目に「前提」が含まれる、最終スライドに「承認」と3〜5件の番号付き承認・確認事項が含まれる
+生成される `.html` は次のインタラクションを持つ単一の自己完結ファイル（CDN・外部フォント・
+外部画像なし）。
+
+- フルスクリーン・1スライド＝1画面（`100vh`・スクロールなし）
+- キーボード: `→`/`↓` で次へ、`←`/`↑` で前へ、`R` で先頭（`cover`）へ
+- クリック: 画面左右の丸ボタン（`#prev-btn` / `#next-btn`）
+- 上部バー: 左に区分ラベル（`COVER` / `PROBLEM` 等、モノスペース・字間広め）、右に `n / N`
+- 下部: スライド枚数分のセグメント型プログレスバー（現在位置までがアクセント色）
+- 印刷/PDF: `@media print` で1スライド＝1ページ、上部バー・プログレスバー・ナビボタンは
+  非表示（`window.print()` またはブラウザの「PDF に保存」で配布用 PDF 化できる）
+- inline JavaScript は `addEventListener` / `classList` のみで完結し、`eval`・
+  `new Function`・untrusted な `innerHTML` 代入・inline event handler 属性・
+  ネットワーク API（`fetch` 等）を一切使わない
+
+## 検証ルール（`validate_slides.py` が html から直接確認）
+
+- スライド枚数・role の順序契約（DOM の `data-role` 属性から判定）
+- 全スライドを実際に `→` キーで遷移させながら、各スライド自身（`.slide.active`）の
+  `scrollHeight`/`scrollWidth` が `clientHeight`/`clientWidth`（= 1440×900 の viewport）を
+  超えていないか（`document.documentElement` ではなく、表示中の `.slide` 要素自身で判定する
+  ことが重要。`html`/`body` の `overflow: hidden` により documentElement 側の scrollHeight は
+  内部コンテンツが溢れても変化しないため）
+- 外部 URL 参照・CDN import・許可されない MIME の `data:` URI がゼロ件
+- inline event handler 属性・`eval`/`new Function`/`innerHTML`代入/network API がゼロ件
+- 末尾を超えて `→` しても `approval` に留まる（clamp）、`R` で `cover` に戻る、クリックで
+  `premise` へ進む
+- 2枚目に「前提」が含まれる、最終スライドに「承認」と3〜5件の `.approval-item` が含まれる
+- `@media print` で上部バー・プログレスバー・ナビボタンが `display: none` になる
 
 ## 最小例
 
