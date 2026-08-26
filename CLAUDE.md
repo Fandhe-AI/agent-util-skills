@@ -152,6 +152,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `reference-template.md` | skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 | `verification.md` | skill 修正・レビュー作業全般 | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
 | `debugging.md` | skill 修正作業 / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
+| `ruleset-policy.md` | setup-repo-guards / implement-issue-tree / ruleset を変更する全作業 | ブランチ ruleset 方針（`strict_required_status_checks_policy` は必ず false・required check の `integration_id` 束縛・条件付きチェックを required にしない・一括更新後の 3 軸 + classic BP 検証） |
 
 ## Current Skills
 
