@@ -9,6 +9,8 @@
   （spec を信頼しない。create-html-report/scripts/validate_report.py と同じ設計方針）。
 - 全スライド・全フラグメントステップを実際にキーボード操作で遷移させながら検証し、
   各ステップの PNG（1440x900、`slide-<n>-step-<s>.png`）を確認用に撮影する。
+- 自己完結の検証は静的解析（_SlideAuditor）に加え、Playwright 実行時に file:// と
+  about: 以外の全リクエストを遮断・記録し、1件でもあれば FAIL にする（動的な抜け道の封鎖）。
 - 検証のみを行い、ファイルの修正は行わない。
 
 使い方:
@@ -53,14 +55,57 @@ APPROVAL_ITEM_MAX = 5
 # <style>/style 属性へ検査対象を限定する
 # （create-html-report/scripts/validate_report.py の構造解析と同じ設計方針）。
 
-# 外部参照とみなす URL 値（http(s):// とプロトコル相対 //）。src/href 属性値と
-# CSS url(...) の値の双方に適用する。data: URI・#fragment・ローカル相対参照は
-# 自己完結の範囲内なので誤検出しない。
-EXTERNAL_URL_VALUE_RE = re.compile(r"^\s*(?:https?:)?//", re.IGNORECASE)
 # data: URI は受動的な画像 MIME に限り許可（png/jpeg/gif/webp 以外の data: MIME は
 # untrusted な能動コンテンツを埋め込める経路のため不許可
 # — create-html-report/scripts/validate_report.py の DATA_URI_ALLOWED と同じ方針）。
 DATA_URI_ALLOWED_RE = re.compile(r"^\s*data:image/(png|jpeg|gif|webp)[;,]", re.IGNORECASE)
+# 任意 scheme の検出（http(s) に限定しない）。javascript: や blob: 等も含め、
+# scheme 付きの参照はすべて外部扱いにする（data: のみ上の allowlist で先に判定）。
+SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
+# 外部リソースを参照し得る属性の一覧（check_overflow.py の EXTERNAL_ATTR_RE と同等の
+# 網羅）。object[data]・video/audio[poster]・form[action]・button[formaction]・
+# SVG の xlink:href をカバーする。srcset は複数候補 URL 形式のため個別に処理する。
+RESOURCE_ATTRS = frozenset({"src", "href", "xlink:href", "data", "poster", "action", "formaction"})
+# srcset 候補の分割は「comma + 空白」に限定する（分割理由は srcset_candidates 参照）
+SRCSET_SPLIT_RE = re.compile(r",\s+")
+# 空白を伴わない comma の変則表記で紛れ込む外部 URL の fail-closed 検出用
+SRCSET_SMUGGLED_URL_RE = re.compile(r"(?:^|[\s,])((?:https?:)?//[^\s,]+)", re.IGNORECASE)
+
+
+def srcset_candidates(value: str) -> list[str]:
+    """srcset 属性値から検査対象の URL 候補を取り出す。
+
+    候補の分割を「comma + 空白」に限定するのは、data URI
+    （data:image/png;base64,AA）の base64 区切り comma を候補区切りと誤認して
+    後続を相対参照と誤検出しないため。空白を伴わない comma で外部 URL が
+    紛れ込む変則表記は、値全体への protocol(-relative) URL 走査で検出する。
+    """
+    refs: list[str] = []
+    for candidate in SRCSET_SPLIT_RE.split(value):
+        parts = candidate.strip().split()
+        if parts:
+            refs.append(parts[0])
+    for m in SRCSET_SMUGGLED_URL_RE.finditer(value):
+        refs.append(m.group(1))
+    return refs
+
+
+def classify_ref(value: str) -> str:
+    """リソース参照値を "ok" / "external" / "relative" / "bad-data" に分類する。
+
+    pitch deck は単一 HTML 配布が契約（wireframe は srcdoc 埋め込み・画像は data URI）
+    のため、許可は文書内 #fragment と許可画像 MIME の data: URI のみ。http(s) に限らず
+    任意 scheme・protocol-relative（//）を外部扱いにし、ローカル相対参照も配布時に
+    ファイルが欠落するため不許可にする（fail-closed）。
+    """
+    v = value.strip().strip("\"'")
+    if not v or v.startswith("#"):
+        return "ok"
+    if v.lower().startswith("data:"):
+        return "ok" if DATA_URI_ALLOWED_RE.match(v) else "bad-data"
+    if v.startswith("//") or SCHEME_RE.match(v):
+        return "external"
+    return "relative"
 # @import は参照先が相対 URL でも配布先でのファイル欠落の原因になるため出現自体を不許可。
 CSS_IMPORT_RE = re.compile(r"@import", re.IGNORECASE)
 # CSS の url(...) トークン抽出（引用付き/無引用を別分岐でパースする。引用付きは値中の
@@ -101,26 +146,35 @@ class _SlideAuditor(HTMLParser):
         self.styles: list[str] = []           # <style> の中身
         self.style_attrs: list[str] = []      # style="..." 属性値
         self.inline_handlers: list[str] = []  # on* 属性の出現箇所
-        self.external_refs: list[str] = []    # 外部 URL を指す src/href
-        self.bad_data_uris: list[str] = []    # 許可 MIME 以外の data: URI を指す src
+        self.external_refs: list[str] = []    # 外部（任意 scheme・//）を指すリソース属性
+        self.relative_refs: list[str] = []    # ローカル相対参照（単一ファイル配布で欠落）
+        self.bad_data_uris: list[str] = []    # 許可 MIME 以外の data: URI 参照
         self.srcdocs: list[str] = []          # iframe srcdoc（wireframe 埋め込み）
         self._in: str | None = None
         self._buf = ""
+
+    def _record_ref(self, tag: str, name: str, value: str) -> None:
+        kind = classify_ref(value)
+        where = f"<{tag} {name}>"
+        if kind == "external":
+            self.external_refs.append(where)
+        elif kind == "relative":
+            self.relative_refs.append(where)
+        elif kind == "bad-data":
+            self.bad_data_uris.append(where)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         for name, value in attrs:
             v = value or ""
             if INLINE_HANDLER_ATTR_RE.match(name):
                 self.inline_handlers.append(f"<{tag} {name}=...>")
-            elif name in ("src", "href"):
-                if EXTERNAL_URL_VALUE_RE.match(v):
-                    self.external_refs.append(f"<{tag} {name}>")
-                if (
-                    name == "src"
-                    and v.lstrip().lower().startswith("data:")
-                    and not DATA_URI_ALLOWED_RE.match(v)
-                ):
-                    self.bad_data_uris.append(f"<{tag} src>")
+            elif name in RESOURCE_ATTRS:
+                self._record_ref(tag, name, v)
+            elif name == "srcset":
+                # srcset は「URL 幅記述子, URL 幅記述子, ...」形式のため
+                # 候補ごとに URL 部分を取り出して個別に分類する
+                for ref in srcset_candidates(v):
+                    self._record_ref(tag, "srcset", ref)
             elif name == "style":
                 self.style_attrs.append(v)
             elif name == "srcdoc":
@@ -172,7 +226,7 @@ def _audit(html_text: str) -> _SlideAuditor:
         sub.close()
         for field in (
             "scripts", "styles", "style_attrs",
-            "inline_handlers", "external_refs", "bad_data_uris",
+            "inline_handlers", "external_refs", "relative_refs", "bad_data_uris",
         ):
             getattr(auditor, field).extend(getattr(sub, field))
         pending.extend(sub.srcdocs)
@@ -183,24 +237,39 @@ def check_self_contained(html_text: str, failures: list[str], label: str = "oute
     auditor = _audit(html_text)
     if auditor.external_refs:
         failures.append(
-            f"{label}: 外部 URL への src/href 参照を検出（自己完結契約違反）: "
-            + ", ".join(sorted(set(auditor.external_refs)))
+            f"{label}: 外部 URL へのリソース属性参照"
+            "（src / href / xlink:href / data / poster / action / formaction / srcset）"
+            "を検出（自己完結契約違反）: " + ", ".join(sorted(set(auditor.external_refs)))
+        )
+    if auditor.relative_refs:
+        failures.append(
+            f"{label}: ローカル相対参照を検出: "
+            + ", ".join(sorted(set(auditor.relative_refs)))
+            + "（単一 HTML ファイル配布で参照先が欠落するため禁止。画像は data URI、"
+            "wireframe は srcdoc で埋め込むこと）"
         )
     css_texts = [CSS_COMMENT_RE.sub("", t) for t in auditor.styles + auditor.style_attrs]
     if any(CSS_IMPORT_RE.search(t) for t in css_texts):
         failures.append(f"{label}: CSS @import による外部リソース参照を検出")
-    bad_css_urls = []
+    bad_css: dict[str, list[str]] = {"external": [], "relative": [], "bad-data": []}
     for t in css_texts:
         for m in CSS_URL_RE.finditer(t):
             value = next(g for g in m.groups() if g is not None)
-            if EXTERNAL_URL_VALUE_RE.match(value):
-                bad_css_urls.append(value)
-    if bad_css_urls:
+            kind = classify_ref(value)
+            if kind != "ok":
+                bad_css[kind].append(value)
+    if bad_css["external"]:
         failures.append(
             f"{label}: CSS url() による外部リソース参照（@font-face / background 等）を検出: "
-            + ", ".join(bad_css_urls[:3])
+            + ", ".join(bad_css["external"][:3])
         )
-    if auditor.bad_data_uris:
+    if bad_css["relative"]:
+        failures.append(
+            f"{label}: CSS url() によるローカル相対参照を検出: "
+            + ", ".join(bad_css["relative"][:3])
+            + "（単一 HTML ファイル配布で参照先が欠落するため禁止）"
+        )
+    if auditor.bad_data_uris or bad_css["bad-data"]:
         failures.append(f"{label}: png/jpeg/gif/webp 以外の data: URI（image/svg+xml 等）を検出")
 
 
@@ -267,9 +336,25 @@ def main() -> int:
     check_inline_js_safety(html_text, failures)
 
     url = "file://" + pathname2url(str(args.html.resolve()))
+    # 静的検査をすり抜けた動的な外部要求（JS の Image().src 代入・CSS 解決由来等）を
+    # 実行時に検出する。file:// と about: 以外はすべて abort するため、検査対象 HTML が
+    # 外部へ実際に通信することはない（「通信した後で PASS する」抜け道の封鎖。
+    # create-design-doc/scripts/check_overflow.py と同じ流儀）。
+    blocked_requests: list[str] = []
+
+    def _route_handler(route):
+        req_url = route.request.url
+        if req_url.startswith(("file://", "about:")):
+            route.continue_()
+        else:
+            blocked_requests.append(req_url)
+            route.abort()
+
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport=VIEWPORT)
+        context = browser.new_context(viewport=VIEWPORT)
+        context.route("**/*", _route_handler)
+        page = context.new_page()
         page.goto(url, wait_until="networkidle")
 
         roles = page.eval_on_selector_all(".slide", "els => els.map(e => e.dataset.role)")
@@ -452,6 +537,10 @@ def main() -> int:
         page.emulate_media(media="screen")
 
         browser.close()
+
+    # 実行時に発生した外部リクエストは全件遮断済み。1件でもあれば自己完結契約違反
+    for req_url in dict.fromkeys(blocked_requests):
+        failures.append(f"実行時に外部リクエストを検出（遮断済み）: {req_url}")
 
     if failures:
         print(f"FAIL: {len(failures)}件の問題を検出（{total}枚）")

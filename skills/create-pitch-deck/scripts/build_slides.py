@@ -24,6 +24,7 @@ import html
 import json
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 # 前半（固定・この順序）: 課題認識から勝ち筋まで
@@ -75,8 +76,17 @@ FONT_MONO = '"Roboto Mono", "SFMono-Regular", Consolas, monospace'
 # 検出が効かなくなるため、埋め込み前の生テキストに対して必ずチェックする
 # （references/presentation-patterns.md「5. iframe の scale とレイアウト崩れの罠」と対の
 # 教訓: 「エスケープ後の文字列を検査しても手遅れ」）。
-EXTERNAL_URL_RE = re.compile(r"""(?:src|href)\s*=\s*["']https?://""", re.IGNORECASE)
-CDN_IMPORT_RE = re.compile(r"@import\s+url\(\s*['\"]?https?://", re.IGNORECASE)
+# 外部リソースを参照し得る属性の一覧（check_overflow.py の EXTERNAL_ATTR_RE と同等の
+# 網羅）。object[data]・video/audio[poster]・form[action]・button[formaction]・
+# SVG の xlink:href をカバーする。srcset は複数候補 URL 形式のため個別に処理する。
+RESOURCE_ATTRS = frozenset({"src", "href", "xlink:href", "data", "poster", "action", "formaction"})
+# srcset 候補の分割は「comma + 空白」に限定する（分割理由は srcset_candidates 参照）
+SRCSET_SPLIT_RE = re.compile(r",\s+")
+# 空白を伴わない comma の変則表記で紛れ込む外部 URL の fail-closed 検出用
+SRCSET_SMUGGLED_URL_RE = re.compile(r"(?:^|[\s,])((?:https?:)?//[^\s,]+)", re.IGNORECASE)
+# @import は url(...) 形式・文字列直接指定・相対参照のいずれでも自己完結を壊すため
+# 出現自体を不許可にする（validate_slides.py の CSS_IMPORT_RE と同方針）
+CDN_IMPORT_RE = re.compile(r"@import\b", re.IGNORECASE)
 INLINE_HANDLER_RE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.IGNORECASE)
 # CSS の url(...) トークン抽出（引用付き/無引用を別分岐でパースする。引用付きは値中の
 # `)` を含み得るため単一の文字クラスでは正しく抽出できない）。@import 以外にも
@@ -85,9 +95,12 @@ INLINE_HANDLER_RE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.IGNORECASE)
 CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""", re.IGNORECASE)
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-# 外部参照とみなす URL 値（http(s):// とプロトコル相対 //）。data: URI・#fragment・
-# ローカル相対参照は自己完結の範囲内なので許可し、誤検出しない。
-EXTERNAL_CSS_URL_VALUE_RE = re.compile(r"^\s*(?:https?:)?//", re.IGNORECASE)
+# data: URI は受動的な画像 MIME に限り許可（それ以外の data: MIME は untrusted な
+# 能動コンテンツを埋め込める経路のため不許可）。
+DATA_URI_ALLOWED_RE = re.compile(r"^\s*data:image/(png|jpeg|gif|webp)[;,]", re.IGNORECASE)
+# 任意 scheme の検出（http(s) に限定しない）。javascript: や blob: 等も含め、
+# scheme 付きの参照はすべて外部扱いにする（data: のみ上の allowlist で先に判定）。
+SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 FORBIDDEN_JS_PATTERNS = [
     (re.compile(r"\beval\s*\("), "eval("),
     (re.compile(r"\bnew\s+Function\s*\("), "new Function("),
@@ -104,40 +117,123 @@ class SpecError(Exception):
     """spec の構造・内容が契約を満たさない場合に送出する。"""
 
 
-def find_external_css_urls(text: str) -> list[str]:
-    """HTML/CSS コメント除去後のテキストから url(...) を全件抽出し、外部参照の値を返す。
+def classify_ref(value: str) -> str:
+    """リソース参照値を "ok" / "external" / "relative" / "bad-data" に分類する。
 
-    HTML コメント・CSS コメントを先に除去するのは、コメントアウト済みの
-    url(https://...) を実際の外部依存として誤検出しないため。data: URI と
-    ローカル相対参照は自己完結の範囲内なので返さない。
+    pitch deck は単一 HTML 配布が契約（wireframe は srcdoc 埋め込み・画像は data URI）
+    のため、許可は文書内 #fragment と許可画像 MIME の data: URI のみ。http(s) に限らず
+    任意 scheme・protocol-relative（//）を外部扱いにし、ローカル相対参照も配布時に
+    ファイルが欠落するため不許可にする（fail-closed。validate_slides.py と対の実装）。
     """
+    v = value.strip().strip("\"'")
+    if not v or v.startswith("#"):
+        return "ok"
+    if v.lower().startswith("data:"):
+        return "ok" if DATA_URI_ALLOWED_RE.match(v) else "bad-data"
+    if v.startswith("//") or SCHEME_RE.match(v):
+        return "external"
+    return "relative"
+
+
+def srcset_candidates(value: str) -> list[str]:
+    """srcset 属性値から検査対象の URL 候補を取り出す。
+
+    候補の分割を「comma + 空白」に限定するのは、data URI
+    （data:image/png;base64,AA）の base64 区切り comma を候補区切りと誤認して
+    後続を相対参照と誤検出しないため。空白を伴わない comma で外部 URL が
+    紛れ込む変則表記は、値全体への protocol(-relative) URL 走査で検出する
+    （validate_slides.py と対の実装）。
+    """
+    refs: list[str] = []
+    for candidate in SRCSET_SPLIT_RE.split(value):
+        parts = candidate.strip().split()
+        if parts:
+            refs.append(parts[0])
+    for m in SRCSET_SMUGGLED_URL_RE.finditer(value):
+        refs.append(m.group(1))
+    return refs
+
+
+class _RefCollector(HTMLParser):
+    """wireframe 生 HTML のタグ属性からリソース参照値（RESOURCE_ATTRS / srcset）を
+    収集する収集器（build 側の事前検査用）。
+
+    属性検査を正規表現の全文走査にすると <script> 内の `var data = ...` のような
+    JS 代入まで属性として誤検出するため、タグ属性のみを構造的に取り出す。
+    ブラウザ挙動に合わせ、self-closing 表記のタグも handle_starttag と同じ経路で扱う
+    （HTMLParser の handle_startendtag は既定で starttag へ委譲される）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.refs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            v = value or ""
+            if name in RESOURCE_ATTRS:
+                self.refs.append(v)
+            elif name == "srcset":
+                # srcset は「URL 幅記述子, URL 幅記述子, ...」形式のため候補ごとに取り出す
+                self.refs.extend(srcset_candidates(v))
+
+
+def find_disallowed_refs(text: str) -> dict[str, list[str]]:
+    """wireframe 生 HTML から自己完結契約に違反する参照を抽出する。
+
+    リソース属性（src / href / xlink:href / data / poster / action / formaction）と
+    srcset の候補 URL は _RefCollector で構造的に、CSS の url(...) は HTML/CSS
+    コメント除去後の全文走査で抽出し、classify_ref で分類して "ok" 以外を種類別に返す。
+    コメントを先に除去するのは、コメントアウト済みの url(https://...) 等を実際の
+    外部依存として誤検出しないため。
+    """
+    bad: dict[str, list[str]] = {"external": [], "relative": [], "bad-data": []}
+
+    def record(value: str) -> None:
+        # srcset の候補走査と変則表記走査が重なった場合等の重複報告を避ける
+        kind = classify_ref(value)
+        if kind != "ok" and value not in bad[kind]:
+            bad[kind].append(value)
+
+    collector = _RefCollector()
+    collector.feed(text)
+    collector.close()
+    for ref in collector.refs:
+        record(ref)
+
     cleaned = CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))
-    bad = []
     for m in CSS_URL_RE.finditer(cleaned):
-        value = next(g for g in m.groups() if g is not None)
-        if EXTERNAL_CSS_URL_VALUE_RE.match(value):
-            bad.append(value)
+        record(next(g for g in m.groups() if g is not None))
     return bad
 
 
 def check_embeddable_html(text: str, label: str) -> None:
     """screen_flow.wireframe として埋め込む前の生 HTML テキストを検査する。
 
-    自己完結契約（外部 URL・CDN import 不在）と inline JS の安全性
+    自己完結契約（外部 URL・ローカル相対参照・CDN import 不在。単一 HTML 配布のため
+    許可は #fragment と許可画像 MIME の data: URI のみ）と inline JS の安全性
     （AGENTS.md P0: eval・innerHTML代入・inline handler・network API 不使用）を
     満たさない wireframe は埋め込まず SpecError で拒否する。
     """
     violations = []
-    if EXTERNAL_URL_RE.search(text):
-        violations.append("外部 URL への src/href 参照")
-    if CDN_IMPORT_RE.search(text):
-        violations.append("CSS @import による外部リソース参照")
-    bad_css_urls = find_external_css_urls(text)
-    if bad_css_urls:
+    bad_refs = find_disallowed_refs(text)
+    if bad_refs["external"]:
         violations.append(
-            "CSS url() による外部リソース参照（@font-face / background 等）: "
-            + ", ".join(bad_css_urls[:3])
+            "外部リソース参照（src / href / xlink:href / data / poster / action / "
+            "formaction / srcset 属性、または CSS url()。任意 scheme・// を含む）: "
+            + ", ".join(bad_refs["external"][:3])
         )
+    if bad_refs["relative"]:
+        violations.append(
+            "ローカル相対参照: " + ", ".join(bad_refs["relative"][:3])
+            + "（単一 HTML ファイル配布で参照先が欠落するため禁止。画像は data URI で埋め込むこと）"
+        )
+    if bad_refs["bad-data"]:
+        violations.append(
+            "png/jpeg/gif/webp 以外の data: URI（能動コンテンツを埋め込める経路のため不許可）"
+        )
+    if CDN_IMPORT_RE.search(CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))):
+        violations.append("CSS @import による外部リソース参照")
     if INLINE_HANDLER_RE.search(text):
         violations.append("inline event handler 属性（onclick= 等）")
     for pattern, name in FORBIDDEN_JS_PATTERNS:
