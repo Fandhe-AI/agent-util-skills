@@ -1,0 +1,145 @@
+<!doctype html>
+<!--
+  自己完結 HTML ワイヤーフレームのテンプレート。
+  コピーして画面ごとに作成する。CDN・外部フォント・外部画像は使用しないこと。
+  ダミーデータは具体的でリアルな内容にする（「サンプル」「テスト」等の placeholder 文字列を使わない）。
+  検証: scripts/check_overflow.py <this-file>（PC/モバイル双方の横スクロール崩れを検出）
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>画面名を記入</title>
+<style>
+  /* デザイントークン（design-doc.md の「デザイントークン」節と一致させること） */
+  :root {
+    --color-bg: #ffffff;
+    --color-surface: #f4f6f8;
+    --color-fg: #1c1c1c;
+    --color-muted: #5b6470;
+    --color-border: #d8dee6;
+    --color-primary: #1f3a93;
+    --color-primary-contrast: #ffffff;
+    --color-accent: #e08e45;
+    --color-success: #1e824c;
+    --color-warning: #b7791f;
+    --color-danger: #c0392b;
+    --space-xs: 4px;
+    --space-sm: 8px;
+    --space-md: 16px;
+    --space-lg: 24px;
+    --radius-md: 8px;
+    --font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+    --font-size-sm: 13px;
+    --font-size-md: 15px;
+    --font-size-lg: 20px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-family);
+    font-size: var(--font-size-md);
+  }
+
+  header.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-md);
+    background: var(--color-primary);
+    color: var(--color-primary-contrast);
+  }
+
+  main {
+    padding: var(--space-lg);
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-md);
+  }
+
+  .card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-md);
+  }
+
+  .card h2 {
+    font-size: var(--font-size-md);
+    margin: 0 0 var(--space-sm);
+  }
+
+  .muted {
+    color: var(--color-muted);
+    font-size: var(--font-size-sm);
+  }
+
+  /* app-header はプライマリ背景（#1f3a93）のため、--color-muted (#5b6470) では
+    コントラスト約 1.7:1 と不足する。十分明るい色を上書きして可読性を確保する */
+  .app-header .muted {
+    color: var(--color-primary-contrast);
+  }
+
+  nav.bottom-nav {
+    display: none;
+  }
+
+  /* モバイル: 1カラム化・下部ナビ表示。
+    注意: position: sticky / fixed は使わない。Playwright の full-page
+    screenshot は capture 時に viewport 高さを一時的に拡張するため、
+    sticky/fixed 要素は実際の文書末尾ではなく元の viewport 高さの位置に
+    取り残され、キャプチャ結果でナビが中途半端な位置に浮いて見える
+    （実走で確認済みの不具合）。通常フロー内の静的配置のみを使う。 */
+  @media (max-width: 480px) {
+    main { padding: var(--space-md); }
+    .grid { grid-template-columns: 1fr; }
+    nav.bottom-nav {
+      display: flex;
+      background: var(--color-bg);
+      border-top: 1px solid var(--color-border);
+      padding: var(--space-sm);
+      justify-content: space-around;
+      font-size: var(--font-size-sm);
+    }
+  }
+</style>
+</head>
+<body>
+  <header class="app-header">
+    <strong>プロダクト名</strong>
+    <span class="muted">画面名</span>
+  </header>
+
+  <main>
+    <div class="grid">
+      <div class="card">
+        <h2>要素名を記入</h2>
+        <p class="muted">具体的でリアルなダミーデータを記入する（placeholder 文字列は使わない）</p>
+      </div>
+      <div class="card">
+        <h2>要素名を記入</h2>
+        <p class="muted">状態（空・読込中・エラー等）ごとにワイヤーを分けるか注記する</p>
+      </div>
+      <div class="card">
+        <h2>要素名を記入</h2>
+        <p class="muted">主要な操作・遷移先を明記する</p>
+      </div>
+    </div>
+  </main>
+
+  <nav class="bottom-nav">
+    <span>ホーム</span>
+    <span>一覧</span>
+    <span>設定</span>
+  </nav>
+</body>
+</html>
