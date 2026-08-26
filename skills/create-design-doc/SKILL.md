@@ -291,8 +291,10 @@ concept-brief.md も）を修正し、Step 5〜8 を再実行する。
 
 ## 注意事項
 
-- `wireframes/*.html`・`flow.html`・`storyboard.html` は CDN・外部フォント・外部画像・
-  外部 JS を一切使用しない。ローカルファイル参照も原則不可（画像は data URI で埋め込む）。
+- `wireframes/*.html`・`flow.html`・`storyboard.html` は CDN・外部フォント・外部画像を
+  一切使用せず、JavaScript 自体を全面禁止とする（`<script>` は本文の有無を問わず不可。
+  inline event handler 属性・`javascript:` URL も不可。静的な見た目の表現のみで完結
+  させる）。ローカルファイル参照も原則不可（画像は data URI で埋め込む）。
   例外は storyboard.html の `screens/*.png` 相対参照のみで、検証・撮影時に
   `--allow-local-refs` を明示して許可する
 - venv はビルドツールであり生成物ではない。`_/` 配下に置いた場合は commit しない（`_/` は

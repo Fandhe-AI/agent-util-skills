@@ -124,9 +124,9 @@ INLINE_HANDLER_ATTR_RE = re.compile(r"^on[a-z]+$", re.IGNORECASE)
 # 部分文字列一致（大文字小文字区別）で識別子の出現自体を fail-closed に禁止する。
 # deck の script は本スキルが生成する固定 nav JS + スポットライト注入スクリプトのみ
 # なので誤検知しない（'Function' は大文字始まりで検査するため小文字の function 宣言
-# には一致しない）。'ev'+'al' のような文字列連結による動的構築は静的検出の原理的
-# 限界であり、その経路の実害（外部通信）は実行時の route 遮断（main の
-# _route_handler）が検出する。
+# には一致しない）。'ev'+'al' のような文字列連結による動的構築は部分一致でも原理的に
+# 捕捉できないため、主ゲートは既知 script との完全一致（allowed_deck_scripts /
+# allowed_srcdoc_scripts）とし、本リストはその補助（防御多層）に位置づける。
 FORBIDDEN_JS_SUBSTRINGS = [
     "eval",
     "Function",
@@ -146,15 +146,12 @@ FORBIDDEN_JS_SUBSTRINGS = [
 NUMBERED_ITEM_RE = re.compile(r"^\s*\d+\.\s*\S")
 
 
-def allowed_srcdoc_scripts() -> list[str] | None:
-    """wireframe（srcdoc）内で唯一許可する script 本文の一覧を返す。
+def _spotlight_script() -> str | None:
+    """build_slides.py の SPOTLIGHT_INJECTION から script 本文（strip 済み）を取り出す。
 
-    wireframe は静的ワイヤーフレームであり script の正当用途がないため全面禁止とし、
-    build_slides.py が注入するスポットライトスクリプトの完全一致のみを許可する。
-    一次ソースとして build_slides.py の SPOTLIGHT_INJECTION を import する
-    （同一ディレクトリ配置が前提）。import に失敗した場合は None を返し、呼び出し側は
-    「srcdoc の script は一切不許可」として扱う（fail-closed。
-    create-html-report/scripts/validate_report.py の bundled_js と同じ方針）。
+    一次ソースとして build_slides.py を import する（同一ディレクトリ配置が前提）。
+    import・抽出に失敗した場合は None を返し、呼び出し側は fail-closed に扱う
+    （create-html-report/scripts/validate_report.py の bundled_js と同じ方針）。
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -162,7 +159,40 @@ def allowed_srcdoc_scripts() -> list[str] | None:
     except Exception:
         return None
     m = re.search(r"<script>(.*?)</script>", SPOTLIGHT_INJECTION, re.DOTALL)
-    return [m.group(1).strip()] if m else []
+    return m.group(1).strip() if m else None
+
+
+def allowed_srcdoc_scripts() -> list[str] | None:
+    """wireframe（srcdoc）内で唯一許可する script 本文の一覧を返す。
+
+    wireframe は静的ワイヤーフレームであり script の正当用途がないため全面禁止とし、
+    build_slides.py が注入するスポットライトスクリプトの完全一致のみを許可する。
+    取得に失敗した場合は None を返し、呼び出し側は「srcdoc の script は一切不許可」
+    として扱う（fail-closed）。
+    """
+    spotlight = _spotlight_script()
+    return None if spotlight is None else [spotlight]
+
+
+def allowed_deck_scripts() -> list[str] | None:
+    """deck HTML の <script> 本文として許可する canonical 一覧（strip 済み）を返す。
+
+    deck の script は build_slides.py が同梱するナビゲーション script（JS_TEMPLATE）
+    のみで、iframe contentDocument 検査ではスポットライト注入 script も通常の
+    <script> として現れるため両方を許可する。禁止識別子の部分一致検査は
+    `window['Web' + 'Socket']` のような動的組み立てを原理的に捕捉できないため、
+    完全一致をこちらを主ゲートにする。import に失敗した場合は None を返し、
+    呼び出し側は「script は一切不許可」として扱う（fail-closed）。
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from build_slides import JS_TEMPLATE
+    except Exception:
+        return None
+    spotlight = _spotlight_script()
+    if spotlight is None:
+        return None
+    return [JS_TEMPLATE.strip(), spotlight]
 
 
 class _SlideAuditor(HTMLParser):
@@ -317,6 +347,18 @@ def check_inline_js_safety(html_text: str, failures: list[str], label: str = "ou
             f"{label}: inline event handler 属性（onclick= 等）を検出: "
             + ", ".join(sorted(set(auditor.inline_handlers)))
         )
+    # 主ゲート: deck の <script> は build_slides.py 同梱のナビゲーション script と
+    # 既知のスポットライト注入 script の完全一致のみ許可する。禁止識別子の部分一致
+    # 検査は `window['Web' + 'Socket'](...)` のような動的組み立てを原理的に捕捉
+    # できないため、識別子検査（下記）は防御多層の補助に留める
+    allowed_outer = allowed_deck_scripts()
+    for script in auditor.scripts:
+        if allowed_outer is None or script.strip() not in allowed_outer:
+            failures.append(
+                f"{label}: 許可外の <script> を検出（deck の script は build_slides.py "
+                "同梱のナビゲーション script / スポットライト注入 script の完全一致のみ許可）"
+            )
+            break
     detected: list[str] = []
     for script in auditor.scripts + auditor.srcdoc_scripts:
         for token in FORBIDDEN_JS_SUBSTRINGS:
@@ -515,7 +557,13 @@ def main() -> int:
         cur = 0
         step = 0
         visited = 0
-        max_iterations = total * 8 + 20  # フラグメント数を含めても十分な安全マージン
+        # 走査は「各スライド1回 + 各フラグメント1回」の遷移で全域を覆う。bullets 等の
+        # 件数に spec 上の上限は無いため、スライドあたり定数件を仮定した固定係数
+        # （旧: total * 8 + 20）では有効な spec でも上限超過と誤判定し得る。
+        # 実 DOM のフラグメント総数から算出し、送りが止まった場合の無限ループ防止
+        # （ガードとしての役割）はマージン超過で検出する
+        total_fragments = page.eval_on_selector_all(".fragment", "els => els.length")
+        max_iterations = total + total_fragments + 20
         while cur < total and visited < max_iterations:
             visited += 1
             role = roles[cur]

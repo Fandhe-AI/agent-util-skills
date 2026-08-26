@@ -17,6 +17,10 @@ wireframes は storyboard を組み立てるための部品という位置づけ
 - **自己完結**: 外部 CDN・外部フォント・外部画像・外部 JavaScript library を使用しない。
   `<link rel="stylesheet" href="https://...">` 等は禁止（`scripts/check_overflow.py` が
   検出する）
+- **JavaScript 全面禁止**: `<script>` は本文の有無を問わず置かない（srcdoc 内も同様）。
+  inline event handler 属性（onclick= 等）・`javascript:` URL も禁止。ワイヤーフレームは
+  静的な見た目の表現のみで完結させ、状態差は画面を分けて表現する
+  （`scripts/check_overflow.py` が検出し、違反時はブラウザ実行前に FAIL する）
 - **インライン CSS**: `<style>` 内にすべて記述する。別ファイルの `.css` を参照しない
 - **デザイントークンを CSS カスタムプロパティで埋め込む**: `:root` に
   [references/design-doc-structure.md](design-doc-structure.md) の色・タイポ・余白を定義し、

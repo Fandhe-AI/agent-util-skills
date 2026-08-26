@@ -8,7 +8,7 @@
 - ただし外部通信の遮断は本スクリプトも担う。SKILL.md の手順では撮影が
   check_overflow.py による検証より先に走るため、ここで遮断しないと違反 HTML が
   検証前に外部へ通信してしまう。二段構えで防ぐ:
-  1. 撮影前に check_overflow.py の静的検査（外部依存・禁止 JS・inline handler）を
+  1. 撮影前に check_overflow.py の静的検査（外部依存・<script> 全面禁止・inline handler）を
      同ディレクトリ import で共通実行し、違反があればブラウザを起動せず FAIL 終了する
      （route("**/*") は WebSocket 等の全経路を確実に遮断できる保証がないため、
      違反 HTML はそもそも Chromium にロードしない）。
