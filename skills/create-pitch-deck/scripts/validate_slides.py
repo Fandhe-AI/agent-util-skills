@@ -3,12 +3,12 @@
 
 役割と境界:
 - build_slides.py（または手直しした html）の出力が SKILL.md の契約
-  （役割順序 / 各スライドのはみ出しなし / 自己完結 / inline JS の安全性 /
-  前提と解釈・承認事項の必須配置）を満たすかを、生成された .html ファイル
-  そのものから検証する（spec を信頼しない。create-html-report/scripts/
-  validate_report.py と同じ設計方針）。
-- 全スライドを実際にキーボード操作・クリック操作で遷移させながら検証し、
-  各スライドの PNG（1440x900）を確認用に撮影する。
+  （役割順序 / フラグメント送りの整合 / 各ステップでのはみ出しなし / 自己完結 /
+  inline JS の安全性 / screen_flow のスポットライト連動 / 前提と解釈・承認事項の
+  必須配置）を満たすかを、生成された .html ファイルそのものから検証する
+  （spec を信頼しない。create-html-report/scripts/validate_report.py と同じ設計方針）。
+- 全スライド・全フラグメントステップを実際にキーボード操作で遷移させながら検証し、
+  各ステップの PNG（1440x900、`slide-<n>-step-<s>.png`）を確認用に撮影する。
 - 検証のみを行い、ファイルの修正は行わない。
 
 使い方:
@@ -71,21 +71,21 @@ FORBIDDEN_JS_PATTERNS = [
 NUMBERED_ITEM_RE = re.compile(r"^\s*\d+\.\s*\S")
 
 
-def check_self_contained(html_text: str, failures: list[str]) -> None:
+def check_self_contained(html_text: str, failures: list[str], label: str = "outer HTML") -> None:
     if EXTERNAL_URL_RE.search(html_text):
-        failures.append("外部 URL への src/href 参照を検出（自己完結契約違反）")
+        failures.append(f"{label}: 外部 URL への src/href 参照を検出（自己完結契約違反）")
     if CDN_IMPORT_RE.search(html_text):
-        failures.append("CSS @import による外部リソース参照を検出")
+        failures.append(f"{label}: CSS @import による外部リソース参照を検出")
     if UNSAFE_DATA_URI_RE.search(html_text):
-        failures.append("png/jpeg/gif/webp 以外の data: URI（image/svg+xml 等）を検出")
+        failures.append(f"{label}: png/jpeg/gif/webp 以外の data: URI（image/svg+xml 等）を検出")
 
 
-def check_inline_js_safety(html_text: str, failures: list[str]) -> None:
+def check_inline_js_safety(html_text: str, failures: list[str], label: str = "outer HTML") -> None:
     if INLINE_HANDLER_RE.search(html_text):
-        failures.append("inline event handler 属性（onclick= 等）を検出")
-    for pattern, label in FORBIDDEN_JS_PATTERNS:
+        failures.append(f"{label}: inline event handler 属性（onclick= 等）を検出")
+    for pattern, name in FORBIDDEN_JS_PATTERNS:
         if pattern.search(html_text):
-            failures.append(f"禁止された JavaScript パターンを検出: {label}")
+            failures.append(f"{label}: 禁止された JavaScript パターンを検出: {name}")
 
 
 def check_roles(roles: list[str], failures: list[str]) -> None:
@@ -120,7 +120,7 @@ def main() -> int:
     parser.add_argument("html", type=Path)
     parser.add_argument(
         "--screenshots-dir", type=Path, default=None,
-        help="各スライドの PNG（1440x900）を出力するディレクトリ。省略時は撮影しない",
+        help="各ステップの PNG（1440x900）を出力するディレクトリ。省略時は撮影しない",
     )
     args = parser.parse_args()
 
@@ -147,60 +147,126 @@ def main() -> int:
         if args.screenshots_dir:
             args.screenshots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: 先頭スライドから ArrowRight で全スライドを順に遷移し、
-        # 各スライドで overflow を検証・PNG を撮影する。
-        #
-        # 注意: document.documentElement の scrollWidth/scrollHeight は使わない。
-        # html/body に overflow:hidden を設定しているため、非表示スライド
-        # （display:none）はもちろん、表示中スライドの内部コンテンツが
-        # ビューポートを超えてもドキュメント全体としては overflow:hidden で
-        # 隠れてしまい scrollHeight がビューポートサイズのまま変化しない
-        # （実測で確認済み: 意図的に長文を仕込んでも documentElement.scrollHeight
-        # は 900 のままだったが、該当 .slide 要素自身の scrollHeight は 2051 を示した）。
-        # 判定は「現在表示中の .slide 要素自身」の scrollHeight/scrollWidth と
-        # clientHeight/clientWidth を比較することで行う。
-        for i in range(total):
-            if i > 0:
-                page.keyboard.press("ArrowRight")
-                page.wait_for_timeout(30)
+        def check_active_overflow(label: str) -> None:
             dims = page.eval_on_selector(
                 ".slide.active",
                 "el => ({sh: el.scrollHeight, ch: el.clientHeight, sw: el.scrollWidth, cw: el.clientWidth})",
             )
             if dims["sw"] - dims["cw"] > OVERFLOW_TOLERANCE_PX:
                 failures.append(
-                    f"slide {i + 1}/{total} (role={roles[i]}): 横方向オーバーフロー "
-                    f"(scrollWidth={dims['sw']} > clientWidth={dims['cw']})"
+                    f"{label}: 横方向オーバーフロー (scrollWidth={dims['sw']} > clientWidth={dims['cw']})"
                 )
             if dims["sh"] - dims["ch"] > OVERFLOW_TOLERANCE_PX:
                 failures.append(
-                    f"slide {i + 1}/{total} (role={roles[i]}): 縦方向オーバーフロー "
-                    f"(scrollHeight={dims['sh']} > clientHeight={dims['ch']})"
+                    f"{label}: 縦方向オーバーフロー (scrollHeight={dims['sh']} > clientHeight={dims['ch']})"
                 )
-            if args.screenshots_dir:
-                out = args.screenshots_dir / f"slide-{i + 1:02d}-{roles[i]}.png"
-                page.screenshot(path=str(out))
 
-        # Step 2: ArrowRight を末尾より多く押しても範囲外に出ない（clamp）ことを確認
+        def check_screen_flow_spotlight(slide_idx: int, role: str, step: int, label: str) -> None:
+            if role != SCREEN_FLOW_ROLE:
+                return
+            has_iframe = page.eval_on_selector_all(".slide.active iframe", "els => els.length") > 0
+            if not has_iframe:
+                return  # wireframe が無い（テキストのみ）screen_flow はスポットライト対象外
+            step_items = page.eval_on_selector_all(".slide.active .step-item", "els => els.length")
+            if step_items == 0:
+                return
+            spot_count = page.eval_on_selector(
+                ".slide.active iframe",
+                "el => (el.contentDocument ? el.contentDocument.querySelectorAll('.__pitch_spotlight').length : -1)",
+            )
+            if spot_count == -1:
+                failures.append(f"{label}: iframe.contentDocument にアクセスできない")
+                return
+            if step == 0:
+                if spot_count != 0:
+                    failures.append(f"{label}: step0（未着手）でスポットライトが残存している（{spot_count}件）")
+            else:
+                if spot_count != 1:
+                    expected_sel = page.eval_on_selector_all(
+                        ".slide.active .step-item", "els => els.map(e => e.dataset.selector)"
+                    )
+                    sel = expected_sel[step - 1] if step - 1 < len(expected_sel) else "?"
+                    failures.append(
+                        f"{label}: selector '{sel}' に対するスポットライトが1件でない"
+                        f"（検出 {spot_count}件。セレクタが対象要素にマッチしていない可能性）"
+                    )
+
+        def check_iframe_self_contained(slide_idx: int, role: str, label: str) -> None:
+            if role != SCREEN_FLOW_ROLE:
+                return
+            frame_count = page.eval_on_selector_all(".slide.active iframe", "els => els.length")
+            if frame_count == 0:
+                return
+            outer = page.eval_on_selector(
+                ".slide.active iframe",
+                "el => (el.contentDocument ? el.contentDocument.documentElement.outerHTML : null)",
+            )
+            if outer is None:
+                failures.append(f"{label}: iframe 内 HTML を取得できない")
+                return
+            check_self_contained(outer, failures, label=f"{label} の iframe 内 HTML")
+            check_inline_js_safety(outer, failures, label=f"{label} の iframe 内 HTML（__pitchHighlight 除く既知パターン）")
+
+        # 先頭スライドから → でフラグメント→スライドの順に全域を遷移し、
+        # 各ステップでオーバーフロー・スポットライト整合を検証し PNG を撮影する。
+        #
+        # 注意: document.documentElement の scrollWidth/scrollHeight は使わない。
+        # html/body に overflow:hidden を設定しているため、非表示スライドはもちろん、
+        # 表示中スライドの内部コンテンツがビューポートを超えてもドキュメント全体としては
+        # overflow:hidden で隠れてしまい scrollHeight がビューポートサイズのまま
+        # 変化しない（実測で確認済み）。判定は「現在表示中の .slide 要素自身」の
+        # scrollHeight/scrollWidth と clientHeight/clientWidth の比較で行う。
+        cur = 0
+        step = 0
+        visited = 0
+        max_iterations = total * 8 + 20  # フラグメント数を含めても十分な安全マージン
+        while cur < total and visited < max_iterations:
+            visited += 1
+            role = roles[cur]
+            label = f"slide {cur + 1}/{total} (role={role}) step={step}"
+            check_active_overflow(label)
+            check_screen_flow_spotlight(cur, role, step, label)
+            check_iframe_self_contained(cur, role, label)
+            if args.screenshots_dir:
+                frag_count = page.eval_on_selector(".slide.active", "el => el.querySelectorAll('.fragment').length")
+                name = f"slide-{cur + 1:02d}-{role}.png" if frag_count == 0 else f"slide-{cur + 1:02d}-step-{step}.png"
+                page.screenshot(path=str(args.screenshots_dir / name))
+
+            frag_count = page.eval_on_selector(".slide.active", "el => el.querySelectorAll('.fragment').length")
+            if step < frag_count:
+                page.keyboard.press("ArrowRight")
+                page.wait_for_timeout(60)
+                step += 1
+            elif cur < total - 1:
+                page.keyboard.press("ArrowRight")
+                page.wait_for_timeout(60)
+                cur += 1
+                step = 0
+            else:
+                break
+
+        if visited >= max_iterations:
+            failures.append("走査が想定回数を超えた（フラグメント/スライド送りが終端しない可能性）")
+
+        # 末尾を超えて ArrowRight しても role=approval に留まる（clamp）ことを確認
         page.keyboard.press("ArrowRight")
         page.keyboard.press("ArrowRight")
         page.wait_for_timeout(30)
-        last_role = page.eval_on_selector(
-            ".slide.active", "el => el.dataset.role"
-        )
+        last_role = page.eval_on_selector(".slide.active", "el => el.dataset.role")
         if last_role != "approval":
             failures.append(
                 f"末尾を超えて ArrowRight しても role=approval に留まらない（検出: {last_role}）"
             )
 
-        # Step 3: R キーで先頭へ戻ることを確認
+        # 'R' キーで先頭（cover・step0）へ戻ることを確認
         page.keyboard.press("r")
         page.wait_for_timeout(30)
         first_role = page.eval_on_selector(".slide.active", "el => el.dataset.role")
         if first_role != "cover":
             failures.append(f"'R' キーで先頭（role=cover）へ戻らない（検出: {first_role}）")
 
-        # Step 4: クリックでの次スライド遷移を確認
+        # クリックでの次フラグメント/次スライド遷移を確認（cover は0フラグメントなので
+        # 1クリックで2枚目 premise の step0 へ進むはず）
         page.click("#next-btn")
         page.wait_for_timeout(30)
         second_role = page.eval_on_selector(".slide.active", "el => el.dataset.role")
@@ -209,10 +275,14 @@ def main() -> int:
                 f"next ボタンクリックで2枚目（role=premise）へ進まない（検出: {second_role}）"
             )
 
-        # Step 5: premise（2枚目）に「前提」が含まれるか
-        # role 順序契約が壊れて .slide[data-role='premise'] 自体が存在しない
-        # 場合に例外で落ちないよう、要素の有無を先に確認する
-        # （role 順序違反自体は Step 0 の check_roles() で既に failures 済み）。
+        # ← キーで戻る際、フラグメント0の状態からは前スライドの最終ステップへ戻ることを確認
+        page.keyboard.press("ArrowLeft")
+        page.wait_for_timeout(30)
+        back_role = page.eval_on_selector(".slide.active", "el => el.dataset.role")
+        if back_role != "cover":
+            failures.append(f"'←' で premise の step0 から cover へ戻らない（検出: {back_role}）")
+
+        # premise（2枚目）に「前提」が含まれるか
         if "premise" not in roles:
             failures.append("role=premise のスライドが存在しない（前提と解釈の内容チェック不可）")
         else:
@@ -220,7 +290,7 @@ def main() -> int:
             if "前提" not in premise_text:
                 failures.append("role=premise のスライドに「前提」という語が含まれない")
 
-        # Step 6: approval（最終）に「承認」と3〜5件の番号付き項目が含まれるか
+        # approval（最終）に「承認」と3〜5件の項目が含まれるか
         if "approval" not in roles:
             failures.append("role=approval のスライドが存在しない（承認事項の内容チェック不可）")
         else:
@@ -236,12 +306,17 @@ def main() -> int:
                     f"範囲外（検出 {approval_items}件）"
                 )
 
-        # Step 7: print media でナビゲーション要素が非表示になるか
+        # print media: ナビゲーション要素が非表示、全フラグメントが表示状態になるか
         page.emulate_media(media="print")
         for selector in (".topbar", ".progress", ".navbtn"):
             display = page.eval_on_selector(selector, "el => getComputedStyle(el).display")
             if display != "none":
                 failures.append(f"print media で {selector} が非表示になっていない（display={display}）")
+        frag_opacities = page.eval_on_selector_all(
+            ".fragment", "els => els.map(e => getComputedStyle(e).opacity)"
+        )
+        if any(op != "1" for op in frag_opacities):
+            failures.append("print media で opacity!=1 のフラグメントが残っている（全ステップ表示の契約違反）")
         page.emulate_media(media="screen")
 
         browser.close()

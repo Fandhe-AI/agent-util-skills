@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- サンプル用ワイヤーフレーム（架空アイデア「おつかいパンダ便」受付画面）。
+     create-design-doc/templates/wireframe-template.html と同じ流儀の自己完結 HTML。
+     create-pitch-deck の screen_flow.steps[].selector は #受付番号 等の id を対象にする。 -->
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>受付画面</title>
+<style>
+  :root {
+    --color-bg: #ffffff; --color-surface: #f4f6f8; --color-fg: #1c1c1c;
+    --color-muted: #5b6470; --color-border: #d8dee6; --color-primary: #1f3a93;
+    --color-primary-contrast: #ffffff; --color-accent: #e08e45;
+    --space-md: 16px; --radius-md: 8px;
+    --font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--color-bg); color: var(--color-fg); font-family: var(--font-family); }
+  header { padding: var(--space-md); background: var(--color-primary); color: var(--color-primary-contrast); font-weight: bold; }
+  main { padding: 24px; }
+  .card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 8px; font-size: 18px; }
+  .muted { color: var(--color-muted); font-size: 13px; }
+  #order-id { font-family: monospace; font-weight: bold; color: var(--color-primary); }
+  #courier-card { display: flex; align-items: center; gap: 12px; }
+  .avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--color-accent); flex: none; }
+</style>
+</head>
+<body>
+<header>おつかいパンダ便 受付画面</header>
+<main>
+  <div class="card" id="order-card">
+    <h2>依頼を受け付けました</h2>
+    <p>受付番号: <span id="order-id">PD-20260825-014</span></p>
+    <p class="muted">お届け予定: 本日18時まで</p>
+  </div>
+  <div class="card" id="courier-card">
+    <div class="avatar"></div>
+    <div>
+      <h2>配達員: たけうち さん</h2>
+      <p class="muted">現在地から徒歩12分 / 評価4.8</p>
+    </div>
+  </div>
+</main>
+</body>
+</html>

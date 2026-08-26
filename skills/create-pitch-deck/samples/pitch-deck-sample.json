@@ -67,21 +67,29 @@
     {
       "role": "screen_flow",
       "title": "依頼〜受付",
-      "image": "screens/screen-a-desktop.png",
-      "narrative": "依頼者がおつかい内容を入力すると、近隣の受託者が受付。受付番号とお届け予定時刻、受託者のプロフィールが即座に表示され、「誰がいつ届けてくれるか」がこの1画面で分かる。"
+      "wireframe": "wireframes/uketsuke.html",
+      "narrative": "依頼者がおつかい内容を入力すると、近隣の受託者が受付する。受付番号とお届け予定時刻、受託者のプロフィールが即座に表示され、「誰がいつ届けてくれるか」がこの1画面で分かる。",
+      "steps": [
+        {"selector": "#order-id", "note": "受付番号がその場で発行され、依頼が確定したことが一目で分かる"},
+        {"selector": "#courier-card", "note": "受託者のプロフィールと到着見込みが表示され、誰が届けるか事前に分かる"}
+      ]
     },
     {
       "role": "screen_flow",
       "title": "配達確認",
-      "image": "screens/screen-b-desktop.png",
-      "narrative": "受託者が受取人に手渡した時点でワンタップ確認すると、依頼者にも即座に「受取済み」バッジが表示される。双方の安心材料になり、評価の記録もここで完結する。"
+      "wireframe": "wireframes/kanryo.html",
+      "narrative": "受託者が受取人に手渡した時点でワンタップ確認すると、依頼者にも即座に「受取済み」バッジが表示される。双方の安心材料になり、評価の記録もここで完結する。",
+      "steps": [
+        {"selector": "#status-card", "note": "受取確認の時刻が記録され「受取済み」バッジが即座に反映される"},
+        {"selector": "#rating-card", "note": "その場で受託者を評価でき、次回以降のマッチング精度に活かせる"}
+      ]
     },
     {
       "role": "screen_flow",
       "title": "依頼一覧・履歴",
-      "image": null,
+      "wireframe": null,
       "note": "create-design-doc 未実行のためテキスト概略のみ",
-      "narrative": "過去の依頼・進行中の依頼を一覧で確認できる画面（想定）。実画面は create-design-doc 実行後に screens/ から差し込む。"
+      "narrative": "過去の依頼・進行中の依頼を一覧で確認できる画面（想定）。実画面は create-design-doc 実行後に wireframes/ から差し込む。"
     },
     {
       "role": "validation",

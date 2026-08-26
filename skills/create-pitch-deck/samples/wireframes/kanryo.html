@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- サンプル用ワイヤーフレーム（架空アイデア「おつかいパンダ便」配達確認画面）。 -->
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>配達確認画面</title>
+<style>
+  :root {
+    --color-bg: #ffffff; --color-surface: #f4f6f8; --color-fg: #1c1c1c;
+    --color-muted: #5b6470; --color-border: #d8dee6; --color-primary: #1f3a93;
+    --color-primary-contrast: #ffffff; --color-success: #1e824c;
+    --space-md: 16px; --radius-md: 8px;
+    --font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--color-bg); color: var(--color-fg); font-family: var(--font-family); }
+  header { padding: var(--space-md); background: var(--color-primary); color: var(--color-primary-contrast); font-weight: bold; }
+  main { padding: 24px; }
+  .card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px; }
+  .badge { display: inline-block; background: var(--color-success); color: #fff; border-radius: 4px; padding: 2px 8px; font-size: 12px; margin-left: 8px; }
+  #receive-time { font-weight: bold; }
+  #rating-card { display: flex; gap: 8px; align-items: center; }
+  .star { color: #e0a300; font-size: 20px; }
+</style>
+</head>
+<body>
+<header>おつかいパンダ便 配達確認画面</header>
+<main>
+  <div class="card" id="status-card">
+    <h2>配達完了 <span class="badge">受取済み</span></h2>
+    <p><span id="receive-time">17:42</span> に受取人「山田様」が確認しました</p>
+  </div>
+  <div class="card" id="rating-card">
+    <span class="star">★★★★★</span>
+    <span>受託者を評価する</span>
+  </div>
+</main>
+</body>
+</html>

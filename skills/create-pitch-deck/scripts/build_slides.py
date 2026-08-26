@@ -2,25 +2,27 @@
 """deck spec (JSON) から自己完結 HTML フルスクリーンスライド（1ファイル）を生成する renderer。
 
 役割: report spec -> HTML の create-html-report/scripts/render_report.py と対になる
-存在。spec の構造検証・HTML/CSS/JS 組み立て・画像の base64 data URI 埋め込みは
-本スクリプトの責務とし、呼び出し側 (SKILL.md の手順) は spec の内容判断にのみ
-集中できるようにする。PPTX 版（旧 build_deck.py）は廃止した。
+存在。spec の構造検証・HTML/CSS/JS 組み立て・ワイヤーフレームの iframe srcdoc 埋め込みは
+本スクリプトの責務とし、呼び出し側 (SKILL.md の手順) は spec の内容判断にのみ集中できる
+ようにする。演出の仕組みは references/presentation-patterns.md の一般化パターンに基づく。
 
 スライド構成: 前半 = 課題・解決アプローチ・スコープ・勝ち筋、後半 = 画面と操作の
-流れ（screen_flow, 2〜4枚。create-design-doc の screens/storyboard 画像を
-base64 data URI で取り込む）→ 検証計画 → 承認いただきたい事項・確認事項。
+流れ（screen_flow, 2〜4枚。create-design-doc の wireframes/*.html を iframe srcdoc で
+実寸レンダリングし、ステップ送りに合わせてスポットライト表示する）→ 検証計画 →
+承認いただきたい事項・確認事項。
 
-依存: 標準ライブラリのみ（Pillow 等の画像ライブラリ不要。PNG 幅は IHDR チャンクを
-自前でパースして読む）。生成された HTML の検証には別スクリプト validate_slides.py
-（Playwright 必須）を使う。
+各スライドの箇条書き・カード等は「フラグメント」として → キーで1つずつ出現し、
+尽きたら次スライドへ進む（reveal.js 的な2段階ナビゲーション）。
+
+依存: 標準ライブラリのみ（Pillow 等の画像ライブラリ不要）。生成された HTML の検証には
+別スクリプト validate_slides.py（Playwright 必須）を使う。
 """
 from __future__ import annotations
 
 import argparse
-import base64
 import html
 import json
-import struct
+import re
 import sys
 from pathlib import Path
 
@@ -49,43 +51,65 @@ ROLE_LABELS = {
     "approval": "APPROVAL",
 }
 
-# 埋め込み画像の上限。create-design-doc の既定キャプチャ幅 1440px を基準に、
-# 若干の余裕（retina 相当の再エンコード等）を見て 1600px までを許容する。
-# 超過時は Pillow 等に依存したリサイズをせず、SpecError で再キャプチャを促す
-# （依存追加より、埋め込みサイズの責務を呼び出し側に戻す方が安全なため）。
-MAX_IMAGE_WIDTH_PX = 1600
-MAX_IMAGE_BYTES = 2_000_000  # 2MB
-
 DARK_THEME = {
-    "bg": "#0B1220",
-    "surface": "#141C2E",
-    "fg": "#F5F7FA",
-    "muted": "#8B93A7",
-    "border": "#26304A",
-    "primary": "#5B8CFF",
-    "accent": "#F5C242",
-    "success": "#3DDC84",
-    "warning": "#F5C242",
-    "danger": "#FF6B6B",
+    "bg": "#0B1220", "surface": "#141C2E", "fg": "#F5F7FA", "muted": "#8B93A7",
+    "border": "#26304A", "primary": "#5B8CFF", "accent": "#F5C242",
+    "success": "#3DDC84", "warning": "#F5C242", "danger": "#FF6B6B",
 }
 LIGHT_THEME = {
-    "bg": "#FFFFFF",
-    "surface": "#F4F6F8",
-    "fg": "#1C1C1C",
-    "muted": "#5B6470",
-    "border": "#D8DEE6",
-    "primary": "#1F3A93",
-    "accent": "#E08E45",
-    "success": "#1E824C",
-    "warning": "#B7791F",
-    "danger": "#C0392B",
+    "bg": "#FFFFFF", "surface": "#F4F6F8", "fg": "#1C1C1C", "muted": "#5B6470",
+    "border": "#D8DEE6", "primary": "#1F3A93", "accent": "#E08E45",
+    "success": "#1E824C", "warning": "#B7791F", "danger": "#C0392B",
 }
 FONT_FAMILY = '"Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif'
 FONT_MONO = '"Roboto Mono", "SFMono-Regular", Consolas, monospace'
 
+# --- 自己完結・inline JS 安全性チェック（wireframe を埋め込む前の生テキストに適用する） ---
+# HTML エスケープ後に正規表現で検出しようとすると `="` が `=&quot;` に変わるなどして
+# 検出が効かなくなるため、埋め込み前の生テキストに対して必ずチェックする
+# （references/presentation-patterns.md「5. iframe の scale とレイアウト崩れの罠」と対の
+# 教訓: 「エスケープ後の文字列を検査しても手遅れ」）。
+EXTERNAL_URL_RE = re.compile(r"""(?:src|href)\s*=\s*["']https?://""", re.IGNORECASE)
+CDN_IMPORT_RE = re.compile(r"@import\s+url\(\s*['\"]?https?://", re.IGNORECASE)
+INLINE_HANDLER_RE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.IGNORECASE)
+FORBIDDEN_JS_PATTERNS = [
+    (re.compile(r"\beval\s*\("), "eval("),
+    (re.compile(r"\bnew\s+Function\s*\("), "new Function("),
+    (re.compile(r"\.innerHTML\s*="), ".innerHTML ="),
+    (re.compile(r"\bfetch\s*\("), "fetch("),
+    (re.compile(r"\bXMLHttpRequest\b"), "XMLHttpRequest"),
+    (re.compile(r"\bWebSocket\s*\("), "WebSocket("),
+    (re.compile(r"\bEventSource\s*\("), "EventSource("),
+    (re.compile(r"\bsendBeacon\s*\("), "navigator.sendBeacon("),
+]
+
 
 class SpecError(Exception):
     """spec の構造・内容が契約を満たさない場合に送出する。"""
+
+
+def check_embeddable_html(text: str, label: str) -> None:
+    """screen_flow.wireframe として埋め込む前の生 HTML テキストを検査する。
+
+    自己完結契約（外部 URL・CDN import 不在）と inline JS の安全性
+    （AGENTS.md P0: eval・innerHTML代入・inline handler・network API 不使用）を
+    満たさない wireframe は埋め込まず SpecError で拒否する。
+    """
+    violations = []
+    if EXTERNAL_URL_RE.search(text):
+        violations.append("外部 URL への src/href 参照")
+    if CDN_IMPORT_RE.search(text):
+        violations.append("CSS @import による外部リソース参照")
+    if INLINE_HANDLER_RE.search(text):
+        violations.append("inline event handler 属性（onclick= 等）")
+    for pattern, name in FORBIDDEN_JS_PATTERNS:
+        if pattern.search(text):
+            violations.append(f"禁止された JavaScript パターン: {name}")
+    if violations:
+        raise SpecError(
+            f"{label} は自己完結・安全な JS の契約を満たさないため埋め込めない: "
+            + " / ".join(violations)
+        )
 
 
 def load_spec(path: Path) -> dict:
@@ -127,7 +151,7 @@ def validate_spec(spec: dict) -> None:
         raise SpecError(
             f"role={SCREEN_FLOW_ROLE}（画面と操作の流れ）は"
             f"{SCREEN_FLOW_MIN}〜{SCREEN_FLOW_MAX}枚連続で配置すること"
-            f"（現在 {n_flow}枚）。PO 承認会でシナリオごとに画面の使われ方を説明する枠"
+            f"（現在 {n_flow}枚）"
         )
 
     suffix = roles[idx:]
@@ -143,9 +167,7 @@ def validate_spec(spec: dict) -> None:
         if not title or not isinstance(title, str):
             raise SpecError(f"role={role} に title (string) が必要")
 
-        if role == "premise":
-            _require_str_list(slide, "bullets", role, min_len=1)
-        elif role in ("problem", "solution", "validation"):
+        if role in ("premise", "problem", "solution", "validation"):
             _require_str_list(slide, "bullets", role, min_len=1)
         elif role == "scope":
             _require_str_list(slide, "in_scope", role, min_len=1)
@@ -157,8 +179,7 @@ def validate_spec(spec: dict) -> None:
             for item in items:
                 if not isinstance(item, dict) or not item.get("text"):
                     raise SpecError("winning.items の各要素は text を持つこと")
-                label = item.get("label")
-                if label not in WINNING_LABELS:
+                if item.get("label") not in WINNING_LABELS:
                     raise SpecError(
                         "winning.items の各要素は label に "
                         f"{sorted(WINNING_LABELS)} のいずれかを指定すること。"
@@ -170,17 +191,30 @@ def validate_spec(spec: dict) -> None:
             if not narrative or not isinstance(narrative, str):
                 raise SpecError(
                     f"role={SCREEN_FLOW_ROLE} に narrative (string) が必要。"
-                    "「この場面で・この画面が・こう使われる」を説明する文"
+                    "「この場面で・この画面が・こう使われる」を説明する導入文"
                 )
-            image = slide.get("image")
-            if image is not None and not isinstance(image, str):
-                raise SpecError(f"role={SCREEN_FLOW_ROLE}.image は string か null であること")
-            if not image:
+            wireframe = slide.get("wireframe")
+            if wireframe is not None and not isinstance(wireframe, str):
+                raise SpecError(f"role={SCREEN_FLOW_ROLE}.wireframe は string か null であること")
+            if wireframe:
+                steps = slide.get("steps")
+                if not isinstance(steps, list) or not steps:
+                    raise SpecError(
+                        f"role={SCREEN_FLOW_ROLE} で wireframe を指定する場合、"
+                        "steps ({selector, note} の配列。1件以上) が必要"
+                    )
+                for step in steps:
+                    if not isinstance(step, dict) or not step.get("selector") or not step.get("note"):
+                        raise SpecError(
+                            f"role={SCREEN_FLOW_ROLE}.steps の各要素は "
+                            "selector (CSS セレクタ文字列) と note (string) を持つこと"
+                        )
+            else:
                 note = slide.get("note")
                 if not note or not isinstance(note, str):
                     raise SpecError(
-                        f"role={SCREEN_FLOW_ROLE} で image が無い場合は note (string) が必要。"
-                        "例: 'create-design-doc 未実行のためテキスト概略のみ'"
+                        f"role={SCREEN_FLOW_ROLE} で wireframe が無い場合は note (string) が"
+                        "必要。例: 'create-design-doc 未実行のためテキスト概略のみ'"
                     )
         elif role == "approval":
             items = slide.get("items")
@@ -215,44 +249,26 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
-def read_png_size(path: Path) -> tuple[int, int]:
-    """PNG の IHDR チャンクから (width, height) を読む。Pillow 非依存。"""
-    with path.open("rb") as f:
-        sig = f.read(8)
-        if sig != b"\x89PNG\r\n\x1a\n":
-            raise SpecError(f"{path} は PNG シグネチャを持たない（PNG 形式のみ埋め込み可）")
-        f.read(4)  # chunk length
-        chunk_type = f.read(4)
-        if chunk_type != b"IHDR":
-            raise SpecError(f"{path} の先頭チャンクが IHDR でない（不正な PNG）")
-        width, height = struct.unpack(">II", f.read(8))
-        return width, height
+# 事実（label="事実"）の winning item テキスト中の最初の数値をカウントアップ演出付きの
+# span で包む。ID っぽい表記（"PoC-1" 等、数字の前後が英数字/ハイフン）は対象外にする。
+# 前後の判定には \w ではなく [A-Za-z0-9-] を使う: Python の re は既定で Unicode 対応の
+# \w を使うため、漢字・ひらがな（例: 「8分」の「分」、「が8分」の「が」）が \w に含まれて
+# しまい、日本語の数字表現をことごとく除外してしまう不具合が実測で見つかったため
+# （例: 「8分」が \w 境界判定に阻まれてマッチしなかった）。
+NUMBER_RE = re.compile(r"(?<![A-Za-z0-9-])(\d{1,3}(?:,\d{3})+|\d+)(?![A-Za-z0-9])")
 
 
-def embed_image_data_uri(path: Path) -> str:
-    if not path.is_file():
-        raise SpecError(f"screen_flow.image で指定されたファイルが存在しない: {path}")
-    size_bytes = path.stat().st_size
-    if size_bytes > MAX_IMAGE_BYTES:
-        raise SpecError(
-            f"{path} のファイルサイズが上限を超える（{size_bytes}バイト > "
-            f"{MAX_IMAGE_BYTES}バイト）。create-design-doc で 1440px 幅程度に再キャプチャ"
-            "するか圧縮してから指定すること"
-        )
-    width, _ = read_png_size(path)
-    if width > MAX_IMAGE_WIDTH_PX:
-        raise SpecError(
-            f"{path} の画像幅が上限を超える（{width}px > {MAX_IMAGE_WIDTH_PX}px）。"
-            "create-design-doc の capture_screenshot.py で --width 1440 程度に"
-            "再キャプチャしてから指定すること"
-        )
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{data}"
-
-
-def resolve_image_path(image: str, base_dir: Path) -> Path:
-    p = Path(image)
-    return p if p.is_absolute() else (base_dir / p)
+def wrap_countup(text: str) -> str:
+    m = NUMBER_RE.search(text)
+    if not m:
+        return esc(text)
+    prefix, number, suffix = text[: m.start()], m.group(1), text[m.end():]
+    target = number.replace(",", "")
+    return (
+        f"{esc(prefix)}"
+        f'<span class="countup" data-target="{esc(target)}">0</span>'
+        f"{esc(suffix)}"
+    )
 
 
 def render_cover(slide: dict, base_dir: Path) -> str:
@@ -267,7 +283,7 @@ def render_cover(slide: dict, base_dir: Path) -> str:
 
 
 def render_bullets(slide: dict, base_dir: Path) -> str:
-    items = "".join(f"<li>{esc(b)}</li>" for b in slide["bullets"])
+    items = "".join(f'<li class="fragment">{esc(b)}</li>' for b in slide["bullets"])
     body = f'<h2>{esc(slide["title"])}</h2><ul class="bullets">{items}</ul>'
     source_note = slide.get("source_note")
     if source_note:
@@ -281,8 +297,8 @@ def render_scope(slide: dict, base_dir: Path) -> str:
     return (
         f'<h2>{esc(slide["title"])}</h2>'
         '<div class="scope-grid">'
-        f'<div class="scope-col"><h3>In Scope</h3><ul class="bullets">{in_items}</ul></div>'
-        f'<div class="scope-col scope-out"><h3>Out of Scope</h3><ul class="bullets">{out_items}</ul></div>'
+        f'<div class="scope-col fragment"><h3>In Scope</h3><ul class="bullets">{in_items}</ul></div>'
+        f'<div class="scope-col scope-out fragment"><h3>Out of Scope</h3><ul class="bullets">{out_items}</ul></div>'
         "</div>"
     )
 
@@ -291,26 +307,50 @@ def render_winning(slide: dict, base_dir: Path) -> str:
     items = ""
     for item in slide["items"]:
         cls = "hypothesis" if item["label"] == "仮説" else "fact"
+        text_html = wrap_countup(item["text"]) if item["label"] == "事実" else esc(item["text"])
         items += (
-            f'<li class="winning-item {cls}"><span class="badge">{esc(item["label"])}</span>'
-            f"{esc(item['text'])}</li>"
+            f'<li class="winning-item fragment {cls}"><span class="badge">{esc(item["label"])}</span>'
+            f"{text_html}</li>"
         )
     return f'<h2>{esc(slide["title"])}</h2><ul class="winning-list">{items}</ul>'
 
 
 def render_screen_flow(slide: dict, base_dir: Path) -> str:
-    image = slide.get("image")
-    if image:
-        data_uri = embed_image_data_uri(resolve_image_path(image, base_dir))
-        visual = f'<img class="screen-shot" src="{data_uri}" alt="{esc(slide["title"])}の画面" />'
+    wireframe = slide.get("wireframe")
+    narrative = f'<p class="screen-flow-narrative-intro">{esc(slide["narrative"])}</p>'
+
+    if wireframe:
+        wf_path = Path(wireframe)
+        if not wf_path.is_absolute():
+            wf_path = base_dir / wf_path
+        if not wf_path.is_file():
+            raise SpecError(f"screen_flow.wireframe が存在しない: {wf_path}")
+        wf_text = wf_path.read_text(encoding="utf-8")
+        check_embeddable_html(wf_text, f"screen_flow.wireframe ({wf_path})")
+        injected = wf_text.replace(
+            "</body>", SPOTLIGHT_INJECTION + "</body>", 1
+        ) if "</body>" in wf_text else wf_text + SPOTLIGHT_INJECTION
+        visual = (
+            '<div class="screen-frame">'
+            f'<iframe class="screen-iframe" srcdoc="{esc(injected)}" '
+            'title="画面のライブプレビュー" scrolling="no"></iframe>'
+            "</div>"
+        )
+        steps_html = "".join(
+            f'<li class="fragment step-item" data-selector="{esc(step["selector"])}">{esc(step["note"])}</li>'
+            for step in slide["steps"]
+        )
+        steps_block = f'<ol class="screen-flow-steps">{steps_html}</ol>'
     else:
         note = esc(slide.get("note", ""))
         visual = f'<div class="screen-shot-placeholder"><p>{note}</p></div>'
+        steps_block = ""
+
     return (
         f'<h2>{esc(slide["title"])}</h2>'
         '<div class="screen-flow-body">'
         f'<div class="screen-flow-visual">{visual}</div>'
-        f'<div class="screen-flow-narrative"><p>{esc(slide["narrative"])}</p></div>'
+        f'<div class="screen-flow-narrative">{narrative}{steps_block}</div>'
         "</div>"
     )
 
@@ -319,7 +359,7 @@ def render_approval(slide: dict, base_dir: Path) -> str:
     items = ""
     for i, item in enumerate(slide["items"], start=1):
         items += (
-            f'<li class="approval-item" data-kind="{esc(item["kind"])}">'
+            f'<li class="approval-item fragment" data-kind="{esc(item["kind"])}">'
             f'<span class="approval-index">{i}</span>'
             f'<span class="badge">{esc(item["kind"])}</span>{esc(item["text"])}</li>'
         )
@@ -337,6 +377,37 @@ ROLE_RENDERERS = {
     "validation": render_bullets,
     "approval": render_approval,
 }
+
+# wireframe の srcdoc へ注入するスポットライト機構。
+# 親ドキュメントから iframe.contentWindow.__pitchHighlight(selector) を呼ぶと、
+# (a) 直前のハイライトを解除し (b) 対象要素に .{"__pitch_spotlight"} を付与して
+# z-index で dim オーバーレイの上に持ち上げ (c) 画面全体を薄暗くする dim オーバーレイを
+# 追加し (d) 対象要素を scrollIntoView する。addEventListener/classList/DOM 操作のみで
+# 完結し、eval・innerHTML 代入・inline handler・network API を一切使わない。
+SPOTLIGHT_INJECTION = """
+<style id="__pitch_spotlight_style">
+.__pitch_dim{position:fixed;inset:0;background:rgba(6,8,20,.55);z-index:99998;pointer-events:none;}
+.__pitch_spotlight{position:relative !important;z-index:99999 !important;outline:3px solid #F5C242;outline-offset:4px;box-shadow:0 0 0 8px rgba(245,194,66,.22),0 0 24px 4px rgba(245,194,66,.5);border-radius:6px;}
+</style>
+<script>
+(function(){
+  window.__pitchHighlight = function(selector){
+    var prevDim = document.querySelector('.__pitch_dim');
+    if(prevDim){ prevDim.parentNode.removeChild(prevDim); }
+    var prevTarget = document.querySelector('.__pitch_spotlight');
+    if(prevTarget){ prevTarget.classList.remove('__pitch_spotlight'); }
+    if(!selector){ return; }
+    var target = document.querySelector(selector);
+    if(!target){ return; }
+    var dim = document.createElement('div');
+    dim.className = '__pitch_dim';
+    document.body.appendChild(dim);
+    target.classList.add('__pitch_spotlight');
+    target.scrollIntoView({behavior:'smooth', block:'center'});
+  };
+})();
+</script>
+"""
 
 
 CSS_TEMPLATE = """
@@ -371,78 +442,115 @@ html, body {{
   flex-direction: column;
   justify-content: center;
   padding: 104px 96px 56px;
+  opacity: 0;
+  transform: translateX(32px);
+  transition: opacity .35s ease, transform .35s ease;
 }}
-.slide.active {{ display: flex; }}
-.slide h1, .slide h2 {{
-  font-weight: 800;
-  line-height: 1.15;
-  margin: 0 0 28px;
-}}
+.slide.active {{ display: flex; opacity: 1; transform: none; }}
+.slide h1, .slide h2 {{ font-weight: 800; line-height: 1.15; margin: 0 0 28px; }}
 .slide h2 {{ font-size: clamp(28px, 4.2vw, 52px); }}
+
+/* ---------- cover 入場演出 ---------- */
 .cover {{ text-align: left; }}
+.cover-title, .cover-subtitle, .cover-meta {{ opacity: 0; transform: translateY(14px); }}
+.slide-cover.active .cover-title {{ animation: coverIn .55s ease forwards; }}
+.slide-cover.active .cover-subtitle {{ animation: coverIn .55s ease .12s forwards; }}
+.slide-cover.active .cover-meta {{ animation: coverIn .55s ease .22s forwards; }}
+@keyframes coverIn {{ to {{ opacity: 1; transform: none; }} }}
 .cover-title {{ font-size: clamp(40px, 7vw, 84px); margin: 0 0 20px; }}
 .cover-subtitle {{ font-size: clamp(16px, 2vw, 24px); color: var(--color-muted); margin: 0 0 16px; }}
 .cover-meta {{ font-family: var(--font-mono); font-size: 13px; color: var(--color-muted); }}
+
+/* ---------- フラグメント（ステップ送り）の3状態 ---------- */
+.fragment {{ opacity: .16; transition: opacity .35s ease, transform .35s ease; }}
+.fragment.is-current {{ opacity: 1; }}
+.fragment.is-done {{ opacity: .5; }}
+
 .bullets {{ list-style: none; margin: 0; padding: 0; font-size: clamp(16px, 2vw, 26px); line-height: 1.7; }}
 .bullets li {{ margin-bottom: 14px; padding-left: 1.4em; position: relative; }}
-.bullets li::before {{ content: "—"; position: absolute; left: 0; color: var(--color-primary); }}
+.bullets li::before {{ content: "—"; position: absolute; left: 0; color: var(--color-primary); transition: color .3s; }}
+.bullets li.fragment.is-current::before {{ content: "▶"; color: var(--color-accent); }}
 .source-note {{ margin-top: 24px; font-size: 13px; color: var(--color-muted); }}
+
 .scope-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }}
-.scope-col {{ background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 24px; }}
+.scope-col {{ background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 24px; transform: translateY(10px); }}
+.scope-col.is-current, .scope-col.is-done {{ transform: none; }}
 .scope-col h3 {{ margin: 0 0 12px; font-size: 18px; color: var(--color-primary); }}
 .scope-out h3 {{ color: var(--color-muted); }}
+
 .winning-list {{ list-style: none; margin: 0; padding: 0; font-size: clamp(16px, 2vw, 24px); line-height: 1.7; }}
 .winning-item {{ margin-bottom: 16px; }}
 .winning-item.hypothesis {{ color: var(--color-accent); }}
+.countup {{ font-variant-numeric: tabular-nums; font-weight: 800; }}
 .badge {{
-  display: inline-block;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  padding: 2px 8px;
-  margin-right: 10px;
-  border-radius: 4px;
-  border: 1px solid currentColor;
-  vertical-align: middle;
+  display: inline-block; font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em;
+  padding: 2px 8px; margin-right: 10px; border-radius: 4px; border: 1px solid currentColor; vertical-align: middle;
 }}
-.screen-flow-body {{ display: flex; gap: 40px; align-items: center; flex: 1; min-height: 0; }}
-.screen-flow-visual {{ flex: 0 0 46%; max-height: 60vh; display: flex; align-items: center; justify-content: center; }}
-.screen-shot {{ max-width: 100%; max-height: 60vh; border: 1px solid var(--color-border); border-radius: 8px; }}
+
+/* ---------- screen_flow: 実寸ワイヤーフレーム + スポットライト ---------- */
+.screen-flow-body {{ display: flex; gap: 40px; align-items: stretch; flex: 1; min-height: 0; }}
+.screen-flow-visual {{ flex: 0 0 56%; display: flex; align-items: center; justify-content: center; min-width: 0; }}
+.screen-frame {{
+  position: relative; width: 100%; max-width: 720px; aspect-ratio: 1440 / 900;
+  overflow: hidden; border: 1px solid var(--color-border); border-radius: 10px;
+  background: #fff; box-shadow: 0 18px 40px rgba(0,0,0,.35);
+}}
+.screen-iframe {{
+  position: absolute; top: 0; left: 0; width: 1440px; height: 900px; border: 0;
+  transform-origin: top left;
+  /* 実寸(1440x900)を .screen-frame の実表示幅に合わせて縮小する。倍率は
+     build_slides.py が .screen-frame の想定表示幅から算出し要素へ直接書き込む
+     （CSS だけでは親要素の実測ピクセル幅を参照できないため）。 */
+}}
 .screen-shot-placeholder {{
   width: 100%; height: 240px; border: 1px dashed var(--color-border); border-radius: 8px;
   display: flex; align-items: center; justify-content: center; color: var(--color-muted);
   font-size: 14px; text-align: center; padding: 16px;
 }}
-.screen-flow-narrative {{ flex: 1 1 auto; font-size: clamp(16px, 2vw, 24px); line-height: 1.7; }}
+.screen-flow-narrative {{ flex: 1 1 auto; min-width: 0; }}
+.screen-flow-narrative-intro {{ font-size: clamp(15px, 1.8vw, 20px); line-height: 1.7; margin: 0 0 20px; color: var(--color-muted); }}
+.screen-flow-steps {{ list-style: none; margin: 0; padding: 0; counter-reset: step; }}
+.screen-flow-steps .step-item {{
+  counter-increment: step; margin-bottom: 14px; padding-left: 2em; position: relative;
+  font-size: clamp(15px, 1.8vw, 20px); line-height: 1.6;
+}}
+.screen-flow-steps .step-item::before {{
+  content: counter(step); position: absolute; left: 0; top: 0; width: 1.5em; height: 1.5em;
+  border-radius: 50%; border: 1.5px solid var(--color-border); color: var(--color-muted);
+  display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 12px;
+  transition: border-color .3s, color .3s, background .3s;
+}}
+.screen-flow-steps .step-item.is-current::before {{
+  border-color: var(--color-accent); color: var(--color-bg); background: var(--color-accent); font-weight: 800;
+}}
+
+/* ---------- approval ---------- */
 .approval-list {{ list-style: none; margin: 0; padding: 0; font-size: clamp(16px, 2vw, 24px); line-height: 1.8; }}
 .approval-item {{ margin-bottom: 18px; display: flex; align-items: baseline; gap: 4px; }}
 .approval-index {{ font-family: var(--font-mono); color: var(--color-muted); margin-right: 8px; }}
 .slide-approval {{ background: var(--color-surface); }}
 
+/* ---------- HUD / progress / nav ---------- */
 .topbar {{
   position: absolute; top: 0; left: 0; right: 0; height: 64px;
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 40px; pointer-events: none;
+  display: flex; align-items: center; justify-content: space-between; padding: 0 40px; pointer-events: none;
 }}
 .topbar .role-label {{
-  font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.28em;
-  text-transform: uppercase; color: var(--color-muted);
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: .28em; text-transform: uppercase; color: var(--color-muted);
 }}
+.slide.active .topbar .role-label {{ animation: labelIn .4s ease; }}
+@keyframes labelIn {{ from {{ letter-spacing: .05em; opacity: .3; }} to {{ letter-spacing: .28em; opacity: 1; }} }}
 .topbar .page-num {{ font-family: var(--font-mono); font-size: 12px; color: var(--color-muted); }}
 
-.progress {{
-  position: fixed; bottom: 0; left: 0; right: 0; height: 4px;
-  display: flex; gap: 3px; padding: 0 3px; z-index: 20;
-}}
-.progress .seg {{ flex: 1; background: var(--color-border); border-radius: 2px; }}
-.progress .seg.filled {{ background: var(--color-accent); }}
+.progress {{ position: fixed; bottom: 0; left: 0; right: 0; height: 4px; display: flex; gap: 3px; padding: 0 3px; z-index: 20; }}
+.progress .seg {{ flex: 1; background: var(--color-border); border-radius: 2px; overflow: hidden; }}
+.progress .seg-fill {{ width: calc(var(--fill, 0) * 1%); height: 100%; background: var(--color-accent); transition: width .25s ease; }}
+.progress .seg.filled .seg-fill {{ width: 100%; }}
 
 .navbtn {{
-  position: fixed; top: 50%; transform: translateY(-50%);
-  width: 48px; height: 48px; border-radius: 50%;
-  border: 1px solid var(--color-border); background: var(--color-surface);
-  color: var(--color-fg); font-size: 20px; cursor: pointer; z-index: 20;
-  display: flex; align-items: center; justify-content: center;
+  position: fixed; top: 50%; transform: translateY(-50%); width: 48px; height: 48px; border-radius: 50%;
+  border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-fg);
+  font-size: 20px; cursor: pointer; z-index: 20; display: flex; align-items: center; justify-content: center;
 }}
 .navbtn:hover {{ border-color: var(--color-primary); }}
 #prev-btn {{ left: 24px; }}
@@ -453,11 +561,17 @@ html, body {{
   html, body {{ height: auto; overflow: visible; }}
   .deck {{ position: static; width: auto; height: auto; }}
   .slide {{
-    position: static !important; display: flex !important;
+    position: static !important; display: flex !important; opacity: 1 !important; transform: none !important;
     width: 100vw; height: 100vh; page-break-after: always;
   }}
   .slide:last-child {{ page-break-after: auto; }}
+  /* 印刷時は「今どのステップか」を無視し全フラグメントを最終状態にする */
+  .fragment {{ opacity: 1 !important; transform: none !important; }}
   @page {{ size: landscape; margin: 0; }}
+}}
+
+@media (prefers-reduced-motion: reduce) {{
+  * {{ animation-duration: .001s !important; transition-duration: .001s !important; }}
 }}
 """
 
@@ -471,31 +585,107 @@ JS_TEMPLATE = """
   var slides = document.querySelectorAll('.slide');
   var segs = document.querySelectorAll('.progress .seg');
   var total = slides.length;
-  var current = 0;
+  var cur = 0;
+  var step = 0;
 
-  function goTo(i) {
-    if (i < 0) { i = 0; }
-    if (i > total - 1) { i = total - 1; }
-    slides[current].classList.remove('active');
-    current = i;
-    slides[current].classList.add('active');
+  function fragCount(i) { return slides[i].querySelectorAll('.fragment').length; }
+
+  function fitScreenFrame(slide) {
+    var frame = slide.querySelector('.screen-frame');
+    var iframe = slide.querySelector('.screen-iframe');
+    if (!frame || !iframe) { return; }
+    var scale = frame.clientWidth / 1440;
+    iframe.style.transform = 'scale(' + scale + ')';
+  }
+
+  function highlightScreenFlow(slide, s) {
+    var iframe = slide.querySelector('.screen-iframe');
+    if (!iframe || !iframe.contentWindow || !iframe.contentWindow.__pitchHighlight) { return; }
+    var stepItems = slide.querySelectorAll('.step-item');
+    var sel = null;
+    if (s >= 1 && stepItems[s - 1]) { sel = stepItems[s - 1].getAttribute('data-selector'); }
+    iframe.contentWindow.__pitchHighlight(sel);
+  }
+
+  function render() {
+    slides.forEach(function (s, i) { s.classList.toggle('active', i === cur); });
+    var active = slides[cur];
+    var frags = active.querySelectorAll('.fragment');
+    frags.forEach(function (el, idx) {
+      var n = idx + 1;
+      el.classList.toggle('is-current', n === step);
+      el.classList.toggle('is-done', n < step);
+    });
+    if (active.dataset.role === 'screen_flow') {
+      fitScreenFrame(active);
+      highlightScreenFlow(active, step);
+    }
     segs.forEach(function (seg, idx) {
-      seg.classList.toggle('filled', idx <= current);
+      seg.classList.toggle('filled', idx < cur);
+      if (idx === cur) {
+        var f = fragCount(cur);
+        var pct = f > 0 ? Math.round((step / f) * 100) : 100;
+        seg.style.setProperty('--fill', pct);
+      } else if (idx > cur) {
+        seg.style.setProperty('--fill', 0);
+      }
     });
   }
 
+  function next() {
+    var f = fragCount(cur);
+    if (step < f) { step += 1; render(); }
+    else if (cur < total - 1) { cur += 1; step = 0; render(); }
+  }
+
+  function prev() {
+    if (step > 0) { step -= 1; render(); }
+    else if (cur > 0) { cur -= 1; step = fragCount(cur); render(); }
+  }
+
+  function resetToStart() { cur = 0; step = 0; render(); }
+
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { goTo(current + 1); }
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { goTo(current - 1); }
-    else if (e.key === 'r' || e.key === 'R') { goTo(0); }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); next(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); prev(); }
+    else if (e.key === 'r' || e.key === 'R') { resetToStart(); }
   });
 
   var prevBtn = document.getElementById('prev-btn');
   var nextBtn = document.getElementById('next-btn');
-  if (prevBtn) { prevBtn.addEventListener('click', function () { goTo(current - 1); }); }
-  if (nextBtn) { nextBtn.addEventListener('click', function () { goTo(current + 1); }); }
+  if (prevBtn) { prevBtn.addEventListener('click', prev); }
+  if (nextBtn) { nextBtn.addEventListener('click', next); }
 
-  goTo(0);
+  window.addEventListener('resize', function () {
+    var active = slides[cur];
+    if (active.dataset.role === 'screen_flow') { fitScreenFrame(active); }
+  });
+
+  render();
+
+  // countup: フラグメントが is-current になった時点で発火する軽量カウントアップ。
+  // MutationObserver ではなく render() 呼び出し直後に毎回全走査する単純な実装にして
+  // タイミングのズレを避ける（要素数が少ないため毎回の全走査でも軽量）。
+  var animatedCountups = new WeakSet();
+  function tickCountups() {
+    document.querySelectorAll('.fragment.is-current .countup').forEach(function (el) {
+      if (animatedCountups.has(el)) { return; }
+      animatedCountups.add(el);
+      var target = parseInt(el.getAttribute('data-target'), 10) || 0;
+      var startTime = null;
+      var duration = 600;
+      function step(ts) {
+        if (startTime === null) { startTime = ts; }
+        var p = Math.min(1, (ts - startTime) / duration);
+        el.textContent = Math.round(target * p).toLocaleString('ja-JP');
+        if (p < 1) { requestAnimationFrame(step); }
+      }
+      requestAnimationFrame(step);
+    });
+  }
+  var originalRender = render;
+  render = function () { originalRender(); tickCountups(); };
+  tickCountups();
 })();
 """
 
@@ -523,7 +713,7 @@ def build_html(spec: dict, base_dir: Path, theme_name: str) -> str:
             "</section>"
         )
 
-    segs_html = "".join('<div class="seg"></div>' for _ in range(total))
+    segs_html = "".join('<div class="seg"><div class="seg-fill"></div></div>' for _ in range(total))
     css = CSS_TEMPLATE.format(
         bg=theme["bg"], surface=theme["surface"], fg=theme["fg"], muted=theme["muted"],
         border=theme["border"], primary=theme["primary"], accent=theme["accent"],

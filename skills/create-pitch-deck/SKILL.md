@@ -6,9 +6,11 @@ description: >
   「ピッチデック作って」「企画スライドにまとめて」「プレゼン資料作って」「承認会用の
   資料を作って」「勝ち筋を整理して」で使用。前半（前提と解釈・課題・解決アプローチ・
   対象範囲・勝ち筋）→後半（画面と操作の流れ・検証計画・承認いただきたい事項）の
-  10〜14枚可変構成。画面と操作の流れは create-design-doc の screenshot を
-  base64 data URI で取り込む。両スキルは concept-brief.md を介して整合し、推奨実行
-  順序は create-design-doc → create-pitch-deck。PPTX は生成しない。
+  10〜14枚可変構成。箇条書きは → キーでフラグメント（ステップ）ごとに出現し現在地が
+  強調される。画面と操作の流れは create-design-doc の wireframes/*.html を iframe で
+  実寸レンダリングし、ステップに合わせて対象要素をスポットライト表示する。両スキルは
+  concept-brief.md を介して整合し、推奨実行順序は create-design-doc → create-pitch-deck。
+  PPTX は生成しない。
 model: sonnet
 user-invocable: true
 argument-hint: "<入力文書のパス> [--output <path.html>] [--theme dark|light] [--brief <path>]"
@@ -28,15 +30,9 @@ $ARGUMENTS で渡された入力文書（アイデア・要件文書）を読み
 
 想定利用シーンは「ユーザーが PO で、AI が承認会に資料を持ってきて説明する」形。**前半で
 解決する課題と解決方法、後半で具体的にどのような画面でどういう流れの操作になるのかを説明し、
-PO から承認をもらう**という説明の流れを意識して構成する。ブラウザでフルスクリーン表示し、
-実際にキーボードで送りながら説明することを想定する。
-
-## 推奨実行タイミング
-
-アイデア文書と検証計画（PoC 結果を含む）が固まり、プロトタイプ／本開発に入る**前**が最適。
-検証（PoC）の結果が出ていれば `winning.items[].label: "事実"` として反映できる。ビヘイビア・
-詳細仕様の定義を行うフローを持つ場合は、**その直前に本スキルを実行し、承認済みの資料を
-仕様定義の入力にする**（承認後の手戻りを減らすため）。
+PO から承認をもらう**という説明の流れを意識して構成する。**静的なレイアウトの模倣ではなく、
+画面が実際に動き、説明テキストがそれと連動してハイライトされること**が品質の本質であり、
+ブラウザでフルスクリーン表示し実際にキーボードで送りながら説明することを想定する。
 
 ## ペルソナ
 
@@ -49,6 +45,13 @@ PO から承認をもらう**という説明の流れを意識して構成する
 - 検証（PoC）で何が分かっていて、何がまだ未検証か
 - 承認をもらう上で PO が判断に迷いそうな点は何か（承認事項・確認事項として明示する）
 
+## 推奨実行タイミング
+
+アイデア文書と検証計画（PoC 結果を含む）が固まり、プロトタイプ／本開発に入る**前**が最適。
+検証（PoC）の結果が出ていれば `winning.items[].label: "事実"` として反映できる。ビヘイビア・
+詳細仕様の定義を行うフローを持つ場合は、**その直前に本スキルを実行し、承認済みの資料を
+仕様定義の入力にする**（承認後の手戻りを減らすため）。
+
 ## 連携: create-design-doc との整合（concept-brief.md・推奨実行順序）
 
 本スキルと `create-design-doc` は、共有合意文書 `concept-brief.md` を介して整合する
@@ -57,14 +60,15 @@ PO から承認をもらう**という説明の流れを意識して構成する
 食い違う」事態を防ぐための仕組みであり、両スキルとも同じ手順（Step 1・Step 9 相当）を持つ。
 
 **推奨実行順序: `create-design-doc` → `create-pitch-deck`。** 本スキルの「画面と操作の
-流れ」（`screen_flow`）スライドは `create-design-doc` が生成する `screens/*.png` を
-base64 data URI として取り込むため、先に `create-design-doc` を実行しておく。
+流れ」（`screen_flow`）スライドは `create-design-doc` が生成する `wireframes/*.html` を
+実寸レンダリングして取り込むため、先に `create-design-doc` を実行しておく。
 
 - **逆順で実行した場合**（本スキルを先に実行済み）: `screen_flow` はいったん
-  `image: null` ＋ `note: "create-design-doc 未実行のためテキスト概略のみ"` で生成する
+  `wireframe: null` ＋ `note: "create-design-doc 未実行のためテキスト概略のみ"` で生成する
   （Step 6 参照）。`create-design-doc` の実行後、本スキルを**画面素材が揃った状態で
-  再実行**する。deck spec の該当 `screen_flow` エントリの `image` に実ファイルパスを
-  設定し `note` を外せば、Step 7〜8 を再実行するだけで画面スライドが差し込まれる。
+  再実行**する。deck spec の該当 `screen_flow` エントリの `wireframe` に実ファイルパスを
+  設定し `steps`（ハイライトしたい要素の CSS セレクタと説明文の配列）を追加すれば、
+  Step 7〜8 を再実行するだけで「動く画面デモ」が差し込まれる。
 - 2スキルで確実に共有するには、両方の呼び出しで**同一の `--brief <path>`** を明示指定する
   （既定値はスキルごとの成果物ディレクトリ直下で異なるため、指定なしでは自動的には共有
   されない）。**`--brief` は入力文書ディレクトリ直下を指定することを推奨する**（例:
@@ -78,7 +82,7 @@ base64 data URI として取り込むため、先に `create-design-doc` を実�
 - 出力先はユーザー指定がなければ `_/pitch-deck/<deck-name>.html`
 - `--theme dark|light` で配色テーマの明暗を切り替える（既定 `dark`。「没入感あるフル
   スクリーン・プレゼン」の空気感を保つため）。主色・アクセント等は spec の `brand` で
-  concept-brief.md のトーン＆マナーに合わせて上書きする（下記参照）
+  concept-brief.md のトーン＆マナーに合わせて上書きする
 - `--brief <path>` で concept-brief.md の場所を指定できる（既定 `<output の親ディレクトリ>/concept-brief.md`。入力文書ディレクトリ直下の指定を推奨）
 - **大部な入力文書を読む際の優先順位**: ディレクトリを渡された場合、まず `README.md`（概要・
   ステータス）→ 判定ゲート「判定」節（確定した結論）→ Go/No-Go 基準・成功基準の照合表
@@ -94,8 +98,10 @@ base64 data URI として取り込むため、先に `create-design-doc` を実�
 **後半**: **画面と操作の流れ**（`screen_flow`、2〜4枚。シナリオの場面ごとに「この場面で・
 この画面が・こう使われる」を説明）→ 検証計画・現在地 → **承認いただきたい事項・確認事項**。
 
-role・必須フィールド・順序契約・HTML の操作仕様の詳細は
-[references/deck-spec.md](references/deck-spec.md) を参照する。
+各スライドの箇条書き・カード類は**フラグメント**として `→` キーで1つずつ出現し、尽きたら
+次スライドへ進む（現在地は強調、既読は減光）。role・必須フィールド・順序契約・HTML の操作
+仕様の詳細は [references/deck-spec.md](references/deck-spec.md) を、演出の設計思想は
+[references/presentation-patterns.md](references/presentation-patterns.md) を参照する。
 
 ## フロー
 
@@ -118,17 +124,17 @@ spec の `brand`（`primary`/`accent` 等）と `--theme dark|light` の選択�
 
 ### Step 3: create-design-doc の成果物を探索する
 
-`create-design-doc` が先に実行され `screens/*.png` が生成済みかどうかを **Glob で探索する**
-（既定パス `design/screens/*.png` を直書きで決め打ちしない。ユーザーが `--output` を変更
-している場合があるため）。見つかった場合は Step 6 の `screen_flow` 作成で使う。見つからない
-場合は Step 6 でテキスト概略＋注記のみの `screen_flow` を作る。
+`create-design-doc` が先に実行され `wireframes/*.html` が生成済みかどうかを **Glob で
+探索する**（既定パス `design/wireframes/*.html` を直書きで決め打ちしない。ユーザーが
+`--output` を変更している場合があるため）。見つかった場合は Step 6 の `screen_flow` 作成で
+使う。見つからない場合は Step 6 でテキスト概略＋注記のみの `screen_flow` を作る。
 
 ### Step 4: 骨子を提示しユーザー承認を得る（必須ゲート）
 
-前半6枚のタイトル＋1行要旨、後半の `screen_flow` 各枚（シナリオ場面名＋使う画像の有無）、
-検証計画・承認事項の骨子、配色テーマ（`--theme` と主色）、Step 1 の concept-brief.md 案
-（起案した場合）をまとめてユーザーに提示する。**承認を得るまで Step 5 へ進まない**。無承認
-のまま生成しない。
+前半6枚のタイトル＋1行要旨、後半の `screen_flow` 各枚（シナリオ場面名・使う wireframe の
+有無・ハイライトしたい要素の候補）、検証計画・承認事項の骨子、配色テーマ（`--theme` と
+主色）、Step 1 の concept-brief.md 案（起案した場合）をまとめてユーザーに提示する。**承認を
+得るまで Step 5 へ進まない**。無承認のまま生成しない。
 
 ### Step 5: deck spec（JSON）を組み立てる
 
@@ -136,23 +142,26 @@ spec の `brand`（`primary`/`accent` 等）と `--theme dark|light` の選択�
 
 - 数値・事実は入力文書からの引用のみとする。捏造しない
 - `winning.items[].label` の `"事実"` は**入力文書に記録された実測・調査結果に限る**。留保
-  は `text` に併記する。それ以外の主張は必ず `"仮説"` にする
+  は `text` に併記する。それ以外の主張は必ず `"仮説"` にする（`事実` の item に含まれる
+  数値は自動でカウントアップ演出が付く）
 - `approval.items`（承認いただきたい事項・確認事項）は3〜5件。`kind: "承認"` は方針として
   確定させたい事項、`kind: "確認"` は PO の判断を仰ぎたい事項に分ける
-- 各スライドの文章量は少なめ・大胆にする（1スライド1メッセージ）。長文はスライド内で
-  はみ出す原因になる（Step 8 の validator が検出する）
+- 各フラグメント（bullet・item）の文章量は少なめ・大胆にする（1メッセージ1フラグメント）。
+  長文はスライド内ではみ出す原因になる（Step 9 の validator が各フラグメント表示時点で検出
+  する）
 
 ### Step 6: screen_flow スライドを組み立てる
 
 シナリオの場面ごとに2〜4枚、次の方針で作成する。
 
-- Step 3 で `screens/*.png` が見つかった場合: 場面に対応する画像
-  （`screens/<screen>-desktop.png` 等）を `image` に指定し、`narrative` に「この場面で・
-  この画面が・こう使われる」を説明する文を書く。画像は 1440px 幅程度で撮影されたものを使う
-  （`build_slides.py` が幅1600px・2MBを超える画像を `SpecError` で拒否する）
-- 見つからない場合: `image: null`、`note` に
+- Step 3 で `wireframes/*.html` が見つかった場合: 場面に対応する wireframe ファイルを
+  `wireframe` に指定し、`narrative` に導入文、`steps` に「ハイライトしたい要素の CSS
+  セレクタ（`id`/`class` 等、wireframe の実装に存在するもの）」と「その要素が何を意味する
+  説明文」の配列（1件以上）を書く。ステップ送りに合わせて wireframe 内の対象要素が
+  スポットライト表示され、対応する説明が強調される
+- 見つからない場合: `wireframe: null`、`note` に
   `"create-design-doc 未実行のためテキスト概略のみ"` 等を設定し、`narrative` にテキストの
-  みで場面を概略する
+  みで場面を概略する（この場合 `steps` は持たせない）
 
 ### Step 7: venv を用意し Playwright を導入する
 
@@ -194,10 +203,12 @@ python3 -m venv "_/pitch-deck/.venv" 2>/dev/null || true
 `${CLAUDE_SKILL_DIR}` が展開されない・未設定の環境では、本 SKILL.md ファイルが置かれて
 いるディレクトリの絶対パスに読み替える（例: `skills/create-pitch-deck`）。
 
-`build_slides.py` は標準ライブラリのみで動作する（画像埋め込みも Pillow 非依存）ため、
+`build_slides.py` は標準ライブラリのみで動作する（wireframe の埋め込みも Pillow 非依存。
+`.screen_flow.wireframe` の自己完結性・inline JS 安全性をこの時点で検査する）ため、
 Step 7 の venv は次の Step 9（Playwright 検証）のためのものである。
 
-`SpecError`（終了コード1）で失敗した場合はエラーメッセージに従って spec を修正し再実行する。
+`SpecError`（終了コード1）で失敗した場合はエラーメッセージに従って spec または wireframe を
+修正し再実行する。
 
 ### Step 9: 検証する
 
@@ -207,8 +218,9 @@ Step 7 の venv は次の Step 9（Playwright 検証）のためのものであ�
 ```
 
 FAIL の場合は spec または HTML を修正し、再生成してから validator を再実行する。PASS
-するまで完了扱いにしない。`--screenshots-dir` を指定すると全スライドの PNG
-（1440×900、`slide-<n>-<role>.png`）が確認用に出力される。
+するまで完了扱いにしない。`--screenshots-dir` を指定すると全スライド・全フラグメント
+ステップの PNG（`slide-<n>-step-<s>.png`。フラグメント無しのスライドは
+`slide-<n>-<role>.png`）が確認用に出力される。
 
 ### Step 10: concept-brief.md との相互整合チェック
 
@@ -225,7 +237,7 @@ FAIL の場合は spec または HTML を修正し、再生成してから valid
 
 ユーザーからのフィードバックを反映する場合は spec（必要なら concept-brief.md も）を修正し、
 Step 8〜10 を再実行する。`create-design-doc` を後から実行した場合は Step 6 に戻って
-`screen_flow` の `image` を差し込む。
+`screen_flow` の `wireframe`/`steps` を差し込む。
 
 ## 検証
 
@@ -235,35 +247,44 @@ Step 8〜10 を再実行する。`create-design-doc` を後から実行した場
 1. **特定**: `validate_slides.py` の実行と終了コードをもって完了とみなす
 2. **実行**: `"${PITCH_DECK_VENV_PY}" "${CLAUDE_SKILL_DIR}/scripts/validate_slides.py" "<output.html>" --screenshots-dir "<dir>"` を新規実行する
 3. **読取**: 出力全体（PASS/FAIL・失敗一覧）と終了コードを確認する。`--screenshots-dir` に
-   出力された全スライドの PNG を目視確認する
-4. **検証**: 失敗が0件であること、スクリーンショット目視で崩れが無いこと、Step 10 の相互
-   整合チェックで未解決の矛盾が無いことを確認する
+   出力された主要ステップの PNG（特に `screen_flow` のスポットライト移動）を目視確認する
+4. **検証**: 失敗が0件であること、スクリーンショット目視で崩れ・ハイライト位置のズレが
+   無いこと、Step 10 の相互整合チェックで未解決の矛盾が無いことを確認する
 5. **宣言**: validator が PASS し、目視確認・相互整合チェックが済んだ場合のみ完了を宣言
    する。「たぶん通る」等の推測で完了主張しない
 
 validator（`validate_slides.py`）は最低限以下を確認する。
 
 - スライド枚数・role の順序契約（DOM の `data-role` 属性）
-- 全スライドを実際に `→` キーで遷移させながら、表示中スライド自身のはみ出し（`scrollHeight`/`scrollWidth` が `clientHeight`/`clientWidth` を超えていないか）
-- 外部リソース参照・inline JavaScript の危険パターン（`eval`・`innerHTML`代入・inline handler・network API）がゼロ件
-- 末尾の clamp・`R` での先頭復帰・クリックでの遷移が仕様どおり動く
+- 全スライド・全フラグメントステップを実際に `→` キーで遷移させながら、表示中スライド
+  自身のはみ出し（`scrollHeight`/`scrollWidth` が `clientHeight`/`clientWidth` を超えて
+  いないか）
+- `screen_flow` の各ステップで iframe 内に期待した1件だけスポットライトが付与されているか
+  （セレクタ不一致・解除漏れの検出）。iframe 内 HTML にも外部リソース参照・危険な JS
+  パターンが無いか
+- 外部リソース参照・inline JavaScript の危険パターン（`eval`・`innerHTML`代入・inline
+  handler・network API）が親 HTML にゼロ件
+- 末尾の clamp・`R` での先頭復帰・クリックでの遷移・フラグメント0での `←` 逆戻りが仕様
+  どおり動く
 - 2枚目に「前提」、最終スライドに「承認」と3〜5件の承認・確認事項が含まれる
-- `@media print` でナビゲーション要素が非表示になる
+- `@media print` でナビゲーション要素が非表示になり、全フラグメントが表示状態になる
 
 ## よくある失敗
 
 | 問題 | 回避策 |
 |------|--------|
 | 差別化ポイントを断定的に書いてしまう | 入力文書に数値・実測の根拠が無い主張は必ず `label: "仮説"` にする。「事実」は記録された実測・調査結果に限る |
-| スライド内でテキストがはみ出す | `document.documentElement` ではなく表示中の `.slide` 要素自身の overflow で検出される（`html`/`body` の `overflow:hidden` に隠れて documentElement 側は変化しない）。1スライドの文章量を減らす。フォントサイズは `clamp()` で調整済みだが無限には縮まない |
-| 画像埋め込みで HTML が肥大化する | `create-design-doc` 側で 1440px 幅程度のスクリーンショットを使う。`build_slides.py` は幅1600px・2MB超の画像を `SpecError` で拒否する |
+| スライド内でテキストがはみ出す | `document.documentElement` ではなく表示中の `.slide` 要素自身の overflow で検出される（`html`/`body` の `overflow:hidden` に隠れて documentElement 側は変化しない）。1フラグメントの文章量を減らす。フォントサイズは `clamp()` で調整済みだが無限には縮まない |
+| screen_flow の `steps[].selector` が wireframe 内に存在しない | validator がスポットライト0件として検出する。wireframe の実装（id/class）を確認してから selector を書く |
+| iframe を `transform: scale()` で縮小しても `.slide` がはみ出す | scale はレイアウト上の占有サイズを縮めない。スケール後の実寸に固定した `overflow:hidden` のラッパーで iframe を包む（`build_slides.py` の `.screen-frame` 実装を参照。踏襲する場合は変更しない） |
 | 承認事項が形骸化する | 3〜5件を「PO に実際に判断・確認してほしい具体的な事項」にする。曖昧な依頼文にしない |
-| Google スライドに取り込みたいと言われる | 各スライドの PNG（`--screenshots-dir` の出力）を Google スライドへ1枚ずつ画像として貼り付ける方法を案内する（本スキルは PPTX を生成しない） |
+| Google スライドに取り込みたいと言われる | 各スライド・各ステップの PNG（`--screenshots-dir` の出力）を Google スライドへ1枚ずつ画像として貼り付ける方法を案内する（本スキルは PPTX を生成しない） |
 
 ## 注意事項
 
-- 生成される HTML は単一ファイル・自己完結（CDN・外部フォント・外部画像参照なし。画像は
-  base64 data URI で埋め込む）・10〜14枚可変構成（`screen_flow` が2〜4枚）
+- 生成される HTML は単一ファイル・自己完結（CDN・外部フォント・外部画像参照なし。
+  `screen_flow` の wireframe は `srcdoc` として同一文書内に埋め込む）・10〜14枚可変構成
+  （`screen_flow` が2〜4枚）
 - role・必須フィールド・順序は [references/deck-spec.md](references/deck-spec.md) の契約
 - venv はビルドツールであり生成物ではない。`_/` 配下に置いた場合は commit しない（`_/` は
   `.gitignore` 済み）
@@ -278,9 +299,10 @@ validator（`validate_slides.py`）は最低限以下を確認する。
 
 - 生成した HTML の絶対パス・ファイルサイズ・スライド枚数・`--theme`
 - validation result（PASS/FAIL）
-- `--screenshots-dir` の絶対パス（全スライド PNG）
+- `--screenshots-dir` の絶対パス（全ステップ PNG）
 - concept-brief.md のパスと、新規起案／既存読込のいずれか
-- `create-design-doc` 成果物の取り込み状況（画像あり枚数／未実行のためテキストのみの枚数）
+- `create-design-doc` 成果物の取り込み状況（wireframe 連動あり枚数／未実行のためテキスト
+  のみの枚数）
 - Step 10 の相互整合チェック結果（矛盾の有無）
 - デッキの要旨を一文
 
@@ -288,12 +310,12 @@ validator（`validate_slides.py`）は最低限以下を確認する。
 
 ```text
 企画提案スライド（HTML）を生成しました:
-<absolute-path>/pitch-deck.html（92KB、11枚、theme=dark）
+<absolute-path>/pitch-deck.html（29KB、11枚、theme=dark）
 
 Validation: PASS
-スクリーンショット: <absolute-path>/screenshots/（11枚）
+スクリーンショット: <absolute-path>/screenshots/（36枚、ステップ単位）
 concept-brief.md: <absolute-path>/concept-brief.md（既存読込）
-画面と操作の流れ: 3枚中2枚は create-design-doc の screens/*.png を取り込み済み、1枚は
+画面と操作の流れ: 3枚中2枚は create-design-doc の wireframes/*.html を実寸連動、1枚は
 create-design-doc 未実行のためテキスト概略のみ
 相互整合チェック: create-design-doc の成果物と用語・スコープの矛盾なし
 内容: 徒歩圏内おつかい代行という課題に対し、3画面で完結する解決アプローチを提案
@@ -304,8 +326,10 @@ create-design-doc 未実行のためテキスト概略のみ
 必要な場合だけ読む。
 
 - [references/deck-spec.md](references/deck-spec.md) — deck spec（JSON）のスキーマ・スライド role・HTML の操作仕様・検証ルール
+- [references/presentation-patterns.md](references/presentation-patterns.md) — フラグメント・スポットライト等の演出パターンの設計思想（参考サイトを精読し一般化したもの）
 - [references/concept-brief-schema.md](references/concept-brief-schema.md) — concept-brief.md のスキーマ（`create-design-doc` と共有）
-- [samples/pitch-deck-sample.json](samples/pitch-deck-sample.json) — deck spec の記入例（架空アイデア「おつかいパンダ便」。`screen_flow` の画像あり／なし両パターンを含む）
+- [samples/pitch-deck-sample.json](samples/pitch-deck-sample.json) — deck spec の記入例（架空アイデア「おつかいパンダ便」。`screen_flow` の wireframe あり×2／なし×1を含む）
+- [samples/wireframes/](samples/wireframes/) — サンプル spec が参照する埋め込み用ワイヤーフレーム
 
 ## sandbox 環境での実行
 
