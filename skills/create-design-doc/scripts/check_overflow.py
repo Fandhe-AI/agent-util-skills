@@ -52,10 +52,17 @@ SRCSET_RE = re.compile(r"""\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", 
 CSS_URL_RE = re.compile(r"""\burl\(\s*(["']?)([^"')]+)\1\s*\)""", re.IGNORECASE)
 # @import は url(...) 形式・文字列直接指定の双方で外部 URL を検査する
 CSS_IMPORT_RE = re.compile(r"""@import\s+(?:url\(\s*)?["']?\s*(?:https?:)?//""", re.IGNORECASE)
-# 自己完結ワイヤーフレームに通信 API は不要のため、存在自体を契約違反とする
+# 自己完結ワイヤーフレームに通信 API は不要のため、script 内での存在自体を契約違反とする。
+# 可視テキストや属性に「fetch( を使う」等の説明コピーが現れても誤検知しないよう、
+# 検査は SCRIPT_CONTENT_RE で抽出した <script> 要素の内容に限定する
+# （script 外の動的な抜け道は実行時の全ネットワーク遮断で検出する）
 JS_NETWORK_RE = re.compile(
     r"\b(?:fetch\s*\(|XMLHttpRequest\b|WebSocket\s*\(|sendBeacon\s*\(|EventSource\s*\(|importScripts\s*\()"
 )
+# <script> の内容抽出。ブラウザは <script/> のような自己閉じ表記も開始タグとして扱い
+# 実終了タグまで script と解釈するため、[^>]* が末尾の / も含めて同様に開始タグ扱いする。
+# 閉じタグ欠落時は fail-closed で EOF まで（\Z）を script 内容として収集する
+SCRIPT_CONTENT_RE = re.compile(r"<script\b[^>]*>(.*?)(?:</script\s*>|\Z)", re.IGNORECASE | re.DOTALL)
 
 
 def _is_external_ref(target: str) -> bool:
@@ -93,10 +100,10 @@ def check_external_dependency(html_text: str, failures: list[str]) -> None:
             failures.append(f"CSS url() に外部参照を検出: {target}")
     if CSS_IMPORT_RE.search(text):
         failures.append("CSS @import による外部リソース参照を検出")
-    if JS_NETWORK_RE.search(text):
+    if any(JS_NETWORK_RE.search(m.group(1)) for m in SCRIPT_CONTENT_RE.finditer(text)):
         failures.append(
-            "JS のネットワーク API（fetch / XMLHttpRequest / WebSocket / sendBeacon 等）を検出"
-            "（自己完結契約違反）"
+            "script 内に JS のネットワーク API（fetch / XMLHttpRequest / WebSocket / sendBeacon 等）"
+            "を検出（自己完結契約違反）"
         )
 
 

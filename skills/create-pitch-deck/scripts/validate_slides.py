@@ -130,6 +130,17 @@ class _SlideAuditor(HTMLParser):
         if tag in ("script", "style"):
             self._in, self._buf = tag, ""
 
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # ブラウザは HTML の script/style で self-closing スラッシュ（<style/> 等）を
+        # 無視し、実際の終了タグまで raw text として読み続ける。html.parser の既定
+        # （starttag+endtag の即時クローズ扱い）のままだと `<style/>@import ...` や
+        # `<script/>fetch(...)` の後続内容が収集から漏れて検査をバイパスできるため、
+        # script/style に限り通常の開始タグとして収集モードに入る。他タグは既定挙動。
+        if tag in ("script", "style"):
+            self.handle_starttag(tag, attrs)
+        else:
+            super().handle_startendtag(tag, attrs)
+
     def handle_data(self, data: str) -> None:
         if self._in:
             self._buf += data
