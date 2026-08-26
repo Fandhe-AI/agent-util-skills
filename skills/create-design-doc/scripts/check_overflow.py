@@ -38,8 +38,8 @@ except ImportError:
 DEFAULT_VIEWPORTS = [("desktop", 1440, 900), ("mobile", 375, 812)]
 OVERFLOW_TOLERANCE_PX = 1  # サブピクセル丸め誤差の許容量
 
-# コメント内の URL 例示（テンプレート冒頭の説明文等）を誤検出しないよう、
-# 検査前に HTML コメントと CSS/JS ブロックコメントを除去する
+# コメント内の URL 例示（CSS コメント・legacy な <style> 内 HTML コメント等）を
+# 誤検出しないよう、CSS 検査対象テキストから検査前に除去する
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
@@ -90,6 +90,12 @@ class _WireframeAuditor(HTMLParser):
         self.inline_handlers: list[str] = []  # "<tag> の <on*属性>" 形式で記録
         self.refs: list[tuple[str, str, str, str]] = []  # (scope, tag, attr, value)
         self.script_tags = 0
+        # CSS の url()/@import 検査を <style> 本文と style 属性値に限定するための収集先
+        # （可視テキストや <code> 中の url() 例示を外部依存と誤判定しないため）
+        self.style_bodies: list[str] = []
+        self.style_attrs: list[str] = []
+        self._in_style = False
+        self._style_buf: list[str] = []
 
     def _visit_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         for name, value in attrs:
@@ -98,6 +104,8 @@ class _WireframeAuditor(HTMLParser):
             lname = name.lower()
             if lname.startswith("on"):
                 self.inline_handlers.append(f"<{tag}> の {name}")
+            elif lname == "style" and value:
+                self.style_attrs.append(value)
             elif lname == "srcdoc" and value:
                 # HTMLParser は属性値を unescape 済みで渡すため、srcdoc の値は
                 # 完全な HTML 文書として再帰解析できる
@@ -107,18 +115,40 @@ class _WireframeAuditor(HTMLParser):
                 self.inline_handlers.extend(f"srcdoc 内: {h}" for h in sub.inline_handlers)
                 self.refs.extend(("srcdoc 内 " + s, t, a, v) for s, t, a, v in sub.refs)
                 self.script_tags += sub.script_tags
+                self.style_bodies.extend(sub.style_bodies)
+                self.style_attrs.extend(sub.style_attrs)
             elif lname in REF_ATTRS and value is not None:
                 # 参照元のタグ文脈を保持して収集する（--allow-local-refs の許可判定が
                 # 「<img src> / srcset か否か」に依存するため）
                 self.refs.append(("", tag.lower(), lname, value))
         if tag.lower() == "script":
             self.script_tags += 1
+        if tag.lower() == "style":
+            # <style/> 自己閉じ表記もブラウザは開始タグとして扱うため startendtag 経由でも開始扱い
+            self._in_style = True
+            self._style_buf = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._visit_tag(tag, attrs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._visit_tag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "style" and self._in_style:
+            self.style_bodies.append("".join(self._style_buf))
+            self._in_style = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_style:
+            self._style_buf.append(data)
+
+    def close(self) -> None:
+        super().close()
+        # 閉じタグ欠落時も fail-closed で EOF までを style 本文として収集する
+        if self._in_style:
+            self.style_bodies.append("".join(self._style_buf))
+            self._in_style = False
 
 
 def srcset_candidates(value: str) -> list[str]:
@@ -188,11 +218,9 @@ def classify_ref(target: str, base_dir: Path, allow_local_refs: bool) -> str | N
 def check_external_dependency(
     html_text: str, base_dir: Path, allow_local_refs: bool, failures: list[str]
 ) -> None:
-    text = HTML_COMMENT_RE.sub("", html_text)
-    text = BLOCK_COMMENT_RE.sub("", text)
-
-    # <script>・on* 属性・参照属性は正規表現の全文検索ではなく構造解析で収集する
-    # （可視テキスト中の説明コピーへの誤マッチ防止と、参照元タグの正確な判定のため）
+    # <script>・on* 属性・参照属性・CSS（<style> 本文と style 属性値）は正規表現の
+    # 全文検索ではなく構造解析で収集する（可視テキスト中の説明コピーへの誤マッチ防止と、
+    # 参照元タグの正確な判定のため）
     auditor = _WireframeAuditor()
     auditor.feed(html_text)
     auditor.close()
@@ -214,12 +242,17 @@ def check_external_dependency(
                 failures.append(
                     f"{scope}<{tag}> の {attr} 属性に自己完結契約違反の参照を検出: {value}（{reason}）"
                 )
-    for m in CSS_URL_RE.finditer(text):
+    # CSS 検査は auditor が収集した <style> 本文と style 属性値（srcdoc 内含む）に限定する。
+    # CSS コメント・legacy な HTML コメント内の url() 例示は検査前に除去して誤検知を防ぐ
+    css_text = "\n".join(auditor.style_bodies + auditor.style_attrs)
+    css_text = HTML_COMMENT_RE.sub("", css_text)
+    css_text = BLOCK_COMMENT_RE.sub("", css_text)
+    for m in CSS_URL_RE.finditer(css_text):
         target = m.group(2).strip()
         reason = classify_ref(target, base_dir, allow_local_refs)
         if reason:
             failures.append(f"CSS url() に自己完結契約違反の参照を検出: {target}（{reason}）")
-    if CSS_IMPORT_RE.search(text):
+    if CSS_IMPORT_RE.search(css_text):
         failures.append(
             "CSS @import を検出（外部・ローカルを問わずスタイル分割は単一ファイル契約違反。"
             "<style> 内へ直接記述すること）"

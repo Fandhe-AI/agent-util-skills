@@ -100,7 +100,6 @@ INLINE_HANDLER_ATTR_RE = re.compile(r"^on[a-z]+$", re.IGNORECASE)
 # CSS 内の全 url(...) を検査対象にする（validate_slides.py と対の実装）。
 CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""", re.IGNORECASE)
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # data: URI は受動的な画像 MIME に限り許可（それ以外の data: MIME は untrusted な
 # 能動コンテンツを埋め込める経路のため不許可）。
 DATA_URI_ALLOWED_RE = re.compile(r"^\s*data:image/(png|jpeg|gif|webp)[;,]", re.IGNORECASE)
@@ -181,6 +180,10 @@ class _RefCollector(HTMLParser):
         self.srcdocs: list[str] = []          # iframe srcdoc（find_disallowed_refs が再帰解析する）
         self.script_tags = 0                  # <script> の出現数（wireframe では全面禁止）
         self.inline_handlers: list[str] = []  # on* 属性の出現箇所（引用形式を問わず検出）
+        self.styles: list[str] = []           # <style> の本文（CSS url()/@import 検査の対象）
+        self.style_attrs: list[str] = []      # style="..." 属性値（同上）
+        self._in: str | None = None
+        self._buf = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "script":
@@ -198,6 +201,28 @@ class _RefCollector(HTMLParser):
                 self.refs.extend(srcset_candidates(v))
             elif name == "srcdoc":
                 self.srcdocs.append(v)
+            elif name == "style":
+                self.style_attrs.append(v)
+        if tag in ("script", "style"):
+            self._in, self._buf = tag, ""
+
+    def handle_data(self, data: str) -> None:
+        if self._in == "style":
+            self._buf += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in == tag:
+            if tag == "style":
+                self.styles.append(self._buf)
+            self._in, self._buf = None, ""
+
+    def close(self) -> None:
+        super().close()
+        # 閉じタグを欠いた <style> も fail-closed で検査対象に含める
+        if self._in:
+            if self._in == "style":
+                self.styles.append(self._buf)
+            self._in, self._buf = None, ""
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # ブラウザは HTML の script/style で self-closing スラッシュ（<style/> 等）を
@@ -214,16 +239,19 @@ def find_disallowed_refs(text: str) -> dict[str, list[str]]:
     """wireframe 生 HTML から自己完結契約に違反する参照を抽出する。
 
     リソース属性（src / href / xlink:href / data / poster / action / formaction）と
-    srcset の候補 URL は _RefCollector で構造的に、CSS の url(...) は HTML/CSS
-    コメント除去後の全文走査で抽出し、classify_ref で分類して "ok" 以外を種類別に返す。
-    コメントを先に除去するのは、コメントアウト済みの url(https://...) 等を実際の
-    外部依存として誤検出しないため。<script> の出現も "script" として返す
-    （wireframe は静的ワイヤーフレームで script の正当用途がないため全面禁止。
+    リソース属性・srcset の候補 URL・<style> 本文・style 属性値を _RefCollector で
+    構造的に収集し、classify_ref で分類して "ok" 以外を種類別に返す。
+    CSS の url(...) / @import 検査は収集した <style> 本文・style 属性値に限定する:
+    HTML 全文への適用だと、可視テキスト中の「url(https://...)」のような説明文だけで
+    deck 生成が拒否される誤検知があるため（CSS コメント内の例示は除去してから検査。
+    srcdoc 内も末尾の再帰解析で同じ限定検査になる）。<script> の出現も "script" として
+    返す（wireframe は静的ワイヤーフレームで script の正当用途がないため全面禁止。
     window['eval'](...) 等のプロパティアクセス表記は文字列パターン検査で原理的に
     捕捉しきれないため、識別子検査ではなく script 自体を拒否して fail-closed にする）。
     """
     bad: dict[str, list[str]] = {
         "external": [], "relative": [], "bad-data": [], "script": [], "handler": [],
+        "import": [],
     }
 
     def record(value: str) -> None:
@@ -243,9 +271,12 @@ def find_disallowed_refs(text: str) -> dict[str, list[str]]:
         if handler not in bad["handler"]:
             bad["handler"].append(handler)
 
-    cleaned = CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))
-    for m in CSS_URL_RE.finditer(cleaned):
-        record(next(g for g in m.groups() if g is not None))
+    css_texts = [CSS_COMMENT_RE.sub("", t) for t in collector.styles + collector.style_attrs]
+    for t in css_texts:
+        for m in CSS_URL_RE.finditer(t):
+            record(next(g for g in m.groups() if g is not None))
+    if any(CDN_IMPORT_RE.search(t) for t in css_texts):
+        bad["import"].append("@import")
 
     # iframe srcdoc は HTML エスケープ済みの入れ子文書のため、生テキスト走査では
     # 属性も CSS url() も露出しない。unescape 済みの値を独立した HTML 文書として
@@ -291,8 +322,8 @@ def check_embeddable_html(text: str, label: str) -> None:
             "window['eval'] 等の表記迂回を含め fail-closed に拒否する。"
             "スポットライト演出は build_slides.py が埋め込み時に注入する）"
         )
-    if CDN_IMPORT_RE.search(CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))):
-        violations.append("CSS @import による外部リソース参照")
+    if bad_refs["import"]:
+        violations.append("CSS @import による外部リソース参照（<style> / style 属性内）")
     if bad_refs["handler"]:
         violations.append(
             "inline event handler 属性（引用符の有無を問わず検出）: "
