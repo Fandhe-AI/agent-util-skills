@@ -382,6 +382,14 @@ def main() -> int:
 
     check_self_contained(html_text, failures)
     check_inline_js_safety(html_text, failures)
+    if failures:
+        # 静的検査で違反がある HTML を Playwright でロードすると、能動コンテンツが
+        # 検証失敗の報告より先に実行されてしまう（route 遮断は WebSocket 等の全経路を
+        # 保証しない）。fail-closed に実行時検査へ進まず、この時点で FAIL 終了する
+        print(f"FAIL: 静的検査で{len(failures)}件の問題を検出（Playwright での実行時検査はスキップした）")
+        for f in failures:
+            print(f" - {f}")
+        return 1
 
     url = "file://" + pathname2url(str(args.html.resolve()))
     # 静的検査をすり抜けた動的な外部要求（JS の Image().src 代入・CSS 解決由来等）を

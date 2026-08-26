@@ -335,6 +335,15 @@ def main() -> int:
     failures: list[str] = []
     html_text = args.html.read_text(encoding="utf-8", errors="replace")
     check_external_dependency(html_text, args.html.resolve().parent, args.allow_local_refs, failures)
+    # 静的検査で違反を検出した HTML はブラウザで実行しない。route("**/*") は
+    # WebSocket 等の全経路を確実に遮断できる保証がなく、検出済みの禁止 JS・
+    # ネットワーク API が失敗報告前に実行・通信し得るため、起動前に FAIL 終了する
+    if failures:
+        print(f"FAIL: {len(failures)}件の問題を検出 ({args.html})")
+        for f in failures:
+            print(f" - {f}")
+        print("静的検査で違反を検出したため、実行時検査（viewport overflow・ネットワーク遮断）はスキップした")
+        return 1
     for label, w, h in viewports:
         check_viewport_overflow(args.html, w, h, label, args.allow_local_refs, failures)
 

@@ -7,9 +7,14 @@
 - レイアウト崩れの自動判定は check_overflow.py の責務（本スクリプトは撮影のみ）。
 - ただし外部通信の遮断は本スクリプトも担う。SKILL.md の手順では撮影が
   check_overflow.py による検証より先に走るため、ここで遮断しないと違反 HTML が
-  検証前に外部へ通信してしまう。check_overflow.py と同じ流儀で、about: と文書本体
-  自身の file:// URL（--allow-local-refs 時は文書ディレクトリ配下の file:// も）以外の
-  全リクエストを abort し、遮断要求が 1 件でもあれば撮影を失敗させる。
+  検証前に外部へ通信してしまう。二段構えで防ぐ:
+  1. 撮影前に check_overflow.py の静的検査（外部依存・禁止 JS・inline handler）を
+     同ディレクトリ import で共通実行し、違反があればブラウザを起動せず FAIL 終了する
+     （route("**/*") は WebSocket 等の全経路を確実に遮断できる保証がないため、
+     違反 HTML はそもそも Chromium にロードしない）。
+  2. 静的検査を通過した HTML のみロードし、check_overflow.py と同じ流儀で、about: と
+     文書本体自身の file:// URL（--allow-local-refs 時は文書ディレクトリ配下の
+     file:// も）以外の全リクエストを abort し、遮断要求が 1 件でもあれば失敗させる。
 
 依存: playwright (標準ライブラリ外)。venv へインストールし
 `playwright install chromium` でブラウザ本体を取得してから実行する。
@@ -31,6 +36,12 @@ except ImportError:
         file=sys.stderr,
     )
     sys.exit(1)
+
+# 撮影前の静的ゲートは check_overflow.py の検査関数を共通利用する（検査基準の二重管理防止）。
+# スクリプトがどの cwd から起動されても同ディレクトリの check_overflow を import できるよう、
+# 本ファイルの置き場所を sys.path へ加える
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_overflow import check_external_dependency  # noqa: E402
 
 
 def _file_url_to_path(file_url: str) -> Path:
@@ -88,13 +99,25 @@ def main() -> int:
     parser.add_argument(
         "--allow-local-refs",
         action="store_true",
-        help="文書ディレクトリ配下への相対参照を許可する（storyboard.html が screens/*.png を"
-        " 参照する構成向け。絶対パス・file://・`../` 脱出は引き続き遮断）",
+        help="文書ディレクトリ配下に実在するファイルへの相対参照を許可する（storyboard.html が"
+        " screens/*.png を参照する構成向け。絶対パス・file://・`../` 脱出・欠落参照は引き続き遮断）",
     )
     args = parser.parse_args()
 
     if not args.html.is_file():
         print(f"HTML が存在しない: {args.html}", file=sys.stderr)
+        return 1
+
+    # 静的検査で違反を検出した HTML はブラウザで実行しない（check_overflow.py と同じゲート。
+    # --allow-local-refs の扱いも check_overflow と同一）
+    static_failures: list[str] = []
+    html_text = args.html.read_text(encoding="utf-8", errors="replace")
+    check_external_dependency(html_text, args.html.resolve().parent, args.allow_local_refs, static_failures)
+    if static_failures:
+        print(f"FAIL: {len(static_failures)}件の問題を検出 ({args.html})")
+        for f in static_failures:
+            print(f" - {f}")
+        print("静的検査で違反を検出したため、ブラウザを起動せず撮影を中止した")
         return 1
 
     blocked = capture(args.html, args.out, args.width, args.height, args.full_page, args.allow_local_refs)

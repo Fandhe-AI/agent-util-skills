@@ -87,7 +87,13 @@ SRCSET_SMUGGLED_URL_RE = re.compile(r"(?:^|[\s,])((?:https?:)?//[^\s,]+)", re.IG
 # @import は url(...) 形式・文字列直接指定・相対参照のいずれでも自己完結を壊すため
 # 出現自体を不許可にする（validate_slides.py の CSS_IMPORT_RE と同方針）
 CDN_IMPORT_RE = re.compile(r"@import\b", re.IGNORECASE)
+# inline event handler 属性の検出。主ゲートは _RefCollector の属性名判定
+# （INLINE_HANDLER_ATTR_RE。HTMLParser の attrs は引用形式に依存しないため
+# `<body onload=alert(1)>` のような引用符なし属性も検出できる）。本 regex は
+# 引用符付きの表記のみ拾える生テキスト走査で、パーサが解釈しない断片（コメント
+# 崩れ・CDATA 等）に残る表記を拾う防御多層として残す。
 INLINE_HANDLER_RE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.IGNORECASE)
+INLINE_HANDLER_ATTR_RE = re.compile(r"^on[a-z]+$", re.IGNORECASE)
 # CSS の url(...) トークン抽出（引用付き/無引用を別分岐でパースする。引用付きは値中の
 # `)` を含み得るため単一の文字クラスでは正しく抽出できない）。@import 以外にも
 # @font-face の src や background 等の url(https://...) が外部依存の経路になるため、
@@ -172,15 +178,20 @@ class _RefCollector(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.refs: list[str] = []
-        self.srcdocs: list[str] = []  # iframe srcdoc（find_disallowed_refs が再帰解析する）
-        self.script_tags = 0          # <script> の出現数（wireframe では全面禁止）
+        self.srcdocs: list[str] = []          # iframe srcdoc（find_disallowed_refs が再帰解析する）
+        self.script_tags = 0                  # <script> の出現数（wireframe では全面禁止）
+        self.inline_handlers: list[str] = []  # on* 属性の出現箇所（引用形式を問わず検出）
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "script":
             self.script_tags += 1
         for name, value in attrs:
             v = value or ""
-            if name in RESOURCE_ATTRS:
+            if INLINE_HANDLER_ATTR_RE.match(name):
+                # regex（INLINE_HANDLER_RE）は引用符付きしか拾えないため、
+                # `<body onload=alert(1)>` の引用符なし表記もここで構造的に検出する
+                self.inline_handlers.append(f"<{tag} {name}=...>")
+            elif name in RESOURCE_ATTRS:
                 self.refs.append(v)
             elif name == "srcset":
                 # srcset は「URL 幅記述子, URL 幅記述子, ...」形式のため候補ごとに取り出す
@@ -211,7 +222,9 @@ def find_disallowed_refs(text: str) -> dict[str, list[str]]:
     window['eval'](...) 等のプロパティアクセス表記は文字列パターン検査で原理的に
     捕捉しきれないため、識別子検査ではなく script 自体を拒否して fail-closed にする）。
     """
-    bad: dict[str, list[str]] = {"external": [], "relative": [], "bad-data": [], "script": []}
+    bad: dict[str, list[str]] = {
+        "external": [], "relative": [], "bad-data": [], "script": [], "handler": [],
+    }
 
     def record(value: str) -> None:
         # srcset の候補走査と変則表記走査が重なった場合等の重複報告を避ける
@@ -226,6 +239,9 @@ def find_disallowed_refs(text: str) -> dict[str, list[str]]:
         record(ref)
     if collector.script_tags:
         bad["script"].append(f"<script> x{collector.script_tags}")
+    for handler in collector.inline_handlers:
+        if handler not in bad["handler"]:
+            bad["handler"].append(handler)
 
     cleaned = CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))
     for m in CSS_URL_RE.finditer(cleaned):
@@ -277,7 +293,13 @@ def check_embeddable_html(text: str, label: str) -> None:
         )
     if CDN_IMPORT_RE.search(CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))):
         violations.append("CSS @import による外部リソース参照")
-    if INLINE_HANDLER_RE.search(text):
+    if bad_refs["handler"]:
+        violations.append(
+            "inline event handler 属性（引用符の有無を問わず検出）: "
+            + ", ".join(bad_refs["handler"][:3])
+        )
+    elif INLINE_HANDLER_RE.search(text):
+        # 防御多層: パーサが解釈しない断片（コメント崩れ等）に残る引用符付き表記を拾う
         violations.append("inline event handler 属性（onclick= 等）")
     for pattern, name in FORBIDDEN_JS_PATTERNS:
         if pattern.search(text):
