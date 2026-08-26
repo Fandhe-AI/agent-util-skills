@@ -67,72 +67,7 @@ UX/UI デザイナーの専門家として、アイデア・要件文書から U
 
 ## リポジトリ構成
 
-```text
-skills/                                -- 本リポジトリが上流ソースとして管理する 4 スキル
-  create-html-report/
-    SKILL.md                           -- JSON report spec を Python renderer で自己完結 HTML レポート生成
-    references/                        -- chart 選定・レポート設計・spec schema・a11y/セキュリティ規約
-    samples/                           -- report spec の JSON 例（comparison / gantt / time-series）
-    scripts/                           -- render_report.py（spec→HTML renderer）、validate_report.py（25 項目検証）
-  setup-firebase-hosting/
-    SKILL.md                           -- Firebase Hosting（Spark プラン）への公開環境をコードで構築
-    scripts/                           -- bootstrap-firebase.sh（GCP/Firebase 環境構築スクリプト）
-    tests/                             -- firebase-tools バージョン固定の回帰テスト
-  create-pitch-deck/
-    SKILL.md                           -- 事業企画の専門家として deck spec（JSON）から自己完結 HTML の企画提案スライドを生成
-    references/                        -- deck-spec.md・concept-brief-schema.md（create-design-doc と共有）
-    samples/                           -- deck spec の JSON 例（screens/ に埋め込み用サンプル画像を含む）
-    scripts/                           -- build_slides.py（spec→自己完結 HTML renderer）、validate_slides.py（Playwright によるはみ出し・自己完結性・inline JS 安全性・必須スライド検証、全スライド PNG 撮影）
-  create-design-doc/
-    SKILL.md                           -- UX/UI デザイナーの専門家として design-doc.md・画面遷移図・HTML ワイヤーフレーム・スクショを生成
-    references/                        -- design-doc-structure.md・wireframe-guidelines.md・concept-brief-schema.md（create-pitch-deck と共有）
-    templates/                         -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
-    scripts/                           -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
-.agents/skills/                        -- vendored スキル（消費専用・編集は上流で）
-  <開発ワークフロー20件>                 -- Fandhe-AI/agent-cli-skills から日次同期
-  anthropic-claude-code/                -- Fandhe-AI/agent-reference-skills から日次同期
-  anthropic-claude-code-extend/
-  github-docs/
-skills-lock.json                       -- vendored スキルの source・computedHash 台帳
-.claude/
-  agents/
-    research/
-      skill-explorer.md                -- skills/ 横断調査・読み取り専用（Sonnet）
-      sub-investigator.md              -- gh/git/CLI/hook 失敗調査（Sonnet）
-      reference-researcher.md          -- 公式ドキュメント調査（Sonnet）
-    author/
-      skill-author.md                  -- skills/<name>/SKILL.md 作成編集（Sonnet）
-      agent-author.md                  -- .claude/agents 作成編集（Sonnet）
-      rules-author.md                  -- .claude/rules 作成編集（Sonnet）
-      docs-writer.md                   -- CLAUDE.md/README 一覧・ツリー更新（Haiku）
-    quality/
-      skill-reviewer.md                -- SKILL.md 品質レビュー・読み取り専用（Sonnet）
-      security-auditor.md              -- OWASP 監査・読み取り専用（Sonnet）
-      frontmatter-linter.md            -- frontmatter/symlink 機械検証（Haiku）
-      plan-verifier.md                 -- 計画検証・読み取り専用（Sonnet）
-  rules/                                -- 13 件（delegation・skill-authoring・security 等）
-  skills/                                -- symlink 集約
-    create-html-report -> ../../skills/create-html-report
-    setup-firebase-hosting -> ../../skills/setup-firebase-hosting
-    create-pitch-deck -> ../../skills/create-pitch-deck
-    create-design-doc -> ../../skills/create-design-doc
-    create-skill/                      -- リポジトリ管理スキル（実ディレクトリ）
-    create-agent/                      -- リポジトリ管理スキル（実ディレクトリ）
-    (他は .agents/skills/ への symlink)
-  settings.json                        -- SessionStart hook（リマインダー）
-.github/
-  workflows/
-    ci.yml                             -- スキル構造検証 + lint-docs
-    codex-review.yml                   -- Codex PR レビュー（Fandhe-AI/actions 呼び出し）
-    update-external.yml                -- vendored スキルの日次同期
-  scripts/
-    check-skill-structure.sh           -- SKILL.md frontmatter・skills-lock.json 検証
-docs/
-  README.md                            -- docs/ の索引
-  skill-network-requirements.md        -- 各スキルのネットワーク・sandbox 実行要件
-AGENTS.md                              -- codex-review のレビュー観点集
-CLAUDE.md                              -- Claude Code 向け運用ガイド
-```
+構成の詳細は [CLAUDE.md](./CLAUDE.md) を参照。
 
 ## vendored スキルの扱い
 
@@ -146,3 +81,4 @@ CLAUDE.md                              -- Claude Code 向け運用ガイド
 
 - [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) — 本リポジトリが移設元・vendoring 元とする開発ワークフロースキル集
 - [Fandhe-AI/agent-reference-skills](https://github.com/Fandhe-AI/agent-reference-skills) — Claude Code / GitHub 等のリファレンススキル集（vendoring 元）
+- [Fandhe-AI/template-skills](https://github.com/Fandhe-AI/template-skills) — スキルリポジトリの共通構成テンプレート。新しいスキルリポジトリはこのテンプレートから作成する
