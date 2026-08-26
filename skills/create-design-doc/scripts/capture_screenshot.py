@@ -13,8 +13,9 @@
      （route("**/*") は WebSocket 等の全経路を確実に遮断できる保証がないため、
      違反 HTML はそもそも Chromium にロードしない）。
   2. 静的検査を通過した HTML のみロードし、check_overflow.py と同じ流儀で、about: と
-     文書本体自身の file:// URL（--allow-local-refs 時は文書ディレクトリ配下の
-     file:// も）以外の全リクエストを abort し、遮断要求が 1 件でもあれば失敗させる。
+     文書本体自身の file:// URL（--allow-local-refs 時は文書ディレクトリ配下に実在する
+     通常ファイルへの file:// も）以外の全リクエストを abort し、遮断要求が 1 件でも
+     あれば失敗させる。
 
 依存: playwright (標準ライブラリ外)。venv へインストールし
 `playwright install chromium` でブラウザ本体を取得してから実行する。
@@ -71,8 +72,17 @@ def capture(
             return
         if req_url.startswith("file://"):
             req_path = _file_url_to_path(req_url).resolve()
-            if req_path == doc_path or (allow_local_refs and req_path.is_relative_to(base_dir)):
+            if req_path == doc_path:
                 route.continue_()
+                return
+            if allow_local_refs and req_path.is_relative_to(base_dir):
+                # 範囲内でも欠落参照は fail-closed で遮断する（check_overflow.py と同一の規則。
+                # CLI help の「実在するファイルのみ許可」の契約と一致させる）
+                if req_path.is_file():
+                    route.continue_()
+                    return
+                blocked_requests.append(f"{req_url}（参照先ファイルが存在しない）")
+                route.abort()
                 return
         blocked_requests.append(req_url)
         route.abort()
