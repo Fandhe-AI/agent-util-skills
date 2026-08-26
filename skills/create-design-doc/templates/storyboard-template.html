@@ -12,12 +12,15 @@
   ボード自体の viewport 幅に対して発火してしまうため採用しない
   （wireframe 単体の responsive 挙動と一致しなくなる）。
 
-  相対パスの画像参照（例: screens/xxx-desktop.png）は自己完結契約
-  （外部 CDN 禁止）には抵触しない。https:// 等の外部 URL のみ禁止。
+  相対パスの画像参照（例: screens/xxx-desktop.png）は、検証・撮影の両コマンドに
+  --allow-local-refs を付けた場合のみ許可される（文書ディレクトリ配下への相対参照
+  限定。外部 URL・絶対パス・file://・`../` 脱出は常に遮断・FAIL）。storyboard 以外の
+  成果物（wireframes/*.html・flow.html）はこのフラグを使わず strict のまま検証する。
 
-  検証: scripts/check_overflow.py storyboard.html
+  検証: scripts/check_overflow.py storyboard.html --allow-local-refs
   Playwright で PNG 化（縦長 full-page）:
-    scripts/capture_screenshot.py --html storyboard.html --out storyboard.png --width 1000 --full-page
+    scripts/capture_screenshot.py --html storyboard.html --out storyboard.png --width 1000 --full-page \
+      --allow-local-refs
 -->
 <html lang="ja">
 <head>

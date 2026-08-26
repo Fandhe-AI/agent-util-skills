@@ -337,14 +337,16 @@ def main() -> int:
 
     url = "file://" + pathname2url(str(args.html.resolve()))
     # 静的検査をすり抜けた動的な外部要求（JS の Image().src 代入・CSS 解決由来等）を
-    # 実行時に検出する。file:// と about: 以外はすべて abort するため、検査対象 HTML が
-    # 外部へ実際に通信することはない（「通信した後で PASS する」抜け道の封鎖。
-    # create-design-doc/scripts/check_overflow.py と同じ流儀）。
+    # 実行時に検出する。許可は検証対象 deck.html 自身の file:// URL と about: のみで、
+    # それ以外はすべて abort する。file:// を丸ごと許可すると、単一ファイル配布で
+    # 欠落する同ディレクトリの相対参照（他ローカルファイル読み込み）が実行時検査を
+    # 素通りするため、自文書に限定する（「通信した後で PASS する」抜け道の封鎖。
+    # create-design-doc/scripts/check_overflow.py と同じ流儀の自文書限定版）。
     blocked_requests: list[str] = []
 
     def _route_handler(route):
         req_url = route.request.url
-        if req_url.startswith(("file://", "about:")):
+        if req_url == url or req_url.startswith("about:"):
             route.continue_()
         else:
             blocked_requests.append(req_url)

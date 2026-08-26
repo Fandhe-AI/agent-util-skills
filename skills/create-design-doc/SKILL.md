@@ -201,8 +201,13 @@ design-doc.md。
 
    ```bash
    "${DESIGN_DOC_VENV_PY}" "${CLAUDE_SKILL_DIR}/scripts/capture_screenshot.py" \
-     --html "<output>/storyboard.html" --out "<output>/storyboard.png" --width 1000 --full-page
+     --html "<output>/storyboard.html" --out "<output>/storyboard.png" --width 1000 --full-page \
+     --allow-local-refs
    ```
+
+   storyboard.html は `screens/*.png` を相対参照するため `--allow-local-refs` を付ける
+   （文書ディレクトリ配下への相対参照のみ許可。絶対パス・`file://`・`../` 脱出・外部 URL は
+   引き続き遮断される）。ワイヤーフレーム・flow.html の撮影には付けない。
 
 5. **design-doc.md**: [references/design-doc-structure.md](references/design-doc-structure.md)
    の節構成で作成する。画面一覧の「表示要素」欄は必須。フィードバック観点は3〜5件、ユーザー
@@ -214,7 +219,10 @@ design-doc.md。
 （flow.html も wireframe と同様に必ず実行する）。
 
 ```bash
+# ワイヤーフレーム・flow.html（strict: data URI とページ内 fragment のみ許容）
 "${DESIGN_DOC_VENV_PY}" "${CLAUDE_SKILL_DIR}/scripts/check_overflow.py" "<html>"
+# storyboard.html（screens/*.png の相対参照のみ追加許容）
+"${DESIGN_DOC_VENV_PY}" "${CLAUDE_SKILL_DIR}/scripts/check_overflow.py" "<output>/storyboard.html" --allow-local-refs
 ```
 
 FAIL の場合は HTML を修正し、再生成してから validator を再実行する。PASS するまで完了扱い
@@ -263,8 +271,12 @@ concept-brief.md も）を修正し、Step 5〜8 を再実行する。
 `check_overflow.py` は最低限以下を確認する。
 
 - PC（1440px）・モバイル（375px）双方で横スクロールを誘発するオーバーフローが無い
-- 外部 CDN・外部フォント・外部 script/stylesheet への参照が無い（自己完結契約。相対パスの
-  画像参照 `<img src="screens/...">` はこの契約に抵触しない）
+- 単一ファイルで自己完結している（既定の strict モードで許容する参照は、許可 MIME の
+  data URI とページ内 fragment のみ。外部 URL に加え、相対パス・絶対パス・`file://` も
+  単一ファイル配布で欠落・解決不能になるため違反として検出する）。実行時も文書本体以外への
+  全要求を遮断・記録し、1件でもあれば FAIL とする
+- storyboard.html のみ `--allow-local-refs` で検証する（`<img src="screens/...">` という
+  文書ディレクトリ配下への相対参照だけを追加許容。絶対パス・`file://`・`../` 脱出は不可）
 
 ## よくある失敗
 
@@ -279,8 +291,10 @@ concept-brief.md も）を修正し、Step 5〜8 を再実行する。
 
 ## 注意事項
 
-- `wireframes/*.html`・`flow.html`・`storyboard.html` は CDN・外部フォント・外部画像
-  （相対パスのローカル画像参照を除く）・外部 JS を一切使用しない
+- `wireframes/*.html`・`flow.html`・`storyboard.html` は CDN・外部フォント・外部画像・
+  外部 JS を一切使用しない。ローカルファイル参照も原則不可（画像は data URI で埋め込む）。
+  例外は storyboard.html の `screens/*.png` 相対参照のみで、検証・撮影時に
+  `--allow-local-refs` を明示して許可する
 - venv はビルドツールであり生成物ではない。`_/` 配下に置いた場合は commit しない（`_/` は
   `.gitignore` 済み）。リポジトリ外の一時領域に置いた場合はそもそも commit 対象にならない
 - 出力先ディレクトリ（`design/` 等）が存在しない場合は `mkdir -p` で作成してから書き出す
