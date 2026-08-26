@@ -11,3 +11,6 @@ __pycache__/
 *.pyc
 
 _/
+
+# implement-issue-tree の worktree 作業ディレクトリ
+.claude/worktrees/
