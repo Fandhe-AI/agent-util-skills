@@ -47,8 +47,8 @@ npx skills add github:Fandhe-AI/agent-util-skills --all
 
 事業企画の専門家として、アイデア・要件文書から PO（プロダクトオーナー）承認会向け企画提案スライドを自己完結 HTML（フルスクリーン・キーボード操作・単一ファイル）で生成する。「ピッチデック作って」「企画スライドにまとめて」「プレゼン資料作って」「承認会用の資料を作って」などで使用する。PPTX は生成しない。
 
-- 前半（前提と解釈・課題・解決アプローチ・対象範囲・勝ち筋）→後半（画面と操作の流れ・検証計画・承認いただきたい事項）の 10〜14 枚可変構成。`←`/`→` キー・クリック・`R`（先頭へ）で操作し、`@media print` で PDF 配布用の1スライド1ページにも対応する
-- 「画面と操作の流れ」（`screen_flow`、2〜4枚）は `create-design-doc` が生成した screenshot を base64 data URI として埋め込み、シナリオの場面ごとに「この画面がこう使われる」を説明する
+- 前半（前提と解釈・課題・解決アプローチ・対象範囲・勝ち筋）→後半（画面と操作の流れ・検証計画・承認いただきたい事項）の 10〜12 枚可変構成（固定8枚 + `screen_flow` 2〜4枚）。`←`/`→` キー・クリック・`R`（先頭へ）で操作し、`@media print` で PDF 配布用の1スライド1ページにも対応する
+- 「画面と操作の流れ」（`screen_flow`、2〜4枚）は `create-design-doc` が生成した `wireframes/*.html` を読み込み、iframe の `srcdoc` として同一文書内に実寸埋め込みする（静止画は使わない）。ステップ送りに合わせて対象要素をスポットライト表示し、シナリオの場面ごとに「この画面がこう使われる」を説明する
 - `scripts/build_slides.py` が deck spec（JSON）から HTML を生成し、`scripts/validate_slides.py`（Playwright）が全スライドを実際に遷移させながらはみ出し・自己完結性・inline JS の安全性・必須スライド配置を機械検証し、確認用に全スライドの PNG も撮影する
 - `create-design-doc` と共有合意文書 `concept-brief.md` を介して整合し、事業企画とデザイン設計の食い違いを防ぐ（推奨実行順序: `create-design-doc` → `create-pitch-deck`）
 - 詳細は [skills/create-pitch-deck/SKILL.md](skills/create-pitch-deck/SKILL.md)、deck spec の仕様は `references/deck-spec.md` を参照
