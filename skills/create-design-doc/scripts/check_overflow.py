@@ -124,7 +124,12 @@ class _WireframeAuditor(HTMLParser):
         if tag.lower() == "script":
             self.script_tags += 1
         if tag.lower() == "style":
-            # <style/> 自己閉じ表記もブラウザは開始タグとして扱うため startendtag 経由でも開始扱い
+            # <style/> 自己閉じ表記もブラウザは開始タグとして扱うため startendtag 経由でも開始扱い。
+            # 収集中に別の <style> 開始タグへ再突入した場合は、進行中のバッファを捨てず
+            # フラッシュしてから新規収集を始める（捨てると収集済み CSS が失われ、
+            # ブラウザが適用する外部 CSS を静的検査が見逃す fail-open になる）
+            if self._in_style and self._style_buf:
+                self.style_bodies.append("".join(self._style_buf))
             self._in_style = True
             self._style_buf = []
 

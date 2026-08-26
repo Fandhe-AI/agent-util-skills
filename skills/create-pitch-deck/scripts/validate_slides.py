@@ -246,7 +246,19 @@ class _SlideAuditor(HTMLParser):
                 # 完全な HTML 文書として再帰解析できる（_audit 側で合流させる）
                 self.srcdocs.append(v)
         if tag in ("script", "style"):
+            # <style/>/<script/>（自己閉じ・開始扱い）で収集中に次の開始タグへ再突入
+            # したとき、溜まったテキストをリセットで捨てると検査が fail-open になる
+            # ため、必ずフラッシュしてから新規収集を始める（build 側 _RefCollector と同型）
+            self._flush_pending()
             self._in, self._buf = tag, ""
+
+    def _flush_pending(self) -> None:
+        """進行中の <script>/<style> バッファを捨てずに確定させる。"""
+        if self._in == "script":
+            self.scripts.append(self._buf)
+        elif self._in == "style":
+            self.styles.append(self._buf)
+        self._in, self._buf = None, ""
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # ブラウザは HTML の script/style で self-closing スラッシュ（<style/> 等）を
@@ -265,16 +277,14 @@ class _SlideAuditor(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if self._in == tag:
-            (self.scripts if tag == "script" else self.styles).append(self._buf)
-            self._in, self._buf = None, ""
+            self._flush_pending()
 
     def close(self) -> None:
         super().close()
         # 閉じタグを欠いた `<script>fetch(...)` 等が検査を素通りしないよう、
         # EOF 時点で未終端の script/style も fail-closed で収集対象に含める
         if self._in:
-            (self.scripts if self._in == "script" else self.styles).append(self._buf)
-            self._in, self._buf = None, ""
+            self._flush_pending()
 
 
 def _audit(html_text: str) -> _SlideAuditor:

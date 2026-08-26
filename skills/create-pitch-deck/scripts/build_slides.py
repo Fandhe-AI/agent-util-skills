@@ -204,7 +204,17 @@ class _RefCollector(HTMLParser):
             elif name == "style":
                 self.style_attrs.append(v)
         if tag in ("script", "style"):
+            # <style/>（自己閉じ・開始扱い）で収集中に次の <style>/<script> 開始タグへ
+            # 再突入したとき、溜まった CSS テキストをリセットで捨てると外部参照検査が
+            # fail-open になるため、必ずフラッシュしてから新規収集を始める
+            self._flush_pending()
             self._in, self._buf = tag, ""
+
+    def _flush_pending(self) -> None:
+        """進行中の <style> バッファを捨てずに styles へ確定させる。"""
+        if self._in == "style":
+            self.styles.append(self._buf)
+        self._in, self._buf = None, ""
 
     def handle_data(self, data: str) -> None:
         if self._in == "style":
@@ -212,17 +222,13 @@ class _RefCollector(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if self._in == tag:
-            if tag == "style":
-                self.styles.append(self._buf)
-            self._in, self._buf = None, ""
+            self._flush_pending()
 
     def close(self) -> None:
         super().close()
         # 閉じタグを欠いた <style> も fail-closed で検査対象に含める
         if self._in:
-            if self._in == "style":
-                self.styles.append(self._buf)
-            self._in, self._buf = None, ""
+            self._flush_pending()
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # ブラウザは HTML の script/style で self-closing スラッシュ（<style/> 等）を
