@@ -331,10 +331,12 @@ def validate_spec(spec: dict) -> None:
     # brand は build_html で CSS_TEMPLATE.format() に展開されるため、値を色リテラルへ
     # 厳格に制限する（BRAND_COLOR_RE の理由コメント参照）。未知キーは build_html 側で
     # 無視されるが、注入経路を残さないよう全キーの値を一律に検査する。
-    brand = spec.get("brand")
-    if brand is not None:
+    # キーの存在で判定する（`is not None` 判定だと `"brand": null` が素通りし、
+    # build_html の brand.items() で AttributeError になる）。
+    if "brand" in spec:
+        brand = spec["brand"]
         if not isinstance(brand, dict):
-            raise SpecError("spec.brand は object であること")
+            raise SpecError("spec.brand は object であること（null は不可。省略はキーごと削除する）")
         for key, value in brand.items():
             if not isinstance(value, str) or not BRAND_COLOR_RE.match(value):
                 raise SpecError(
@@ -396,7 +398,17 @@ def validate_spec(spec: dict) -> None:
         if not title or not isinstance(title, str):
             raise SpecError(f"role={role} に title (string) が必要")
 
-        if role in ("premise", "problem", "solution", "validation"):
+        if role == "cover":
+            # 任意フィールドも型は保証する。truthy な数値・object が通過すると
+            # render_cover の "  |  ".join(meta_bits) 等で TypeError になる
+            for key in ("subtitle", "date", "meta"):
+                value = slide.get(key)
+                if value is not None and (not isinstance(value, str) or not value.strip()):
+                    raise SpecError(
+                        f"role=cover.{key} は非空文字列であること（現在: {value!r}。"
+                        "省略はキーごと削除する）"
+                    )
+        elif role in ("premise", "problem", "solution", "validation"):
             _require_str_list(slide, "bullets", role, min_len=1)
         elif role == "scope":
             _require_str_list(slide, "in_scope", role, min_len=1)
@@ -406,8 +418,13 @@ def validate_spec(spec: dict) -> None:
             if not isinstance(items, list) or not items:
                 raise SpecError("role=winning に items (1件以上) が必要")
             for item in items:
-                if not isinstance(item, dict) or not item.get("text"):
-                    raise SpecError("winning.items の各要素は text を持つこと")
+                if not isinstance(item, dict):
+                    raise SpecError("winning.items の各要素は object であること")
+                text = item.get("text")
+                # truthy 判定だけだと text: 1 等の非文字列が通過し、
+                # wrap_countup の NUMBER_RE.search(text) で TypeError になる
+                if not isinstance(text, str) or not text.strip():
+                    raise SpecError("winning.items の各要素は text (非空文字列) を持つこと")
                 if item.get("label") not in WINNING_LABELS:
                     raise SpecError(
                         "winning.items の各要素は label に "
@@ -475,8 +492,11 @@ def validate_spec(spec: dict) -> None:
                     f"（現在 {len(items)}件）"
                 )
             for item in items:
-                if not isinstance(item, dict) or not item.get("text"):
-                    raise SpecError("approval.items の各要素は text を持つこと")
+                if not isinstance(item, dict):
+                    raise SpecError("approval.items の各要素は object であること")
+                text = item.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise SpecError("approval.items の各要素は text (非空文字列) を持つこと")
                 if item.get("kind") not in APPROVAL_KINDS:
                     raise SpecError(
                         f"approval.items の各要素は kind に {sorted(APPROVAL_KINDS)} の"
