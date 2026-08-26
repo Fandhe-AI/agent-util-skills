@@ -101,6 +101,11 @@ DATA_URI_ALLOWED_RE = re.compile(r"^\s*data:image/(png|jpeg|gif|webp)[;,]", re.I
 # 任意 scheme の検出（http(s) に限定しない）。javascript: や blob: 等も含め、
 # scheme 付きの参照はすべて外部扱いにする（data: のみ上の allowlist で先に判定）。
 SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
+# 生テキストへの直接表記検査。wireframe は <script> 自体を全面禁止にしたため
+# （find_disallowed_refs の "script" 検出が主ゲート）、本リストは防御多層。
+# window['eval'](...) 等のプロパティアクセス表記や 'ev'+'al' の文字列連結は regex では
+# 原理的に捕捉できないが、script 全面禁止と validate_slides.py の実行時 route 遮断が
+# その経路を閉じる。
 FORBIDDEN_JS_PATTERNS = [
     (re.compile(r"\beval\s*\("), "eval("),
     (re.compile(r"\bnew\s+Function\s*\("), "new Function("),
@@ -168,8 +173,11 @@ class _RefCollector(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.refs: list[str] = []
         self.srcdocs: list[str] = []  # iframe srcdoc（find_disallowed_refs が再帰解析する）
+        self.script_tags = 0          # <script> の出現数（wireframe では全面禁止）
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":
+            self.script_tags += 1
         for name, value in attrs:
             v = value or ""
             if name in RESOURCE_ATTRS:
@@ -198,9 +206,12 @@ def find_disallowed_refs(text: str) -> dict[str, list[str]]:
     srcset の候補 URL は _RefCollector で構造的に、CSS の url(...) は HTML/CSS
     コメント除去後の全文走査で抽出し、classify_ref で分類して "ok" 以外を種類別に返す。
     コメントを先に除去するのは、コメントアウト済みの url(https://...) 等を実際の
-    外部依存として誤検出しないため。
+    外部依存として誤検出しないため。<script> の出現も "script" として返す
+    （wireframe は静的ワイヤーフレームで script の正当用途がないため全面禁止。
+    window['eval'](...) 等のプロパティアクセス表記は文字列パターン検査で原理的に
+    捕捉しきれないため、識別子検査ではなく script 自体を拒否して fail-closed にする）。
     """
-    bad: dict[str, list[str]] = {"external": [], "relative": [], "bad-data": []}
+    bad: dict[str, list[str]] = {"external": [], "relative": [], "bad-data": [], "script": []}
 
     def record(value: str) -> None:
         # srcset の候補走査と変則表記走査が重なった場合等の重複報告を避ける
@@ -213,6 +224,8 @@ def find_disallowed_refs(text: str) -> dict[str, list[str]]:
     collector.close()
     for ref in collector.refs:
         record(ref)
+    if collector.script_tags:
+        bad["script"].append(f"<script> x{collector.script_tags}")
 
     cleaned = CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))
     for m in CSS_URL_RE.finditer(cleaned):
@@ -254,6 +267,13 @@ def check_embeddable_html(text: str, label: str) -> None:
     if bad_refs["bad-data"]:
         violations.append(
             "png/jpeg/gif/webp 以外の data: URI（能動コンテンツを埋め込める経路のため不許可）"
+        )
+    if bad_refs["script"]:
+        violations.append(
+            "<script> 要素: " + ", ".join(bad_refs["script"][:3])
+            + "（wireframe は静的ワイヤーフレームのため script は全面禁止。"
+            "window['eval'] 等の表記迂回を含め fail-closed に拒否する。"
+            "スポットライト演出は build_slides.py が埋め込み時に注入する）"
         )
     if CDN_IMPORT_RE.search(CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))):
         violations.append("CSS @import による外部リソース参照")

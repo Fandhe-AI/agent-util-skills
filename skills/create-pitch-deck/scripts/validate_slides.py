@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from html.parser import HTMLParser
@@ -115,21 +116,53 @@ CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""",
 # コメントアウト済みの url(...) を実際の外部依存として誤検出しないための除去用。
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
-# inline JavaScript の逸脱チェック（AGENTS.md P0）。eval・new Function・
-# innerHTML 代入・inline event handler 属性・network API の不使用を確認する。
+# inline JavaScript の逸脱チェック（AGENTS.md P0）。eval・Function・
+# innerHTML 系代入・inline event handler 属性・network API の不使用を確認する。
 INLINE_HANDLER_ATTR_RE = re.compile(r"^on[a-z]+$", re.IGNORECASE)
-FORBIDDEN_JS_PATTERNS = [
-    (re.compile(r"\beval\s*\("), "eval("),
-    (re.compile(r"\bnew\s+Function\s*\("), "new Function("),
-    (re.compile(r"\.innerHTML\s*="), ".innerHTML ="),
-    (re.compile(r"\bfetch\s*\("), "fetch("),
-    (re.compile(r"\bXMLHttpRequest\b"), "XMLHttpRequest"),
-    (re.compile(r"\bWebSocket\s*\("), "WebSocket("),
-    (re.compile(r"\bEventSource\s*\("), "EventSource("),
-    (re.compile(r"\bsendBeacon\s*\("), "navigator.sendBeacon("),
+# 禁止 JS 識別子。直接表記（eval( 等）の regex 検査だけでは window['eval'](...) や
+# element['innerHTML'] = ... のプロパティアクセス表記で迂回できるため、表記を問わず
+# 部分文字列一致（大文字小文字区別）で識別子の出現自体を fail-closed に禁止する。
+# deck の script は本スキルが生成する固定 nav JS + スポットライト注入スクリプトのみ
+# なので誤検知しない（'Function' は大文字始まりで検査するため小文字の function 宣言
+# には一致しない）。'ev'+'al' のような文字列連結による動的構築は静的検出の原理的
+# 限界であり、その経路の実害（外部通信）は実行時の route 遮断（main の
+# _route_handler）が検出する。
+FORBIDDEN_JS_SUBSTRINGS = [
+    "eval",
+    "Function",
+    "fetch",
+    "XMLHttpRequest",
+    "WebSocket",
+    "EventSource",
+    "sendBeacon",
+    "importScripts",
+    "serviceWorker",
+    "innerHTML",
+    "outerHTML",
+    "insertAdjacentHTML",
+    "document.write",
 ]
 
 NUMBERED_ITEM_RE = re.compile(r"^\s*\d+\.\s*\S")
+
+
+def allowed_srcdoc_scripts() -> list[str] | None:
+    """wireframe（srcdoc）内で唯一許可する script 本文の一覧を返す。
+
+    wireframe は静的ワイヤーフレームであり script の正当用途がないため全面禁止とし、
+    build_slides.py が注入するスポットライトスクリプトの完全一致のみを許可する。
+    一次ソースとして build_slides.py の SPOTLIGHT_INJECTION を import する
+    （同一ディレクトリ配置が前提）。import に失敗した場合は None を返し、呼び出し側は
+    「srcdoc の script は一切不許可」として扱う（fail-closed。
+    create-html-report/scripts/validate_report.py の bundled_js と同じ方針）。
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from build_slides import SPOTLIGHT_INJECTION
+    except Exception:
+        return None
+    m = re.search(r"<script>(.*?)</script>", SPOTLIGHT_INJECTION, re.DOTALL)
+    return [m.group(1).strip()] if m else []
 
 
 class _SlideAuditor(HTMLParser):
@@ -143,6 +176,7 @@ class _SlideAuditor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.scripts: list[str] = []          # inline <script> の中身
+        self.srcdoc_scripts: list[str] = []   # srcdoc（wireframe）内の <script>（_audit が合流）
         self.styles: list[str] = []           # <style> の中身
         self.style_attrs: list[str] = []      # style="..." 属性値
         self.inline_handlers: list[str] = []  # on* 属性の出現箇所
@@ -225,10 +259,13 @@ def _audit(html_text: str) -> _SlideAuditor:
         sub.feed(pending.pop())
         sub.close()
         for field in (
-            "scripts", "styles", "style_attrs",
+            "styles", "style_attrs",
             "inline_handlers", "external_refs", "relative_refs", "bad_data_uris",
         ):
             getattr(auditor, field).extend(getattr(sub, field))
+        # srcdoc 内の script は「スポットライト注入スクリプトの完全一致のみ許可」の
+        # 別枠検査（check_inline_js_safety）にかけるため、外側の scripts と区別して集める
+        auditor.srcdoc_scripts.extend(sub.scripts)
         pending.extend(sub.srcdocs)
     return auditor
 
@@ -281,12 +318,23 @@ def check_inline_js_safety(html_text: str, failures: list[str], label: str = "ou
             + ", ".join(sorted(set(auditor.inline_handlers)))
         )
     detected: list[str] = []
-    for script in auditor.scripts:
-        for pattern, name in FORBIDDEN_JS_PATTERNS:
-            if name not in detected and pattern.search(script):
-                detected.append(name)
-    for name in detected:
-        failures.append(f"{label}: <script> 内に禁止された JavaScript パターンを検出: {name}")
+    for script in auditor.scripts + auditor.srcdoc_scripts:
+        for token in FORBIDDEN_JS_SUBSTRINGS:
+            if token not in detected and token in script:
+                detected.append(token)
+    for token in detected:
+        failures.append(f"{label}: <script> 内に禁止された JavaScript 識別子を検出: {token}")
+    # wireframe（srcdoc）内の script は全面禁止（スポットライト注入スクリプトの
+    # 完全一致のみ許可）。識別子検査は表記迂回に対する防御多層で、こちらが主ゲート
+    allowed = allowed_srcdoc_scripts()
+    for script in auditor.srcdoc_scripts:
+        if allowed is None or script.strip() not in allowed:
+            failures.append(
+                f"{label}: wireframe（srcdoc）内に許可外の <script> を検出"
+                "（wireframe の script は全面禁止。許可はスポットライト注入スクリプトの"
+                "完全一致のみ）"
+            )
+            break
 
 
 def check_roles(roles: list[str], failures: list[str]) -> None:

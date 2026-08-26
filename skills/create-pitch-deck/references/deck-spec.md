@@ -69,10 +69,13 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_slides.py" <out.html> --screenshot
   （例: `"create-design-doc 未実行のためテキスト概略のみ"`）を必須にする。この場合
   フラグメントは0（`steps` を持たない）
 
-wireframe ファイルは埋め込み前に自己完結性・inline JS 安全性（外部 URL・CDN import・
-inline event handler・`eval`/`innerHTML`代入/network API の不在）を生テキストの時点で検査し、
-違反があれば `SpecError` で拒否する（HTML エスケープ後は正規表現での検出が効かなくなるため、
-必ず埋め込み前に検査する）。
+wireframe ファイルは埋め込み前に自己完結性・inline JS 安全性（外部 URL・ローカル相対参照・
+CDN import・inline event handler の不在）を検査し、違反があれば `SpecError` で拒否する
+（HTML エスケープ後は正規表現での検出が効かなくなるため、必ず埋め込み前に検査する）。
+wireframe は静的ワイヤーフレームであり **`<script>` 要素は全面禁止**
+（`window['eval'](...)` のような表記迂回を文字列検査で追いかけず、script 自体を
+fail-closed に拒否する）。スポットライト演出用のスクリプトは `build_slides.py` が
+埋め込み時に注入するため、wireframe 側に script を書く必要はない。
 
 role の順序契約違反・`screen_flow` の連続枚数逸脱・`approval` の件数逸脱・
 `winning.items[].label` 不正・`screen_flow` の `wireframe`/`steps`/`note` 欠落・wireframe の
@@ -97,9 +100,10 @@ role の順序契約違反・`screen_flow` の連続枚数逸脱・`approval` �
 - 印刷/PDF: `@media print` で1スライド＝1ページ、**全フラグメントが最終状態（opacity:1）**
   で表示され、上部バー・プログレスバー・ナビボタンは非表示
 - inline JavaScript は `addEventListener` / `classList` / `querySelector` のみで完結し、
-  `eval`・`new Function`・untrusted な `innerHTML` 代入・inline event handler 属性・
+  `eval`・`Function`・untrusted な `innerHTML` 代入・inline event handler 属性・
   ネットワーク API（`fetch` 等）を一切使わない（`screen_flow` の wireframe に注入する
-  スポットライト用スクリプトも同じ制約に従う）
+  スポットライト用スクリプトも同じ制約に従う。srcdoc 内の script はこの注入スクリプト
+  の完全一致のみ許可し、wireframe 本体の `<script>` は全面禁止）
 
 ## 検証ルール（`validate_slides.py` が html から直接確認）
 

@@ -204,7 +204,8 @@ python3 -m venv "_/pitch-deck/.venv" 2>/dev/null || true
 いるディレクトリの絶対パスに読み替える（例: `skills/create-pitch-deck`）。
 
 `build_slides.py` は標準ライブラリのみで動作する（wireframe の埋め込みも Pillow 非依存。
-`.screen_flow.wireframe` の自己完結性・inline JS 安全性をこの時点で検査する）ため、
+`.screen_flow.wireframe` の自己完結性・inline JS 安全性をこの時点で検査する。wireframe
+内の `<script>` は全面禁止で、スポットライト演出は埋め込み時に注入される）ため、
 Step 7 の venv は次の Step 9（Playwright 検証）のためのものである。
 
 `SpecError`（終了コード1）で失敗した場合はエラーメッセージに従って spec または wireframe を
@@ -262,8 +263,10 @@ validator（`validate_slides.py`）は最低限以下を確認する。
 - `screen_flow` の各ステップで iframe 内に期待した1件だけスポットライトが付与されているか
   （セレクタ不一致・解除漏れの検出）。iframe 内 HTML にも外部リソース参照・危険な JS
   パターンが無いか
-- 外部リソース参照・inline JavaScript の危険パターン（`eval`・`innerHTML`代入・inline
-  handler・network API）が親 HTML にゼロ件
+- 外部リソース参照・inline JavaScript の禁止識別子（`eval`・`innerHTML`・network API 等。
+  `window['eval']` のようなブラケット表記も部分文字列一致で検出）・inline handler が
+  親 HTML にゼロ件。wireframe（srcdoc）内の script はスポットライト注入スクリプトの
+  完全一致のみ許可
 - 末尾の clamp・`R` での先頭復帰・クリックでの遷移・フラグメント0での `←` 逆戻りが仕様
   どおり動く
 - 2枚目に「前提」、最終スライドに「承認」と3〜5件の承認・確認事項が含まれる

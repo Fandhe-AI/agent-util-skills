@@ -6,7 +6,8 @@
   横スクロールを誘発する水平方向のオーバーフローが無いかを検証する。
 - 外部 CDN・外部 script 等の self-contained 契約違反も検出する
   （create-html-report/scripts/validate_report.py の外部依存チェックと同じ考え方）。
-  検出は静的検査（属性・srcset・CSS url()/@import・JS ネットワーク API）と、
+  検出は静的検査（属性・srcset・CSS url()/@import・JS ネットワーク API・禁止 JS
+  パターン・inline event handler）と、
   Playwright 実行時の全ネットワーク遮断（file:// の自ファイル以外は abort して記録）の
   両輪で行う。静的検査をすり抜けた動的な外部要求も実行時遮断で FAIL になり、
   かつ abort により外部への通信自体が発生しない。
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import pathname2url, url2pathname
@@ -49,20 +51,16 @@ REF_ATTR_RE = re.compile(
     r"""\b(src|href|xlink:href|data|poster|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""",
     re.IGNORECASE,
 )
-# 単一ファイル配布でも欠落しない data URI の許可 MIME（画像・フォントの埋め込み用途のみ）
+# 単一ファイル配布でも欠落しない data URI の許可 MIME。raster 画像のみに制限する。
+# image/svg+xml は許可しない: <object data="data:image/svg+xml,...">・<embed> 経由で
+# script 入り SVG（onload= 等）が Chromium 上で実行され得るため。ベクター図形は
+# inline <svg> 要素で書く（属性・script 検査の対象になる）。フォントはシステム
+# フォントスタックを使う契約のため data URI 埋め込み自体を不要とする
 ALLOWED_DATA_URI_MIME = {
     "image/png",
     "image/jpeg",
     "image/gif",
-    "image/svg+xml",
     "image/webp",
-    "image/avif",
-    "image/x-icon",
-    "image/vnd.microsoft.icon",
-    "font/woff",
-    "font/woff2",
-    "font/ttf",
-    "font/otf",
 }
 # srcset は「URL 幅記述子, URL 幅記述子, ...」形式のため属性値全体を取り出して候補ごとに検査する
 SRCSET_RE = re.compile(r"""\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
@@ -73,15 +71,72 @@ CSS_URL_RE = re.compile(r"""\burl\(\s*(["']?)([^"')]+)\1\s*\)""", re.IGNORECASE)
 CSS_IMPORT_RE = re.compile(r"""@import\s+(?:url\(|["'])""", re.IGNORECASE)
 # 自己完結ワイヤーフレームに通信 API は不要のため、script 内での存在自体を契約違反とする。
 # 可視テキストや属性に「fetch( を使う」等の説明コピーが現れても誤検知しないよう、
-# 検査は SCRIPT_CONTENT_RE で抽出した <script> 要素の内容に限定する
+# 検査は _WireframeAuditor が構造的に収集した <script> 本文に限定する
 # （script 外の動的な抜け道は実行時の全ネットワーク遮断で検出する）
 JS_NETWORK_RE = re.compile(
     r"\b(?:fetch\s*\(|XMLHttpRequest\b|WebSocket\s*\(|sendBeacon\s*\(|EventSource\s*\(|importScripts\s*\()"
 )
-# <script> の内容抽出。ブラウザは <script/> のような自己閉じ表記も開始タグとして扱い
-# 実終了タグまで script と解釈するため、[^>]* が末尾の / も含めて同様に開始タグ扱いする。
-# 閉じタグ欠落時は fail-closed で EOF まで（\Z）を script 内容として収集する
-SCRIPT_CONTENT_RE = re.compile(r"<script\b[^>]*>(.*?)(?:</script\s*>|\Z)", re.IGNORECASE | re.DOTALL)
+# 禁止 JavaScript 識別子（create-pitch-deck/scripts/validate_slides.py の禁止 JS 検査と
+# 同等以上）。撮影時に Chromium 上で実行されるため、動的コード実行・HTML 注入系 API は
+# 存在自体を契約違反とする。\b 付き識別子マッチのため、`eval(` の直接呼び出しに加えて
+# `window['eval']` / `window["eval"]` のようなブラケット表記（文字列としての出現）も
+# 同じパターンで検出でき、fail-closed になる（例: "retrieval" 等の内包語には
+# 単語境界が成立せずマッチしない）
+BANNED_JS_PATTERNS = [
+    (re.compile(r"\beval\b"), "eval"),
+    (re.compile(r"\bFunction\b"), "Function コンストラクタ（new Function 等）"),
+    (re.compile(r"\binnerHTML\b"), "innerHTML"),
+    (re.compile(r"\bouterHTML\b"), "outerHTML"),
+    (re.compile(r"\binsertAdjacentHTML\b"), "insertAdjacentHTML"),
+    (re.compile(r"\bdocument\s*\.\s*write(?:ln)?\b|['\"]write(?:ln)?['\"]"), "document.write / writeln"),
+]
+
+
+class _WireframeAuditor(HTMLParser):
+    """on* 属性と <script> 本文を構造的に収集する監査パーサ。
+
+    正規表現による全文検索では可視テキスト中の説明コピーへ誤マッチするため、
+    HTMLParser で構造を解釈して「タグの属性として現れた on*」と「script 要素の本文」
+    だけを検査対象として取り出す。ブラウザは <script/> のような自己閉じ表記も開始
+    タグとして扱い実終了タグまで script と解釈するため、startendtag も開始扱いにする。
+    閉じタグ欠落時は fail-closed で EOF までを script 本文として収集する。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.inline_handlers: list[str] = []  # "<tag> の <on*属性>" 形式で記録
+        self.script_bodies: list[str] = []
+        self._in_script = False
+        self._buf: list[str] = []
+
+    def _visit_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, _value in attrs:
+            if name and name.lower().startswith("on"):
+                self.inline_handlers.append(f"<{tag}> の {name}")
+        if tag.lower() == "script":
+            self._in_script = True
+            self._buf = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._visit_tag(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._visit_tag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "script" and self._in_script:
+            self.script_bodies.append("".join(self._buf))
+            self._in_script = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_script:
+            self._buf.append(data)
+
+    def close(self) -> None:
+        super().close()
+        if self._in_script:
+            self.script_bodies.append("".join(self._buf))
+            self._in_script = False
 
 
 def classify_ref(target: str, base_dir: Path, allow_local_refs: bool) -> str | None:
@@ -146,11 +201,22 @@ def check_external_dependency(
             "CSS @import を検出（外部・ローカルを問わずスタイル分割は単一ファイル契約違反。"
             "<style> 内へ直接記述すること）"
         )
-    if any(JS_NETWORK_RE.search(m.group(1)) for m in SCRIPT_CONTENT_RE.finditer(text)):
+    # on* 属性・script 本文は正規表現の全文検索ではなく構造解析で収集する
+    # （可視テキスト中の説明コピーへの誤マッチ防止と、属性・要素境界の正確な判定のため）
+    auditor = _WireframeAuditor()
+    auditor.feed(html_text)
+    auditor.close()
+    for handler in auditor.inline_handlers:
+        failures.append(f"inline event handler 属性を検出: {handler}（禁止 JS・契約違反）")
+    script_text = "\n".join(auditor.script_bodies)
+    if JS_NETWORK_RE.search(script_text):
         failures.append(
             "script 内に JS のネットワーク API（fetch / XMLHttpRequest / WebSocket / sendBeacon 等）"
             "を検出（自己完結契約違反）"
         )
+    for pattern, name in BANNED_JS_PATTERNS:
+        if pattern.search(script_text):
+            failures.append(f"script 内に禁止された JavaScript パターンを検出: {name}")
 
 
 def _file_url_to_path(file_url: str) -> Path:
