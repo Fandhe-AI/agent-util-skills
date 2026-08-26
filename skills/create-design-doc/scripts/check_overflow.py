@@ -43,14 +43,10 @@ OVERFLOW_TOLERANCE_PX = 1  # サブピクセル丸め誤差の許容量
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
-# リソースを参照し得る属性の値を抽出する（引用符あり・なしの双方）。
-# object[data]・SVG の image/use（href / xlink:href）もここでカバーする。
-# 外部 URL だけでなく相対パス・絶対パス・file:// も classify_ref で判定するため、
-# 値そのものをキャプチャする
-REF_ATTR_RE = re.compile(
-    r"""\b(src|href|xlink:href|data|poster|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""",
-    re.IGNORECASE,
-)
+# リソースを参照し得る属性。object[data]・SVG の image/use（href / xlink:href）も
+# ここでカバーする。値は _WireframeAuditor がタグ文脈付きで構造的に収集し、
+# classify_ref で外部 URL・相対パス・絶対パス・file:// を判定する
+REF_ATTRS = {"src", "href", "xlink:href", "data", "poster", "action", "formaction", "srcset"}
 # 単一ファイル配布でも欠落しない data URI の許可 MIME。raster 画像のみに制限する。
 # image/svg+xml は許可しない: <object data="data:image/svg+xml,...">・<embed> 経由で
 # script 入り SVG（onload= 等）が Chromium 上で実行され得るため。ベクター図形は
@@ -62,8 +58,11 @@ ALLOWED_DATA_URI_MIME = {
     "image/gif",
     "image/webp",
 }
-# srcset は「URL 幅記述子, URL 幅記述子, ...」形式のため属性値全体を取り出して候補ごとに検査する
-SRCSET_RE = re.compile(r"""\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+# --allow-local-refs で許可するローカル参照の拡張子（data URI 許可 MIME と同じ raster 4種）。
+# 静的検査（classify_ref）と実行時 route（check_overflow / capture_screenshot 双方が
+# local_file_violation 経由で使用）で共有する単一定義。iframe/object 等で HTML を
+# 持ち込むと参照先の <script> が未検査のまま実行されるため、画像以外は許可しない
+ALLOWED_LOCAL_REF_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 # srcset 候補の分割は「comma + 空白」に限定する（分割理由は srcset_candidates 参照。
 # create-pitch-deck/scripts/validate_slides.py の同名関数と同じ解析方式）
 SRCSET_SPLIT_RE = re.compile(r",\s+")
@@ -89,6 +88,7 @@ class _WireframeAuditor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.inline_handlers: list[str] = []  # "<tag> の <on*属性>" 形式で記録
+        self.refs: list[tuple[str, str, str, str]] = []  # (scope, tag, attr, value)
         self.script_tags = 0
 
     def _visit_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -105,7 +105,12 @@ class _WireframeAuditor(HTMLParser):
                 sub.feed(value)
                 sub.close()
                 self.inline_handlers.extend(f"srcdoc 内: {h}" for h in sub.inline_handlers)
+                self.refs.extend(("srcdoc 内 " + s, t, a, v) for s, t, a, v in sub.refs)
                 self.script_tags += sub.script_tags
+            elif lname in REF_ATTRS and value is not None:
+                # 参照元のタグ文脈を保持して収集する（--allow-local-refs の許可判定が
+                # 「<img src> / srcset か否か」に依存するため）
+                self.refs.append(("", tag.lower(), lname, value))
         if tag.lower() == "script":
             self.script_tags += 1
 
@@ -140,8 +145,11 @@ def classify_ref(target: str, base_dir: Path, allow_local_refs: bool) -> str | N
     既定（strict）で許容するのは許可 MIME の data URI とページ内 fragment のみ。
     相対パス・絶対パス・file:// も「単一ファイル配布で欠落・解決不能になる」ため違反とする。
     allow_local_refs=True（storyboard.html が screens/*.png を参照する構成向け）の場合のみ、
-    文書ディレクトリ（base_dir）配下の実在する通常ファイルへ解決される相対参照を追加で
-    許容する。絶対パス・file://・`../` による base_dir 外への脱出・欠落参照は常に違反。
+    文書ディレクトリ（base_dir）配下に実在する承認済み raster 画像
+    （ALLOWED_LOCAL_REF_SUFFIXES）へ解決される相対参照を追加で許容する。
+    参照元の限定（<img src> / srcset / CSS 画像参照のみ）は呼び出し元が判定して
+    allow_local_refs に反映する。絶対パス・file://・`../` による base_dir 外への脱出・
+    欠落参照・raster 以外の拡張子は常に違反。
     """
     t = target.strip().strip("\"'")
     if not t or t.startswith("#"):
@@ -157,12 +165,19 @@ def classify_ref(target: str, base_dir: Path, allow_local_refs: bool) -> str | N
     if re.match(r"^[a-z][a-z0-9+.-]*:", low):
         return "スキーム付き参照（file:// 等。単一ファイル配布で解決できないため不可）"
     if not allow_local_refs:
-        return "ローカルファイル参照（単一ファイル配布で欠落するため不可）"
+        return (
+            "ローカルファイル参照（単一ファイル配布で欠落するため不可。--allow-local-refs の"
+            "許可対象も <img src> / srcset / CSS 画像参照からの raster 画像に限る）"
+        )
     if t.startswith("/"):
         return "絶対パス参照（配布先の環境で解決できないため不可）"
     resolved = (base_dir / t.split("#", 1)[0].split("?", 1)[0]).resolve()
     if resolved != base_dir.resolve() and not resolved.is_relative_to(base_dir.resolve()):
         return "文書ディレクトリ外への相対参照（`../` 脱出は不可）"
+    # HTML 等を持ち込むと参照先の <script> が未検査のまま実行されるため、
+    # 承認済み raster 拡張子以外は範囲内でも拒否する
+    if resolved.suffix.lower() not in ALLOWED_LOCAL_REF_SUFFIXES:
+        return "承認済み raster 画像（.png/.jpg/.jpeg/.gif/.webp）以外のローカル参照は不可"
     # 範囲内でも欠落参照（screens/missing.png 等）は画像欠けのまま PASS しないよう
     # fail-closed で実在（通常ファイル）を確認する
     if not resolved.is_file():
@@ -176,18 +191,29 @@ def check_external_dependency(
     text = HTML_COMMENT_RE.sub("", html_text)
     text = BLOCK_COMMENT_RE.sub("", text)
 
-    for m in REF_ATTR_RE.finditer(text):
-        attr = m.group(1)
-        value = next(g for g in m.groups()[1:] if g is not None)
-        reason = classify_ref(value, base_dir, allow_local_refs)
-        if reason:
-            failures.append(f"{attr} 属性に自己完結契約違反の参照を検出: {value}（{reason}）")
-    for m in SRCSET_RE.finditer(text):
-        value = next(g for g in m.groups() if g is not None)
-        for ref in srcset_candidates(value):
-            reason = classify_ref(ref, base_dir, allow_local_refs)
+    # <script>・on* 属性・参照属性は正規表現の全文検索ではなく構造解析で収集する
+    # （可視テキスト中の説明コピーへの誤マッチ防止と、参照元タグの正確な判定のため）
+    auditor = _WireframeAuditor()
+    auditor.feed(html_text)
+    auditor.close()
+
+    # --allow-local-refs の許可対象は「<img src> / srcset / CSS 画像参照」の raster 画像に
+    # 限定する。iframe/object/embed 等の埋め込み属性からのローカル参照は、参照先 HTML の
+    # <script> が未検査のまま実行されるため base_dir 配下でも拒否する
+    for scope, tag, attr, value in auditor.refs:
+        image_site = (tag == "img" and attr == "src") or (tag in ("img", "source") and attr == "srcset")
+        site_allow = allow_local_refs and image_site
+        if attr == "srcset":
+            for ref in srcset_candidates(value):
+                reason = classify_ref(ref, base_dir, site_allow)
+                if reason:
+                    failures.append(f"{scope}srcset に自己完結契約違反の参照を検出: {ref}（{reason}）")
+        else:
+            reason = classify_ref(value, base_dir, site_allow)
             if reason:
-                failures.append(f"srcset に自己完結契約違反の参照を検出: {ref}（{reason}）")
+                failures.append(
+                    f"{scope}<{tag}> の {attr} 属性に自己完結契約違反の参照を検出: {value}（{reason}）"
+                )
     for m in CSS_URL_RE.finditer(text):
         target = m.group(2).strip()
         reason = classify_ref(target, base_dir, allow_local_refs)
@@ -198,11 +224,6 @@ def check_external_dependency(
             "CSS @import を検出（外部・ローカルを問わずスタイル分割は単一ファイル契約違反。"
             "<style> 内へ直接記述すること）"
         )
-    # <script>・on* 属性は正規表現の全文検索ではなく構造解析で検出する
-    # （可視テキスト中の説明コピーへの誤マッチ防止と、属性・要素境界の正確な判定のため）
-    auditor = _WireframeAuditor()
-    auditor.feed(html_text)
-    auditor.close()
     for handler in auditor.inline_handlers:
         failures.append(f"inline event handler 属性を検出: {handler}（禁止 JS・契約違反）")
     if auditor.script_tags:
@@ -218,6 +239,20 @@ def _file_url_to_path(file_url: str) -> Path:
     return Path(url2pathname(urlsplit(file_url).path))
 
 
+def local_file_violation(req_path: Path) -> str | None:
+    """--allow-local-refs 時の base_dir 配下 file:// 要求を許可できない場合、理由を返す。
+
+    静的検査（classify_ref）と同じ allowlist（実在する通常ファイル・承認済み raster
+    拡張子）を実行時 route に適用する。check_overflow / capture_screenshot の双方が
+    共有する単一定義（判定基準の二重管理防止）。
+    """
+    if not req_path.is_file():
+        return "参照先ファイルが存在しない"
+    if req_path.suffix.lower() not in ALLOWED_LOCAL_REF_SUFFIXES:
+        return "承認済み raster 画像（.png/.jpg/.jpeg/.gif/.webp）以外のローカル参照"
+    return None
+
+
 def check_viewport_overflow(
     html_path: Path, width: int, height: int, label: str, allow_local_refs: bool, failures: list[str]
 ) -> None:
@@ -226,10 +261,10 @@ def check_viewport_overflow(
     url = "file://" + pathname2url(str(doc_path))
     # 静的検査をすり抜けた動的な外部要求（JS 実行・CSS 解決由来）を実行時に検出する。
     # 許可するのは about: と文書本体自身の file:// URL のみ（allow_local_refs 時は
-    # 文書ディレクトリ配下に**実在する通常ファイル**への file:// も追加許可。欠落参照は
-    # 静的検査と同様に fail-closed で遮断・FAIL にする）。それ以外の file:// を含む
-    # 全要求を abort するため、検査対象 HTML が文書外へ実際に到達することはない
-    # （「通信・読込した後で PASS する」抜け道の封鎖）。
+    # 文書ディレクトリ配下に**実在する承認済み raster 画像**への file:// も追加許可。
+    # 欠落参照・raster 以外は静的検査と同様に fail-closed で遮断・FAIL にする）。
+    # それ以外の file:// を含む全要求を abort するため、検査対象 HTML が文書外へ
+    # 実際に到達することはない（「通信・読込した後で PASS する」抜け道の封鎖）。
     blocked_requests: list[str] = []
 
     def _route_handler(route):
@@ -243,10 +278,13 @@ def check_viewport_overflow(
                 route.continue_()
                 return
             if allow_local_refs and req_path.is_relative_to(base_dir):
-                if req_path.is_file():
+                # 範囲内でも欠落参照・raster 以外は fail-closed で遮断する
+                # （静的検査と同じ allowlist。local_file_violation を共有）
+                reason = local_file_violation(req_path)
+                if reason is None:
                     route.continue_()
                     return
-                blocked_requests.append(f"{req_url}（参照先ファイルが存在しない）")
+                blocked_requests.append(f"{req_url}（{reason}）")
                 route.abort()
                 return
         blocked_requests.append(req_url)
@@ -284,8 +322,10 @@ def main() -> int:
     parser.add_argument(
         "--allow-local-refs",
         action="store_true",
-        help="文書ディレクトリ配下に実在するファイルへの相対参照を許可する（storyboard.html が"
-        " screens/*.png を参照する構成向け。絶対パス・file://・`../` 脱出・欠落参照は引き続き違反）",
+        help="<img src> / srcset / CSS 画像参照からの、文書ディレクトリ配下に実在する raster 画像"
+        "（.png/.jpg/.jpeg/.gif/.webp）への相対参照のみ許可する（storyboard.html が screens/*.png を"
+        " 参照する構成向け。iframe/object 等の埋め込み参照・絶対パス・file://・`../` 脱出・"
+        "欠落参照は引き続き違反）",
     )
     args = parser.parse_args()
 

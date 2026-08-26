@@ -14,8 +14,8 @@
      違反 HTML はそもそも Chromium にロードしない）。
   2. 静的検査を通過した HTML のみロードし、check_overflow.py と同じ流儀で、about: と
      文書本体自身の file:// URL（--allow-local-refs 時は文書ディレクトリ配下に実在する
-     通常ファイルへの file:// も）以外の全リクエストを abort し、遮断要求が 1 件でも
-     あれば失敗させる。
+     承認済み raster 画像への file:// も）以外の全リクエストを abort し、遮断要求が
+     1 件でもあれば失敗させる。
 
 依存: playwright (標準ライブラリ外)。venv へインストールし
 `playwright install chromium` でブラウザ本体を取得してから実行する。
@@ -42,7 +42,7 @@ except ImportError:
 # スクリプトがどの cwd から起動されても同ディレクトリの check_overflow を import できるよう、
 # 本ファイルの置き場所を sys.path へ加える
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_overflow import check_external_dependency  # noqa: E402
+from check_overflow import check_external_dependency, local_file_violation  # noqa: E402
 
 
 def _file_url_to_path(file_url: str) -> Path:
@@ -76,12 +76,13 @@ def capture(
                 route.continue_()
                 return
             if allow_local_refs and req_path.is_relative_to(base_dir):
-                # 範囲内でも欠落参照は fail-closed で遮断する（check_overflow.py と同一の規則。
-                # CLI help の「実在するファイルのみ許可」の契約と一致させる）
-                if req_path.is_file():
+                # 範囲内でも欠落参照・raster 以外は fail-closed で遮断する
+                # （check_overflow.py の静的検査と同じ allowlist。local_file_violation を共有）
+                reason = local_file_violation(req_path)
+                if reason is None:
                     route.continue_()
                     return
-                blocked_requests.append(f"{req_url}（参照先ファイルが存在しない）")
+                blocked_requests.append(f"{req_url}（{reason}）")
                 route.abort()
                 return
         blocked_requests.append(req_url)
@@ -109,8 +110,10 @@ def main() -> int:
     parser.add_argument(
         "--allow-local-refs",
         action="store_true",
-        help="文書ディレクトリ配下に実在するファイルへの相対参照を許可する（storyboard.html が"
-        " screens/*.png を参照する構成向け。絶対パス・file://・`../` 脱出・欠落参照は引き続き遮断）",
+        help="<img src> / srcset / CSS 画像参照からの、文書ディレクトリ配下に実在する raster 画像"
+        "（.png/.jpg/.jpeg/.gif/.webp）への相対参照のみ許可する（storyboard.html が screens/*.png を"
+        " 参照する構成向け。iframe/object 等の埋め込み参照・絶対パス・file://・`../` 脱出・"
+        "欠落参照は引き続き遮断）",
     )
     args = parser.parse_args()
 

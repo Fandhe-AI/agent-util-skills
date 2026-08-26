@@ -206,8 +206,10 @@ design-doc.md。
    ```
 
    storyboard.html は `screens/*.png` を相対参照するため `--allow-local-refs` を付ける
-   （文書ディレクトリ配下への相対参照のみ許可。絶対パス・`file://`・`../` 脱出・外部 URL は
-   引き続き遮断される）。ワイヤーフレーム・flow.html の撮影には付けない。
+   （許可対象は `<img src>` / srcset / CSS 画像参照からの、文書ディレクトリ配下に実在する
+   raster 画像（.png/.jpg/.jpeg/.gif/.webp）のみ。iframe/object 等の埋め込み参照・
+   絶対パス・`file://`・`../` 脱出・外部 URL は引き続き遮断される）。
+   ワイヤーフレーム・flow.html の撮影には付けない。
 
 5. **design-doc.md**: [references/design-doc-structure.md](references/design-doc-structure.md)
    の節構成で作成する。画面一覧の「表示要素」欄は必須。フィードバック観点は3〜5件、ユーザー
@@ -275,8 +277,10 @@ concept-brief.md も）を修正し、Step 5〜8 を再実行する。
   data URI とページ内 fragment のみ。外部 URL に加え、相対パス・絶対パス・`file://` も
   単一ファイル配布で欠落・解決不能になるため違反として検出する）。実行時も文書本体以外への
   全要求を遮断・記録し、1件でもあれば FAIL とする
-- storyboard.html のみ `--allow-local-refs` で検証する（`<img src="screens/...">` という
-  文書ディレクトリ配下への相対参照だけを追加許容。絶対パス・`file://`・`../` 脱出は不可）
+- storyboard.html のみ `--allow-local-refs` で検証する（`<img src="screens/...">` /
+  srcset / CSS 画像参照からの、文書ディレクトリ配下に実在する raster 画像
+  （.png/.jpg/.jpeg/.gif/.webp）だけを追加許容。iframe/object 等の埋め込み参照・
+  絶対パス・`file://`・`../` 脱出・欠落参照は不可）
 
 ## よくある失敗
 
@@ -296,7 +300,8 @@ concept-brief.md も）を修正し、Step 5〜8 を再実行する。
   inline event handler 属性・`javascript:` URL も不可。静的な見た目の表現のみで完結
   させる）。ローカルファイル参照も原則不可（画像は data URI で埋め込む）。
   例外は storyboard.html の `screens/*.png` 相対参照のみで、検証・撮影時に
-  `--allow-local-refs` を明示して許可する
+  `--allow-local-refs` を明示して許可する（許可対象は `<img src>` / srcset / CSS 画像参照
+  からの raster 画像に限定。iframe/object 等でのローカル HTML 埋め込みは不可）
 - venv はビルドツールであり生成物ではない。`_/` 配下に置いた場合は commit しない（`_/` は
   `.gitignore` 済み）。リポジトリ外の一時領域に置いた場合はそもそも commit 対象にならない
 - 出力先ディレクトリ（`design/` 等）が存在しない場合は `mkdir -p` で作成してから書き出す
