@@ -56,8 +56,11 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_slides.py" <out.html> --screenshot
 
 ### `screen_flow` の `wireframe` / `steps` / `note`
 
-- `wireframe`: `create-design-doc` が生成した `wireframes/*.html` への相対パス（spec ファイル
-  からの相対）または絶対パス。`build_slides.py` が読み込み、**`<iframe srcdoc="...">` として
+- `wireframe`: `create-design-doc` が生成した `wireframes/*.html` への**spec ファイルの
+  ディレクトリ配下への相対パスのみ**。絶対パス・`../` や symlink による親ディレクトリ脱出は、
+  任意ローカルファイル（機密 HTML 等）の取り込み経路になるため `SpecError` で拒否する
+  （spec ディレクトリ配下に無い wireframe は `wireframes/` 等へコピーして参照する）。
+  `build_slides.py` が読み込み、**`<iframe srcdoc="...">` として
   実寸（1440×900）でレンダリング**し、`.screen-frame` の表示幅に合わせて JS が
   `transform: scale()` で縮小表示する（静止画は使わない。PO 指示）
 - `steps`: `wireframe` を指定する場合は**1件以上必須**。各要素は

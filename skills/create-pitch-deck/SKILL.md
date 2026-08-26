@@ -155,7 +155,9 @@ spec の `brand`（`primary`/`accent` 等）と `--theme dark|light` の選択�
 シナリオの場面ごとに2〜4枚、次の方針で作成する。
 
 - Step 3 で `wireframes/*.html` が見つかった場合: 場面に対応する wireframe ファイルを
-  `wireframe` に指定し、`narrative` に導入文、`steps` に「ハイライトしたい要素の CSS
+  `wireframe` に **spec ファイルのディレクトリ配下への相対パス**で指定する（絶対パス・
+  `../` 脱出は `SpecError`。spec ディレクトリ配下に無い wireframe は `wireframes/` 等へ
+  コピーしてから参照する）。`narrative` に導入文、`steps` に「ハイライトしたい要素の CSS
   セレクタ（`id`/`class` 等、wireframe の実装に存在するもの）」と「その要素が何を意味する
   説明文」の配列（1件以上）を書く。ステップ送りに合わせて wireframe 内の対象要素が
   スポットライト表示され、対応する説明が強調される

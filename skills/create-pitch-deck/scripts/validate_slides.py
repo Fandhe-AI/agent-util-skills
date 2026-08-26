@@ -458,6 +458,27 @@ def main() -> int:
                         f"（検出 {spot_count}件。セレクタが対象要素にマッチしていない可能性）"
                     )
 
+        def check_step_selector_syntax(role: str, step: int, label: str) -> None:
+            """steps[].selector が CSS セレクタとして妥当かを querySelector 試行で検証する。
+
+            不正セレクタは実行時にスポットライト側の try/catch で無視される
+            （ナビゲーションは停止しない）ため、静かに演出が欠けるだけになる。
+            それを見逃さないよう validator が FAIL として顕在化させる。
+            """
+            if role != SCREEN_FLOW_ROLE or step != 0:
+                return
+            bad = page.eval_on_selector_all(
+                ".slide.active .step-item",
+                "els => els.map(e => e.dataset.selector)"
+                ".filter(s => { try { document.querySelector(s); return false; }"
+                " catch (err) { return true; } })",
+            )
+            if bad:
+                failures.append(
+                    f"{label}: CSS セレクタとして不正な steps[].selector を検出"
+                    f"（該当ステップのスポットライトが無効になる）: " + ", ".join(bad)
+                )
+
         def check_iframe_self_contained(slide_idx: int, role: str, label: str) -> None:
             if role != SCREEN_FLOW_ROLE:
                 return
@@ -492,6 +513,7 @@ def main() -> int:
             role = roles[cur]
             label = f"slide {cur + 1}/{total} (role={role}) step={step}"
             check_active_overflow(label)
+            check_step_selector_syntax(role, step, label)
             check_screen_flow_spotlight(cur, role, step, label)
             check_iframe_self_contained(cur, role, label)
             if args.screenshots_dir:

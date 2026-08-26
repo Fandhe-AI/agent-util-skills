@@ -411,10 +411,29 @@ def validate_spec(spec: dict) -> None:
                         "steps ({selector, note} の配列。1件以上) が必要"
                     )
                 for step in steps:
-                    if not isinstance(step, dict) or not step.get("selector") or not step.get("note"):
+                    if not isinstance(step, dict):
                         raise SpecError(
                             f"role={SCREEN_FLOW_ROLE}.steps の各要素は "
-                            "selector (CSS セレクタ文字列) と note (string) を持つこと"
+                            "{selector, note} の object であること"
+                        )
+                    selector = step.get("selector")
+                    note = step.get("note")
+                    if (
+                        not isinstance(selector, str) or not selector.strip()
+                        or not isinstance(note, str) or not note.strip()
+                    ):
+                        raise SpecError(
+                            f"role={SCREEN_FLOW_ROLE}.steps の各要素は "
+                            "selector (非空の CSS セレクタ文字列) と note (非空 string) を持つこと"
+                        )
+                    # CSS 構文の完全検証は Python 側では行わない。実セレクタ検証は
+                    # validate_slides.py が querySelector 試行で行い、実行時は
+                    # スポットライト側（SPOTLIGHT_INJECTION）の try/catch が不正
+                    # セレクタを安全に無視する。ここでは明らかな不正のみ拒否する
+                    if any(ord(ch) < 0x20 for ch in selector):
+                        raise SpecError(
+                            f"role={SCREEN_FLOW_ROLE}.steps[].selector に改行・制御文字を"
+                            f"含めないこと: {selector!r}"
                         )
             else:
                 note = slide.get("note")
@@ -533,9 +552,25 @@ def render_screen_flow(slide: dict, base_dir: Path) -> str:
     narrative = f'<p class="screen-flow-narrative-intro">{esc(slide["narrative"])}</p>'
 
     if wireframe:
-        wf_path = Path(wireframe)
-        if not wf_path.is_absolute():
-            wf_path = base_dir / wf_path
+        # spec 由来のパスをそのまま開くと、絶対パス・`../`・symlink 経由で spec 外の
+        # 任意ローカルファイル（機密 HTML 等）を srcdoc として deck へ取り込めてしまう。
+        # spec ディレクトリ配下の通常ファイルのみ許可する。resolve() は symlink を
+        # 解決するため、resolve 後の is_relative_to 比較で symlink 経由の脱出も防げる。
+        base = base_dir.resolve()
+        wf_input = Path(wireframe)
+        if wf_input.is_absolute():
+            raise SpecError(
+                "screen_flow.wireframe は spec ディレクトリ配下への相対パスで指定する"
+                "こと（絶対パスは任意ローカルファイル取り込みの経路になるため不可）: "
+                f"{wireframe}"
+            )
+        wf_path = (base / wf_input).resolve()
+        if not wf_path.is_relative_to(base):
+            raise SpecError(
+                "screen_flow.wireframe が spec ディレクトリの外を指している"
+                "（`../` や symlink による親ディレクトリ脱出は任意ローカルファイル"
+                f"取り込みの経路になるため不可）: {wireframe}"
+            )
         if not wf_path.is_file():
             raise SpecError(f"screen_flow.wireframe が存在しない: {wf_path}")
         wf_text = wf_path.read_text(encoding="utf-8")
@@ -610,7 +645,10 @@ SPOTLIGHT_INJECTION = """
     var prevTarget = document.querySelector('.__pitch_spotlight');
     if(prevTarget){ prevTarget.classList.remove('__pitch_spotlight'); }
     if(!selector){ return; }
-    var target = document.querySelector(selector);
+    var target = null;
+    /* 不正な CSS セレクタ（"[" 等）の DOMException でナビゲーション全体が停止しない
+       よう安全に無視する（validate_slides.py が不正セレクタを FAIL として報告する） */
+    try { target = document.querySelector(selector); } catch (err) { return; }
     if(!target){ return; }
     var dim = document.createElement('div');
     dim.className = '__pitch_dim';
