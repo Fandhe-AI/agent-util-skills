@@ -155,18 +155,19 @@ def srcset_candidates(value: str) -> list[str]:
 
 
 class _RefCollector(HTMLParser):
-    """wireframe 生 HTML のタグ属性からリソース参照値（RESOURCE_ATTRS / srcset）を
-    収集する収集器（build 側の事前検査用）。
+    """wireframe 生 HTML のタグ属性からリソース参照値（RESOURCE_ATTRS / srcset）と
+    iframe srcdoc（入れ子の HTML 文書）を収集する収集器（build 側の事前検査用）。
 
     属性検査を正規表現の全文走査にすると <script> 内の `var data = ...` のような
     JS 代入まで属性として誤検出するため、タグ属性のみを構造的に取り出す。
-    ブラウザ挙動に合わせ、self-closing 表記のタグも handle_starttag と同じ経路で扱う
-    （HTMLParser の handle_startendtag は既定で starttag へ委譲される）。
+    srcdoc の値は HTML エスケープ済みで生テキスト走査に露出しないため、unescape 済みの
+    属性値として収集し find_disallowed_refs 側で再帰解析する。
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.refs: list[str] = []
+        self.srcdocs: list[str] = []  # iframe srcdoc（find_disallowed_refs が再帰解析する）
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         for name, value in attrs:
@@ -176,6 +177,18 @@ class _RefCollector(HTMLParser):
             elif name == "srcset":
                 # srcset は「URL 幅記述子, URL 幅記述子, ...」形式のため候補ごとに取り出す
                 self.refs.extend(srcset_candidates(v))
+            elif name == "srcdoc":
+                self.srcdocs.append(v)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # ブラウザは HTML の script/style で self-closing スラッシュ（<style/> 等）を
+        # 無視して開始タグとして扱う。validate_slides.py の _SlideAuditor と挙動を
+        # 揃え、script/style は endtag 副作用なしの開始タグ扱いに固定する
+        # （属性収集は handle_starttag 側で行われるため取りこぼしも生じない）。
+        if tag in ("script", "style"):
+            self.handle_starttag(tag, attrs)
+        else:
+            super().handle_startendtag(tag, attrs)
 
 
 def find_disallowed_refs(text: str) -> dict[str, list[str]]:
@@ -204,6 +217,16 @@ def find_disallowed_refs(text: str) -> dict[str, list[str]]:
     cleaned = CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))
     for m in CSS_URL_RE.finditer(cleaned):
         record(next(g for g in m.groups() if g is not None))
+
+    # iframe srcdoc は HTML エスケープ済みの入れ子文書のため、生テキスト走査では
+    # 属性も CSS url() も露出しない。unescape 済みの値を独立した HTML 文書として
+    # 再帰解析し、ネストされた srcdoc の参照も含めて build 時点で拒否する
+    # （validate_slides.py の _audit と同じ方針）。
+    for sub_doc in collector.srcdocs:
+        for kind, values in find_disallowed_refs(sub_doc).items():
+            for v in values:
+                if v not in bad[kind]:
+                    bad[kind].append(v)
     return bad
 
 
@@ -282,7 +305,22 @@ def validate_spec(spec: dict) -> None:
     if not isinstance(slides, list) or not slides:
         raise SpecError("spec.slides は 1 件以上の配列であること")
 
-    roles = [s.get("role") for s in slides if isinstance(s, dict)]
+    # 非 dict 要素を黙って除外すると、正規 role 一式 + 数値等の混入 JSON が順序検証を
+    # 通過した後に slide.get() の AttributeError（traceback 終了）になるため、
+    # 全要素の型と role の妥当性を先に fail-closed で検証する。
+    for i, slide in enumerate(slides):
+        if not isinstance(slide, dict):
+            raise SpecError(
+                f"spec.slides[{i}] は object であること（現在: {type(slide).__name__}）"
+            )
+        role = slide.get("role")
+        if role not in ROLE_RENDERERS:
+            raise SpecError(
+                f"spec.slides[{i}].role が不正: {role!r}"
+                f"（許可: {sorted(ROLE_RENDERERS)}）"
+            )
+
+    roles = [s["role"] for s in slides]
 
     prefix = roles[: len(FRONT_HALF_ROLES)]
     if prefix != FRONT_HALF_ROLES:
