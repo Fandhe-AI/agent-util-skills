@@ -83,16 +83,22 @@
     font-size: var(--font-size-sm);
   }
 
+  /* app-header はプライマリ背景（#1f3a93）のため、--color-muted (#5b6470) では
+    コントラスト約 1.7:1 と不足する。十分明るい色を上書きして可読性を確保する */
+  .app-header .muted {
+    color: var(--color-primary-contrast);
+  }
+
   nav.bottom-nav {
     display: none;
   }
 
   /* モバイル: 1カラム化・下部ナビ表示。
-     注意: position: sticky / fixed は使わない。Playwright の full-page
-     screenshot は capture 時に viewport 高さを一時的に拡張するため、
-     sticky/fixed 要素は実際の文書末尾ではなく元の viewport 高さの位置に
-     取り残され、キャプチャ結果でナビが中途半端な位置に浮いて見える
-     （実走で確認済みの不具合）。通常フロー内の静的配置のみを使う。 */
+    注意: position: sticky / fixed は使わない。Playwright の full-page
+    screenshot は capture 時に viewport 高さを一時的に拡張するため、
+    sticky/fixed 要素は実際の文書末尾ではなく元の viewport 高さの位置に
+    取り残され、キャプチャ結果でナビが中途半端な位置に浮いて見える
+    （実走で確認済みの不具合）。通常フロー内の静的配置のみを使う。 */
   @media (max-width: 480px) {
     main { padding: var(--space-md); }
     .grid { grid-template-columns: 1fr; }

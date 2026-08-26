@@ -75,9 +75,14 @@
   }
   .step-visual {
     flex: 0 0 260px;
+    /* flex item 既定の min-width:auto のままだと、子 img の自然幅（スクショは
+      1440px 等）が最小コンテンツ幅として効き、列が 260px に縮まず横 overflow
+      する。min-width:0 で解除し img 側は max-width で列幅内に拘束する */
+    min-width: 0;
   }
   .step-visual img {
     width: 100%;
+    max-width: 100%;
     height: auto;
     border: 1px solid var(--color-border);
     border-radius: 4px;

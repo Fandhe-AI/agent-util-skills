@@ -39,6 +39,12 @@ APPROVAL_ITEM_MAX = 5
 APPROVAL_KINDS = {"承認", "確認"}
 WINNING_LABELS = {"事実", "仮説"}
 
+# brand の各値に許す色形式（#RGB / #RGBA / #RRGGBB / #RRGGBBAA の16進カラーのみ）。
+# brand 値は CSS_TEMPLATE.format() で <style> 内へそのまま展開されるため、任意文字列を
+# 許すと `</style><script>` によるタグ脱出注入や `{`/`}` による format 破壊が可能になる。
+# 色リテラル以外は validate_spec が SpecError で拒否する（fail-closed）。
+BRAND_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
 ROLE_LABELS = {
     "cover": "COVER",
     "premise": "PREMISE",
@@ -72,6 +78,16 @@ FONT_MONO = '"Roboto Mono", "SFMono-Regular", Consolas, monospace'
 EXTERNAL_URL_RE = re.compile(r"""(?:src|href)\s*=\s*["']https?://""", re.IGNORECASE)
 CDN_IMPORT_RE = re.compile(r"@import\s+url\(\s*['\"]?https?://", re.IGNORECASE)
 INLINE_HANDLER_RE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.IGNORECASE)
+# CSS の url(...) トークン抽出（引用付き/無引用を別分岐でパースする。引用付きは値中の
+# `)` を含み得るため単一の文字クラスでは正しく抽出できない）。@import 以外にも
+# @font-face の src や background 等の url(https://...) が外部依存の経路になるため、
+# CSS 内の全 url(...) を検査対象にする（validate_slides.py と対の実装）。
+CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""", re.IGNORECASE)
+CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# 外部参照とみなす URL 値（http(s):// とプロトコル相対 //）。data: URI・#fragment・
+# ローカル相対参照は自己完結の範囲内なので許可し、誤検出しない。
+EXTERNAL_CSS_URL_VALUE_RE = re.compile(r"^\s*(?:https?:)?//", re.IGNORECASE)
 FORBIDDEN_JS_PATTERNS = [
     (re.compile(r"\beval\s*\("), "eval("),
     (re.compile(r"\bnew\s+Function\s*\("), "new Function("),
@@ -88,6 +104,22 @@ class SpecError(Exception):
     """spec の構造・内容が契約を満たさない場合に送出する。"""
 
 
+def find_external_css_urls(text: str) -> list[str]:
+    """HTML/CSS コメント除去後のテキストから url(...) を全件抽出し、外部参照の値を返す。
+
+    HTML コメント・CSS コメントを先に除去するのは、コメントアウト済みの
+    url(https://...) を実際の外部依存として誤検出しないため。data: URI と
+    ローカル相対参照は自己完結の範囲内なので返さない。
+    """
+    cleaned = CSS_COMMENT_RE.sub("", HTML_COMMENT_RE.sub("", text))
+    bad = []
+    for m in CSS_URL_RE.finditer(cleaned):
+        value = next(g for g in m.groups() if g is not None)
+        if EXTERNAL_CSS_URL_VALUE_RE.match(value):
+            bad.append(value)
+    return bad
+
+
 def check_embeddable_html(text: str, label: str) -> None:
     """screen_flow.wireframe として埋め込む前の生 HTML テキストを検査する。
 
@@ -100,6 +132,12 @@ def check_embeddable_html(text: str, label: str) -> None:
         violations.append("外部 URL への src/href 参照")
     if CDN_IMPORT_RE.search(text):
         violations.append("CSS @import による外部リソース参照")
+    bad_css_urls = find_external_css_urls(text)
+    if bad_css_urls:
+        violations.append(
+            "CSS url() による外部リソース参照（@font-face / background 等）: "
+            + ", ".join(bad_css_urls[:3])
+        )
     if INLINE_HANDLER_RE.search(text):
         violations.append("inline event handler 属性（onclick= 等）")
     for pattern, name in FORBIDDEN_JS_PATTERNS:
@@ -129,6 +167,21 @@ def validate_spec(spec: dict) -> None:
     （この順・各1枚）→ screen_flow 2〜4枚（連続） → [validation, approval]
     （この順・各1枚、これで終わること）。
     """
+    # brand は build_html で CSS_TEMPLATE.format() に展開されるため、値を色リテラルへ
+    # 厳格に制限する（BRAND_COLOR_RE の理由コメント参照）。未知キーは build_html 側で
+    # 無視されるが、注入経路を残さないよう全キーの値を一律に検査する。
+    brand = spec.get("brand")
+    if brand is not None:
+        if not isinstance(brand, dict):
+            raise SpecError("spec.brand は object であること")
+        for key, value in brand.items():
+            if not isinstance(value, str) or not BRAND_COLOR_RE.match(value):
+                raise SpecError(
+                    f"brand.{key} は #RGB / #RRGGBB（末尾に alpha 桁可）の16進カラーで"
+                    f"あること（現在: {value!r}）。<style> へ展開されるため色リテラル"
+                    "以外は受け付けない"
+                )
+
     slides = spec.get("slides")
     if not isinstance(slides, list) or not slides:
         raise SpecError("spec.slides は 1 件以上の配列であること")
@@ -259,6 +312,12 @@ NUMBER_RE = re.compile(r"(?<![A-Za-z0-9-])(\d{1,3}(?:,\d{3})+|\d+)(?![A-Za-z0-9]
 
 
 def wrap_countup(text: str) -> str:
+    """countup 対象の数値を span で包む。初期 DOM には最終値をそのまま出力する。
+
+    初期値を 0 にすると、JS が動かない環境や JS 未発火のまま印刷/PDF 化した場合に
+    「8分」が「0分」のまま固定される。最終値を初期表示とし、フラグメントが
+    is-current になった時点で JS 側（tickCountups）が 0 から最終値まで巻き上げる。
+    """
     m = NUMBER_RE.search(text)
     if not m:
         return esc(text)
@@ -266,7 +325,7 @@ def wrap_countup(text: str) -> str:
     target = number.replace(",", "")
     return (
         f"{esc(prefix)}"
-        f'<span class="countup" data-target="{esc(target)}">0</span>'
+        f'<span class="countup" data-target="{esc(target)}">{esc(number)}</span>'
         f"{esc(suffix)}"
     )
 
@@ -498,9 +557,12 @@ html, body {{
 .screen-iframe {{
   position: absolute; top: 0; left: 0; width: 1440px; height: 900px; border: 0;
   transform-origin: top left;
-  /* 実寸(1440x900)を .screen-frame の実表示幅に合わせて縮小する。倍率は
-     build_slides.py が .screen-frame の想定表示幅から算出し要素へ直接書き込む
-     （CSS だけでは親要素の実測ピクセル幅を参照できないため）。 */
+  /* 実寸(1440x900)を .screen-frame の実表示幅に合わせて縮小する。実測倍率は
+     JS の fitScreenFrame がアクティブ表示時に inline style で上書きする
+     （CSS だけでは親要素の実測ピクセル幅を参照できないため）。ここでの
+     scale(0.5) は max-width:720px 時の既定倍率で、JS 未発火のスライド
+     （印刷時の未訪問スライド等）でも左上だけ切れた表示にならないための保険。 */
+  transform: scale(0.5);
 }}
 .screen-shot-placeholder {{
   width: 100%; height: 240px; border: 1px dashed var(--color-border); border-radius: 8px;
@@ -567,6 +629,17 @@ html, body {{
   .slide:last-child {{ page-break-after: auto; }}
   /* 印刷時は「今どのステップか」を無視し全フラグメントを最終状態にする */
   .fragment {{ opacity: 1 !important; transform: none !important; }}
+  /* cover の入場演出は opacity:0 始まりで .slide-cover.active の animation でしか
+     可視化されないため、印刷では animation を切って最終状態を強制する
+     （さもないと表紙のタイトル・サブタイトル・メタ情報が空白ページになる） */
+  .cover-title, .cover-subtitle, .cover-meta {{
+    opacity: 1 !important; transform: none !important; animation: none !important;
+  }}
+  /* 印刷では fitScreenFrame（アクティブ時のみ動作）が未訪問スライドに効かないため、
+     フレーム幅を既定倍率 scale(0.5) と対応する 720px に固定し、実寸 1440x900 の
+     iframe が overflow:hidden で切れずに収まることを保証する */
+  .screen-frame {{ width: 720px; max-width: 720px; flex: none; }}
+  .screen-iframe {{ transform: scale(0.5) !important; }}
   @page {{ size: landscape; margin: 0; }}
 }}
 
@@ -646,8 +719,10 @@ JS_TEMPLATE = """
   function resetToStart() { cur = 0; step = 0; render(); }
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); next(); }
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); prev(); }
+    // PageDown/PageUp はプレゼン用リモコン（ページ送りキーを送出する機種が多い）
+    // 対応。references/deck-spec.md「HTML スライドの操作仕様」の契約に含まれる。
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); next(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') { e.preventDefault(); prev(); }
     else if (e.key === 'r' || e.key === 'R') { resetToStart(); }
   });
 
@@ -664,6 +739,8 @@ JS_TEMPLATE = """
   render();
 
   // countup: フラグメントが is-current になった時点で発火する軽量カウントアップ。
+  // 初期 DOM には最終値が入っている（wrap_countup 参照。JS 未発火の印刷/PDF でも
+  // 最終値が出るようにするため）。発火時に 0 から最終値まで巻き上げ直す。
   // MutationObserver ではなく render() 呼び出し直後に毎回全走査する単純な実装にして
   // タイミングのズレを避ける（要素数が少ないため毎回の全走査でも軽量）。
   var animatedCountups = new WeakSet();

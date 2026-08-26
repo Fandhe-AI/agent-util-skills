@@ -22,7 +22,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_slides.py" <out.html> --screenshot
 | `slides` | ✅ | array | 後述の「スライド構成」節の順序契約を過不足なく満たすこと |
 
 `brand` のキー（省略した項目のみ `--theme` の既定値を使う）: `primary` / `accent` /
-`success` / `warning` / `danger`（すべて `#RRGGBB`）。
+`success` / `warning` / `danger`。値は `#RGB` / `#RRGGBB`（末尾に alpha 桁を付けた
+`#RGBA` / `#RRGGBBAA` も可）の16進カラーのみ。値は `<style>` 内へそのまま展開されるため、
+色リテラル以外の文字列は `build_slides.py` が `SpecError` で拒否する。
 
 ## スライド構成（PO 承認会向け・前半固定＋後半可変）
 

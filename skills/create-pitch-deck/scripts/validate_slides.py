@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import pathname2url
 
@@ -45,18 +46,33 @@ SCREEN_FLOW_MAX = 4
 APPROVAL_ITEM_MIN = 3
 APPROVAL_ITEM_MAX = 5
 
-# 自己完結契約: 外部 URL への参照を禁止する（data: URI は許可。png/jpeg/gif/webp
-# 以外の data: MIME は untrusted な能動コンテンツを埋め込める経路のため対象外
+# 自己完結・inline JS 安全性の検査は、HTML 全文への正規表現ではなく _SlideAuditor で
+# 構造解析して行う。全文 regex ではエスケープ済みのスライド本文（例: 「fetch( を使う」
+# という説明文の bullet）にまで禁止 JS パターンが誤マッチして FAIL する誤検知があるため、
+# 禁止 JS パターンは <script> 要素の中身、inline handler は on* 属性、CSS 検査は
+# <style>/style 属性へ検査対象を限定する
+# （create-html-report/scripts/validate_report.py の構造解析と同じ設計方針）。
+
+# 外部参照とみなす URL 値（http(s):// とプロトコル相対 //）。src/href 属性値と
+# CSS url(...) の値の双方に適用する。data: URI・#fragment・ローカル相対参照は
+# 自己完結の範囲内なので誤検出しない。
+EXTERNAL_URL_VALUE_RE = re.compile(r"^\s*(?:https?:)?//", re.IGNORECASE)
+# data: URI は受動的な画像 MIME に限り許可（png/jpeg/gif/webp 以外の data: MIME は
+# untrusted な能動コンテンツを埋め込める経路のため不許可
 # — create-html-report/scripts/validate_report.py の DATA_URI_ALLOWED と同じ方針）。
-EXTERNAL_URL_RE = re.compile(r"""(?:src|href)\s*=\s*["']https?://""", re.IGNORECASE)
-CDN_IMPORT_RE = re.compile(r"@import\s+url\(\s*['\"]?https?://", re.IGNORECASE)
-UNSAFE_DATA_URI_RE = re.compile(
-    r"""src\s*=\s*["']data:(?!image/(png|jpeg|gif|webp)[;,])""", re.IGNORECASE
-)
+DATA_URI_ALLOWED_RE = re.compile(r"^\s*data:image/(png|jpeg|gif|webp)[;,]", re.IGNORECASE)
+# @import は参照先が相対 URL でも配布先でのファイル欠落の原因になるため出現自体を不許可。
+CSS_IMPORT_RE = re.compile(r"@import", re.IGNORECASE)
+# CSS の url(...) トークン抽出（引用付き/無引用を別分岐でパースする。引用付きは値中の
+# `)` を含み得るため単一の文字クラスでは正しく抽出できない）。@import 以外にも
+# @font-face の src や background 等の url(https://...) が外部依存の経路になる。
+CSS_URL_RE = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""", re.IGNORECASE)
+# コメントアウト済みの url(...) を実際の外部依存として誤検出しないための除去用。
+CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 # inline JavaScript の逸脱チェック（AGENTS.md P0）。eval・new Function・
 # innerHTML 代入・inline event handler 属性・network API の不使用を確認する。
-INLINE_HANDLER_RE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.IGNORECASE)
+INLINE_HANDLER_ATTR_RE = re.compile(r"^on[a-z]+$", re.IGNORECASE)
 FORBIDDEN_JS_PATTERNS = [
     (re.compile(r"\beval\s*\("), "eval("),
     (re.compile(r"\bnew\s+Function\s*\("), "new Function("),
@@ -71,21 +87,126 @@ FORBIDDEN_JS_PATTERNS = [
 NUMBERED_ITEM_RE = re.compile(r"^\s*\d+\.\s*\S")
 
 
+class _SlideAuditor(HTMLParser):
+    """HTML を構造解析し、検査対象（<script> 本文・<style>/style 属性・リソース属性・
+    on* 属性・iframe srcdoc）を種類別に収集する収集器。
+
+    判定は行わず収集のみを担う。判定は check_self_contained /
+    check_inline_js_safety が収集結果に対して行う。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.scripts: list[str] = []          # inline <script> の中身
+        self.styles: list[str] = []           # <style> の中身
+        self.style_attrs: list[str] = []      # style="..." 属性値
+        self.inline_handlers: list[str] = []  # on* 属性の出現箇所
+        self.external_refs: list[str] = []    # 外部 URL を指す src/href
+        self.bad_data_uris: list[str] = []    # 許可 MIME 以外の data: URI を指す src
+        self.srcdocs: list[str] = []          # iframe srcdoc（wireframe 埋め込み）
+        self._in: str | None = None
+        self._buf = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            v = value or ""
+            if INLINE_HANDLER_ATTR_RE.match(name):
+                self.inline_handlers.append(f"<{tag} {name}=...>")
+            elif name in ("src", "href"):
+                if EXTERNAL_URL_VALUE_RE.match(v):
+                    self.external_refs.append(f"<{tag} {name}>")
+                if (
+                    name == "src"
+                    and v.lstrip().lower().startswith("data:")
+                    and not DATA_URI_ALLOWED_RE.match(v)
+                ):
+                    self.bad_data_uris.append(f"<{tag} src>")
+            elif name == "style":
+                self.style_attrs.append(v)
+            elif name == "srcdoc":
+                # HTMLParser は属性値を unescape 済みで渡すため、srcdoc の値は
+                # 完全な HTML 文書として再帰解析できる（_audit 側で合流させる）
+                self.srcdocs.append(v)
+        if tag in ("script", "style"):
+            self._in, self._buf = tag, ""
+
+    def handle_data(self, data: str) -> None:
+        if self._in:
+            self._buf += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in == tag:
+            (self.scripts if tag == "script" else self.styles).append(self._buf)
+            self._in, self._buf = None, ""
+
+    def close(self) -> None:
+        super().close()
+        # 閉じタグを欠いた `<script>fetch(...)` 等が検査を素通りしないよう、
+        # EOF 時点で未終端の script/style も fail-closed で収集対象に含める
+        if self._in:
+            (self.scripts if self._in == "script" else self.styles).append(self._buf)
+            self._in, self._buf = None, ""
+
+
+def _audit(html_text: str) -> _SlideAuditor:
+    auditor = _SlideAuditor()
+    auditor.feed(html_text)
+    auditor.close()
+    # srcdoc（wireframe）は独立した HTML 文書なので再帰的に解析し、収集結果を合流させる
+    # （Playwright での iframe contentDocument 検査に加えた静的検査の防御多層）
+    pending = list(auditor.srcdocs)
+    while pending:
+        sub = _SlideAuditor()
+        sub.feed(pending.pop())
+        sub.close()
+        for field in (
+            "scripts", "styles", "style_attrs",
+            "inline_handlers", "external_refs", "bad_data_uris",
+        ):
+            getattr(auditor, field).extend(getattr(sub, field))
+        pending.extend(sub.srcdocs)
+    return auditor
+
+
 def check_self_contained(html_text: str, failures: list[str], label: str = "outer HTML") -> None:
-    if EXTERNAL_URL_RE.search(html_text):
-        failures.append(f"{label}: 外部 URL への src/href 参照を検出（自己完結契約違反）")
-    if CDN_IMPORT_RE.search(html_text):
+    auditor = _audit(html_text)
+    if auditor.external_refs:
+        failures.append(
+            f"{label}: 外部 URL への src/href 参照を検出（自己完結契約違反）: "
+            + ", ".join(sorted(set(auditor.external_refs)))
+        )
+    css_texts = [CSS_COMMENT_RE.sub("", t) for t in auditor.styles + auditor.style_attrs]
+    if any(CSS_IMPORT_RE.search(t) for t in css_texts):
         failures.append(f"{label}: CSS @import による外部リソース参照を検出")
-    if UNSAFE_DATA_URI_RE.search(html_text):
+    bad_css_urls = []
+    for t in css_texts:
+        for m in CSS_URL_RE.finditer(t):
+            value = next(g for g in m.groups() if g is not None)
+            if EXTERNAL_URL_VALUE_RE.match(value):
+                bad_css_urls.append(value)
+    if bad_css_urls:
+        failures.append(
+            f"{label}: CSS url() による外部リソース参照（@font-face / background 等）を検出: "
+            + ", ".join(bad_css_urls[:3])
+        )
+    if auditor.bad_data_uris:
         failures.append(f"{label}: png/jpeg/gif/webp 以外の data: URI（image/svg+xml 等）を検出")
 
 
 def check_inline_js_safety(html_text: str, failures: list[str], label: str = "outer HTML") -> None:
-    if INLINE_HANDLER_RE.search(html_text):
-        failures.append(f"{label}: inline event handler 属性（onclick= 等）を検出")
-    for pattern, name in FORBIDDEN_JS_PATTERNS:
-        if pattern.search(html_text):
-            failures.append(f"{label}: 禁止された JavaScript パターンを検出: {name}")
+    auditor = _audit(html_text)
+    if auditor.inline_handlers:
+        failures.append(
+            f"{label}: inline event handler 属性（onclick= 等）を検出: "
+            + ", ".join(sorted(set(auditor.inline_handlers)))
+        )
+    detected: list[str] = []
+    for script in auditor.scripts:
+        for pattern, name in FORBIDDEN_JS_PATTERNS:
+            if name not in detected and pattern.search(script):
+                detected.append(name)
+    for name in detected:
+        failures.append(f"{label}: <script> 内に禁止された JavaScript パターンを検出: {name}")
 
 
 def check_roles(roles: list[str], failures: list[str]) -> None:
