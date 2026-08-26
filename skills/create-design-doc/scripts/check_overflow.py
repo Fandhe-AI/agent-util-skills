@@ -64,6 +64,11 @@ ALLOWED_DATA_URI_MIME = {
 }
 # srcset は「URL 幅記述子, URL 幅記述子, ...」形式のため属性値全体を取り出して候補ごとに検査する
 SRCSET_RE = re.compile(r"""\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+# srcset 候補の分割は「comma + 空白」に限定する（分割理由は srcset_candidates 参照。
+# create-pitch-deck/scripts/validate_slides.py の同名関数と同じ解析方式）
+SRCSET_SPLIT_RE = re.compile(r",\s+")
+# 空白を伴わない comma の変則表記で紛れ込む外部 URL の fail-closed 検出用
+SRCSET_SMUGGLED_URL_RE = re.compile(r"(?:^|[\s,])((?:https?:)?//[^\s,]+)", re.IGNORECASE)
 # CSS の url(...) 全般（@font-face の src・background-image 等）。引用符の有無を問わない
 CSS_URL_RE = re.compile(r"""\burl\(\s*(["']?)([^"')]+)\1\s*\)""", re.IGNORECASE)
 # @import は外部・ローカルを問わずスタイルの分割自体が単一ファイル契約に反するため、
@@ -139,14 +144,32 @@ class _WireframeAuditor(HTMLParser):
             self._in_script = False
 
 
+def srcset_candidates(value: str) -> list[str]:
+    """srcset 属性値から検査対象の URL 候補を取り出す。
+
+    候補の分割を「comma + 空白」に限定するのは、data URI
+    （data:image/png;base64,AA）の base64 区切り comma を候補区切りと誤認して
+    後続を相対参照と誤検出しないため。空白を伴わない comma で外部 URL が
+    紛れ込む変則表記は、値全体への protocol(-relative) URL 走査で検出する。
+    """
+    refs: list[str] = []
+    for candidate in SRCSET_SPLIT_RE.split(value):
+        parts = candidate.strip().split()
+        if parts:
+            refs.append(parts[0])
+    for m in SRCSET_SMUGGLED_URL_RE.finditer(value):
+        refs.append(m.group(1))
+    return refs
+
+
 def classify_ref(target: str, base_dir: Path, allow_local_refs: bool) -> str | None:
     """属性・srcset・CSS url() の参照先を分類し、自己完結契約違反ならその理由を返す。
 
     既定（strict）で許容するのは許可 MIME の data URI とページ内 fragment のみ。
     相対パス・絶対パス・file:// も「単一ファイル配布で欠落・解決不能になる」ため違反とする。
     allow_local_refs=True（storyboard.html が screens/*.png を参照する構成向け）の場合のみ、
-    文書ディレクトリ（base_dir）配下に解決される相対参照を追加で許容する。
-    絶対パス・file://・`../` による base_dir 外への脱出は常に違反。
+    文書ディレクトリ（base_dir）配下の実在する通常ファイルへ解決される相対参照を追加で
+    許容する。絶対パス・file://・`../` による base_dir 外への脱出・欠落参照は常に違反。
     """
     t = target.strip().strip("\"'")
     if not t or t.startswith("#"):
@@ -168,6 +191,10 @@ def classify_ref(target: str, base_dir: Path, allow_local_refs: bool) -> str | N
     resolved = (base_dir / t.split("#", 1)[0].split("?", 1)[0]).resolve()
     if resolved != base_dir.resolve() and not resolved.is_relative_to(base_dir.resolve()):
         return "文書ディレクトリ外への相対参照（`../` 脱出は不可）"
+    # 範囲内でも欠落参照（screens/missing.png 等）は画像欠けのまま PASS しないよう
+    # fail-closed で実在（通常ファイル）を確認する
+    if not resolved.is_file():
+        return "参照先ファイルが存在しない（欠落参照のまま完了扱いにしないため不可）"
     return None
 
 
@@ -185,12 +212,10 @@ def check_external_dependency(
             failures.append(f"{attr} 属性に自己完結契約違反の参照を検出: {value}（{reason}）")
     for m in SRCSET_RE.finditer(text):
         value = next(g for g in m.groups() if g is not None)
-        for candidate in value.split(","):
-            parts = candidate.strip().split()
-            if parts:
-                reason = classify_ref(parts[0], base_dir, allow_local_refs)
-                if reason:
-                    failures.append(f"srcset に自己完結契約違反の参照を検出: {parts[0]}（{reason}）")
+        for ref in srcset_candidates(value):
+            reason = classify_ref(ref, base_dir, allow_local_refs)
+            if reason:
+                failures.append(f"srcset に自己完結契約違反の参照を検出: {ref}（{reason}）")
     for m in CSS_URL_RE.finditer(text):
         target = m.group(2).strip()
         reason = classify_ref(target, base_dir, allow_local_refs)
@@ -232,8 +257,9 @@ def check_viewport_overflow(
     url = "file://" + pathname2url(str(doc_path))
     # 静的検査をすり抜けた動的な外部要求（JS 実行・CSS 解決由来）を実行時に検出する。
     # 許可するのは about: と文書本体自身の file:// URL のみ（allow_local_refs 時は
-    # 文書ディレクトリ配下の file:// も追加許可）。それ以外の file:// を含む全要求を
-    # abort するため、検査対象 HTML が文書外へ実際に到達することはない
+    # 文書ディレクトリ配下に**実在する通常ファイル**への file:// も追加許可。欠落参照は
+    # 静的検査と同様に fail-closed で遮断・FAIL にする）。それ以外の file:// を含む
+    # 全要求を abort するため、検査対象 HTML が文書外へ実際に到達することはない
     # （「通信・読込した後で PASS する」抜け道の封鎖）。
     blocked_requests: list[str] = []
 
@@ -244,8 +270,15 @@ def check_viewport_overflow(
             return
         if req_url.startswith("file://"):
             req_path = _file_url_to_path(req_url).resolve()
-            if req_path == doc_path or (allow_local_refs and req_path.is_relative_to(base_dir)):
+            if req_path == doc_path:
                 route.continue_()
+                return
+            if allow_local_refs and req_path.is_relative_to(base_dir):
+                if req_path.is_file():
+                    route.continue_()
+                    return
+                blocked_requests.append(f"{req_url}（参照先ファイルが存在しない）")
+                route.abort()
                 return
         blocked_requests.append(req_url)
         route.abort()
@@ -282,8 +315,8 @@ def main() -> int:
     parser.add_argument(
         "--allow-local-refs",
         action="store_true",
-        help="文書ディレクトリ配下への相対参照を許可する（storyboard.html が screens/*.png を"
-        " 参照する構成向け。絶対パス・file://・`../` 脱出は引き続き違反）",
+        help="文書ディレクトリ配下に実在するファイルへの相対参照を許可する（storyboard.html が"
+        " screens/*.png を参照する構成向け。絶対パス・file://・`../` 脱出・欠落参照は引き続き違反）",
     )
     args = parser.parse_args()
 

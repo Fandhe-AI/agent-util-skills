@@ -18,6 +18,8 @@
   成果物（wireframes/*.html・flow.html）はこのフラグを使わず strict のまま検証する。
 
   検証: scripts/check_overflow.py storyboard.html --allow-local-refs
+    （参照先の screens/*.png が実在しないと欠落参照として FAIL する。テンプレートを
+    コピーしただけの状態ではなく、スクリーンショット撮影後に実行すること）
   Playwright で PNG 化（縦長 full-page）:
     scripts/capture_screenshot.py --html storyboard.html --out storyboard.png --width 1000 --full-page \
       --allow-local-refs
