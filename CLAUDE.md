@@ -78,14 +78,14 @@ skills-lock.json                      -- vendored スキルの source・skillPat
 .github/
   workflows/
     ci.yml                            -- スキル構造検証（structure）+ lint-docs
-    codex-review.yml                  -- Codex PR レビュー（Fandhe-AI/actions を @latest で呼び出す wrapper）
+    ai-review.yml                     -- ai-review（provider: codex）による PR レビュー（Fandhe-AI/actions を @latest で呼び出す wrapper）
     update-external.yml               -- vendored スキルの日次同期（Fandhe-AI/actions の update-external.yml wrapper）
   scripts/
     check-skill-structure.sh          -- SKILL.md frontmatter（name/description/user-invocable）・skills-lock.json 検証
 docs/
   README.md                           -- docs/ の索引
   skill-network-requirements.md       -- 各スキルのネットワーク・sandbox 実行要件
-AGENTS.md                             -- codex-review が参照するレビュー観点集
+AGENTS.md                             -- ai-review が参照するレビュー観点集
 ```
 
 ## 委譲方針（必読）
