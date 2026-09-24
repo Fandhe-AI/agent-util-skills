@@ -3,11 +3,11 @@
 ## 文書の位置づけ
 
 本リポジトリで作業するすべての AI エージェント・人間レビュアーが共通で用いるレビュー観点集。
-Codex による PR 自動レビュー（`.github/workflows/codex-review.yml`。Fandhe-AI/actions の
-reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コミットの本ファイルを
-レビュー基準として読む。運用ガイドの正は `CLAUDE.md`、著作規約の詳細は `.claude/rules/`
-（`skill-authoring.md` / `agent-authoring.md` / `description-style.md` / `security.md`）を
-参照し、本書は重複させずレビュー判定基準に絞る。
+ai-review（provider: codex）による PR 自動レビュー（`.github/workflows/ai-review.yml`。
+Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）は、PR の base
+コミットの本ファイルをレビュー基準として読む。運用ガイドの正は `CLAUDE.md`、著作規約の詳細は
+`.claude/rules/`（`skill-authoring.md` / `agent-authoring.md` / `description-style.md` /
+`security.md`）を参照し、本書は重複させずレビュー判定基準に絞る。
 
 本リポジトリは `create-html-report` と `setup-firebase-hosting` の 2 スキルを
 `npx skills add Fandhe-AI/agent-util-skills` で**組織内の複数リポジトリへ配布する**上流
