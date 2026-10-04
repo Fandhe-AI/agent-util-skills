@@ -407,6 +407,103 @@ class FetchFfTest(unittest.TestCase):
         code = "\n".join(l for l in self.func.split("\n") if not l.lstrip().startswith("#"))
         self.assertNotRegex(code, r"checkout\s+(-q\s+)?-f|--force|git[^\n]* clean|reset --hard")
 
+class UpstreamLikeRepoNameTest(unittest.TestCase):
+    """利用者のリポジトリ名・owner が `fandhe-frontend` を含む場合（例: Fandhe-AI/fandhe-frontend-docs）。
+
+    base_path・自サイトの GitHub URL・title に上流名が部分文字列として現れても誤検出せず、
+    上流そのものの表示が残っていれば検出する（偽陰性を作らない）ことを確認する。
+    fixture は base_path `/mini-repo` の実出力のため、`/mini-repo` を新しい base_path へ置換して
+    生成器の出力と同じ形（全リンクの href が `/fandhe-frontend-docs/…`）にする。
+    """
+
+    OWNER, REPO = "Fandhe-AI", "fandhe-frontend-docs"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.dist = self.tmp / "dist"
+        shutil.copytree(FIXTURE, self.dist)
+        for p in self.dist.rglob("*"):
+            if p.is_file():
+                p.write_text(p.read_text(encoding="utf-8").replace("/mini-repo", f"/{self.REPO}"), encoding="utf-8")
+        self.brand = self.tmp / "brand.toml"
+        self.brand.write_text(brand_toml(repository=f"https://github.com/{self.OWNER}/{self.REPO}",
+                                         brand=self.REPO, copyright="© 2026 Fandhe-AI"), encoding="utf-8")
+
+    def rebrand(self, *extra):
+        return run("rebrand_site.py", "--dist", self.dist, "--brand", self.brand, *extra)
+
+    def test_scaffold_check_site_and_rebrand_pass(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        r = run("scaffold.py", "--target", repo, "--owner", self.OWNER, "--repo", self.REPO,
+                "--branch", "main", "--title", "fandhe-frontend-docs")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('base_path = "/fandhe-frontend-docs"', (repo / "site/nav.toml").read_text())
+        r = run("check_site.py", "--root", repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.rebrand()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        t = (self.dist / "index.html").read_text()
+        self.assertIn(f'href="https://github.com/{self.OWNER}/{self.REPO}"', t)
+        self.assertIn(f'href="/{self.REPO}/usage/"', t)  # base_path 由来のリンクは残る（誤検出しない）
+        self.assertIn("Built with fandhe-frontend docs-site (", t)  # 帰属表記は保持
+        self.assertEqual(len(re.findall(r'LICENSE-(?:MIT|APACHE)"', t)), 2)
+        self.assertEqual(self.rebrand("--verify-only").returncode, 0)
+
+    def test_owner_containing_upstream_name_with_explicit_copyright(self):
+        repo = self.tmp / "repo2"
+        repo.mkdir()
+        r = run("scaffold.py", "--target", repo, "--owner", "my-fandhe-frontend", "--repo", "fandhe-frontend",
+                "--branch", "main", "--title", "Docs", "--copyright", "© 2026 Acme")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(run("check_site.py", "--root", repo).returncode, 0)
+
+    def test_standalone_upstream_word_in_display_text_rejected_with_guidance(self):
+        repo = self.tmp / "repo3"
+        repo.mkdir()
+        r = run("scaffold.py", "--target", repo, "--owner", "acme", "--repo", "r", "--branch", "main",
+                "--title", "T", "--tagline", "Powered by fandhe-frontend.")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("独立した語", r.stderr)
+        self.assertIn("--copyright", r.stderr)
+
+    def test_upstream_repository_itself_rejected(self):
+        for url in ("https://github.com/Fandhe-AI/fandhe-frontend", "https://github.com/fandhe-ai/FANDHE-FRONTEND"):
+            self.brand.write_text(brand_toml(repository=url), encoding="utf-8")
+            self.assertEqual(self.rebrand().returncode, 2, url)
+        r = run("scaffold.py", "--target", self.tmp / "x", "--owner", "fandhe-ai", "--repo", "Fandhe-Frontend",
+                "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 2)
+
+    def test_leftover_upstream_chrome_is_still_detected(self):
+        self.assertEqual(self.rebrand().returncode, 0)
+        idx = self.dist / "index.html"
+        good = idx.read_text()
+        mutations = {
+            "上流 GitHub リンク": lambda t: t.replace(f'"https://github.com/{self.OWNER}/{self.REPO}"', '"https://github.com/Fandhe-AI/fandhe-frontend"', 1),
+            "上流 crates.io リンク": lambda t: t.replace("</ul></div></div></nav>", '<li><a href="https://crates.io/crates/fandhe-frontend-core">crates.io</a></li></ul></div></div></nav>', 1),
+            "上流のブランド名": lambda t: t.replace(f"</span>{self.REPO}</a>", "</span>fandhe-frontend</a>", 1),
+            "上流の著作権表記": lambda t: t.replace("© 2026 Fandhe-AI", "© 2026 Fandhe-AI / fandhe-frontend contributors", 1),
+            "文末の上流名": lambda t: t.replace("Tiny site", "Built on fandhe-frontend.", 1),
+            "上流 favicon の aria-label": lambda t: t.replace(f'aria-label="{self.REPO}"', 'aria-label="fandhe-frontend"', 1),
+        }
+        for name, mutate in mutations.items():
+            mutated = mutate(good)
+            self.assertNotEqual(mutated, good, f"{name}: 変異が適用されていない（テスト自体の不備）")
+            idx.write_text(mutated, encoding="utf-8")
+            r = self.rebrand("--verify-only")
+            self.assertEqual(r.returncode, 1, f"{name}: 残存を検出できていない（偽陰性）")
+        idx.write_text(good, encoding="utf-8")
+        self.assertEqual(self.rebrand("--verify-only").returncode, 0)
+
+    def test_unreplaced_upstream_dist_still_fails_verify(self):
+        shutil.rmtree(self.dist)
+        shutil.copytree(FIXTURE, self.dist)  # base_path も上流のまま（rebrand 前の実物）
+        r = self.rebrand("--verify-only")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("残っている", r.stderr)
+
 
 class CheckSiteTest(unittest.TestCase):
     NAV = """[site]
@@ -466,7 +563,7 @@ path = "/"
         self.write_nav('\n[[section.page]]\ntitle = "Using Fandhe-Frontend"\nsource = "site/a.md"\npath = "/a/"\n')
         r = self.check()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("残存検査と衝突", r.stderr)
+        self.assertIn("独立した語", r.stderr)
 
     def test_base_path_mismatch(self):
         self.write_nav("", base="/other")

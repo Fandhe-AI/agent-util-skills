@@ -67,6 +67,35 @@ FF_REV_RE = re.compile(r"^[0-9a-f]{40}$")
 # 出力に上流ブランド名が残らないことを検査する語（大文字小文字を区別しない）。
 UPSTREAM_BRAND = "fandhe-frontend"
 
+# 上流を指す表示だけを「残存」「入力拒否」の対象にする。単純な部分一致にすると、利用者のリポジトリ名が
+# `fandhe-frontend-docs` のような場合に、自サイトの正当なリンク（base_path・GitHub URL）まで
+# 上流の残存と誤検出する。語境界で区別する。
+#
+# _WORD_TEXT: 表示文字列（brand / tagline / title 等）用。`fandhe-frontend` が独立した語として現れたら拒否
+#   （`fandhe-frontend-docs` のような別の語の一部は許可）。
+# _WORD_ATTR: 生成 HTML の残存検査用。上の語境界に加え、直前が `/` `.` のもの（`/fandhe-frontend-docs/`
+#   や `github.com/acme/fandhe-frontend` のような URL・パスの一部）は利用者のものとして除外する。
+_WORD_TEXT_RE = re.compile(r"(?<![A-Za-z0-9_-])fandhe-frontend(?![A-Za-z0-9_-])", re.I)
+RESIDUAL_RE = re.compile(
+    r"(?<![A-Za-z0-9_/.-])fandhe-frontend(?![A-Za-z0-9_-])"
+    r"|github\.com/Fandhe-AI/fandhe-frontend(?![A-Za-z0-9_.-])"
+    r"|crates\.io/crates/fandhe-frontend",
+    re.I,
+)
+
+
+def has_upstream_word(text: str) -> bool:
+    """表示文字列に上流名が独立した語として含まれるか（入力検証用）。"""
+    return _WORD_TEXT_RE.search(text) is not None
+
+
+def is_upstream_repo(owner: str, repo: str) -> bool:
+    """上流リポジトリそのもの（Fandhe-AI/fandhe-frontend。大文字小文字・.git を正規化）か。"""
+    r = repo.lower()
+    if r.endswith(".git"):
+        r = r[:-4]
+    return owner.lower() == "fandhe-ai" and r == UPSTREAM_BRAND
+
 
 class SubsetError(ValueError):
     """TOML サブセットの構文違反。メッセージには行番号を含める。"""
@@ -214,9 +243,12 @@ def _text(values: dict[str, str], key: str, *, required: bool) -> str:
         raise BrandError(f"brand.toml: `{key}` に制御文字を含められない")
     if len(v) > MAX_TEXT_LEN:
         raise BrandError(f"brand.toml: `{key}` は {MAX_TEXT_LEN} 文字以内")
-    if UPSTREAM_BRAND in v.lower():
-        # 後処理後の残存検査（出力に上流ブランド名が無いこと）と衝突するため入力段階で拒否する。
-        raise BrandError(f"brand.toml: `{key}` に `{UPSTREAM_BRAND}` を含められない")
+    if has_upstream_word(v):
+        # 後処理後の残存検査（出力に上流ブランド名が無いこと）と区別できなくなるため入力段階で拒否する。
+        raise BrandError(
+            f"brand.toml: `{key}` に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
+            "（生成後の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可）"
+        )
     if BIDI_RE.search(v):
         raise BrandError(f"brand.toml: `{key}` に双方向制御文字を含められない")
     if PLACEHOLDER_RE.search(v):
@@ -254,8 +286,11 @@ def load_brand(path: Path) -> Brand:
             "（GitHub の命名規則。`.` `..` 単独・.git 終端は不可）"
         )
     repo = m.group("repo")
-    if UPSTREAM_BRAND in repository.lower():
-        raise BrandError(f"brand.toml: `repository` に `{UPSTREAM_BRAND}` を含められない")
+    if is_upstream_repo(m.group("owner"), repo):
+        raise BrandError(
+            "brand.toml: `repository` が上流リポジトリ（Fandhe-AI/fandhe-frontend）そのもの。"
+            "自サイトのリポジトリ URL を指定する"
+        )
 
     lang = v.get("lang", "")
     if not LANG_RE.fullmatch(lang):

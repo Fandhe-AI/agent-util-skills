@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import UPSTREAM_BRAND, Brand, BrandError, load_brand  # noqa: E402
+from _common import RESIDUAL_RE, UPSTREAM_BRAND, Brand, BrandError, load_brand  # noqa: E402
 
 UPSTREAM_REPO_URL = "https://github.com/Fandhe-AI/fandhe-frontend"
 ATTRIBUTION_TEXT = "Built with fandhe-frontend docs-site"
@@ -203,14 +203,18 @@ def rebrand_html(text: str, brand: Brand, where: str, problems: list[str]) -> st
 
 
 def residual_hits(rel: str, text: str) -> int:
-    """帰属表記・本文を除いた `fandhe-frontend` の残存件数。"""
+    """帰属表記・本文を除いた上流表示の残存件数。
+
+    単純な部分一致ではなく `_common.RESIDUAL_RE`（上流名の独立した語・上流 URL・上流 crates.io URL）で
+    数える。利用者のリポジトリ名が `fandhe-frontend-docs` でも、base_path や自サイトの GitHub URL を
+    誤検出しない。"""
     if rel.startswith(_RESIDUAL_SKIP_PREFIXES):
         return 0
     if rel.endswith(".html"):
         text = _ARTICLE_RE.sub("", text)
     text = _LICENSE_ANCHOR_RE.sub("", text)
     text = text.replace(ATTRIBUTION_TEXT, "")
-    return text.lower().count(UPSTREAM_BRAND)
+    return len(RESIDUAL_RE.findall(text))
 
 
 def missing_attribution(text: str) -> bool:

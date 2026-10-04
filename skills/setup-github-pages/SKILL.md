@@ -49,7 +49,7 @@ user-invocable: true
 | ナビ構成 | セクションとページの一覧。既存の Markdown（`README.md`・`docs/`）を公開する場合は、そのパス |
 | 公開範囲の了解 | 上記のとおりサイトは公開される。公開してよい内容か |
 
-ブランド表示・タグライン・著作権に `fandhe-frontend` の文字列は使えない（残存検査と衝突するため入力検証で拒否される）。
+ブランド表示・タグライン・著作権・title に、上流名 `fandhe-frontend` を**独立した語として**含められない（生成後の残存検査と区別できないため、入力検証で理由付きで拒否される）。`fandhe-frontend-docs` のような別の語の一部は可。リポジトリ名・owner に含まれていてもよい（base_path・自サイトの GitHub URL は上流の残存と数えない）。ただし `Fandhe-AI/fandhe-frontend` 自体を自サイトのリポジトリにはできない。owner に含まれる場合、`--copyright` の既定値（`© <年> <owner>`）が拒否されることがあるので、その際は `--copyright` を明示する。
 
 ## フロー
 
@@ -217,7 +217,7 @@ git check-ignore -q _ff && echo "_ff は無視済み"
 |------|-----------------|
 | ビルド全体 | `bash tools/docs-site-gen/build-local.sh --clean` が終了コード 0。末尾に `rebrand ok` と `verify ok: … 残存 0・帰属表記あり` |
 | 残存検査 | `python3 tools/docs-site-gen/rebrand_site.py --dist _site --brand tools/docs-site-gen/brand.toml --verify-only` が 0 |
-| 目視の補助 | `grep -o fandhe-frontend _site/index.html \| wc -l` が帰属表記の 3 件（`Built with …` と LICENSE リンク 2 件）のみ。`grep -c` は HTML が 1 行のため行数しか数えず使えない |
+| 目視の補助 | `grep -o fandhe-frontend _site/index.html \| wc -l` が帰属表記の 3 件（`Built with …` と LICENSE リンク 2 件）のみ（リポジトリ名に `fandhe-frontend` を含む場合は base_path・自サイトの URL も数えられるため、代わりに `rebrand_site.py --verify-only` の結果を正とする）。`grep -c` は HTML が 1 行のため行数しか数えず使えない |
 
 ブラウザ確認（`base_path` 配下で配信されるため、同名ディレクトリ経由で配信する）:
 
@@ -269,7 +269,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | リンク切れで生成が失敗し `_site/` に何も出力されない | fail-closed 仕様。出力されたエラーの 1 件ずつを直す（存在しない `#anchor`・nav 未登録の `.md`・存在しない絶対パス） |
 | ページ内リンクが公開後に 404 | 絶対パスリンクに `base_path`（`/<repo>`）が無い。`[x](/<repo>/usage/)` と書くか、`[x](./usage.md)` を使う |
 | 画像が表示されない | 上流は画像非対応（`![a](x)` は `!` とリンクになる）。表・コードブロックで代替する |
-| nav.toml の title に `fandhe-frontend` を入れて失敗する | ヘッダー等に出る title は残存検査と衝突する。`check_site.py` が事前に拒否するので別の表記にする |
+| nav.toml の title に `fandhe-frontend` を入れて失敗する | 独立した語としての上流名は残存検査と区別できない。`check_site.py` が事前に拒否するので別の表記にする（`fandhe-frontend-docs` のような別の語の一部は可） |
 | `rebrand_site.py` が「一致数が 0（期待 1）」で失敗する | 上流 DOM が変わったか、二重実行。dist を作り直して再実行する。`FF_REV` 更新直後なら「FF_REV の更新手順」で置換対象を再確認する |
 | `build-local.sh` が「`_ff` に未コミットの変更または未追跡ファイルがある」で止まる | `_ff/` はキャッシュ専用。必要な変更は退避し、不要なら `_ff/` を手動で削除して再実行する（スクリプトは破棄しない） |
 | `build-local.sh` が「出力先が既に存在し空ではない」で止まる | `--clean` を付ける（既定の `_site/` のみ削除対象） |

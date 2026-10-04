@@ -32,7 +32,7 @@
 | `[[menu]]` | `title`, `index_path`, `source` | 複数セクションを束ねるヘッダーメニューと集約ページ。`index_path` はどの `page.path` とも衝突不可。`[[menu]]` の後に `[[section.*]]` を続けるには新しい `[[section]]` が必要 |
 | `[[menu.item]]` | `section`, `description` | `section` は束ねる既存セクションの `index_path`、`description` は 1 行（空・改行不可）。メンバーは 1 件以上で、直前の `[[menu]]` または `[[menu.item]]` の直後にだけ置ける |
 
-`title`（セクション・ページ・メニュー）に `fandhe-frontend` を含められない（ヘッダー・サイドバー・フッターに出るため、rebrand 後の残存検査と衝突する。`check_site.py` が事前に拒否する）。
+`title`（セクション・ページ・メニュー）に上流名 `fandhe-frontend` を独立した語として含められない（ヘッダー・サイドバー・フッターに出るため、rebrand 後の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可。`check_site.py` が事前に拒否する）。
 
 `path` は `/` 始まり・`/` 終わりで、セグメントは英数字・`-`・`_` のみ。サイト全体で一意。
 `source` は相対パスで、`..`・絶対パス・`\` は禁止、ファイルが実在すること。リポジトリ内のどこにあってもよい

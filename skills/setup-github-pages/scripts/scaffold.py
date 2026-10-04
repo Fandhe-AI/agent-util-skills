@@ -30,7 +30,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, COLOR_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
-    valid_owner, valid_repo_name,
+    has_upstream_word, is_upstream_repo, valid_owner, valid_repo_name,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -70,8 +70,12 @@ def validate_text(name: str, value: str, *, required: bool) -> str:
     if PLACEHOLDER_RE.search(value):
         # 置換結果が再置換されて意図しない値になる経路を入力段階で断つ
         raise ValueError(f"--{name} にプレースホルダー（__SGP_*__）を含められない")
-    if UPSTREAM_BRAND in value.lower():
-        raise ValueError(f"--{name} に `{UPSTREAM_BRAND}` を含められない")
+    if has_upstream_word(value):
+        raise ValueError(
+            f"--{name} に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
+            "（生成後の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可。"
+            "--copyright の既定値は owner を含むため、必要なら --copyright を明示する）"
+        )
     return value
 
 
@@ -115,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--owner が GitHub の owner 名として不正")
         if not valid_repo_name(args.repo):
             raise ValueError("--repo が GitHub の repo 名として不正")
+        if is_upstream_repo(args.owner, args.repo):
+            raise ValueError("--owner/--repo が上流リポジトリ（Fandhe-AI/fandhe-frontend）そのもの。自サイトのリポジトリを指定する")
         if not BRANCH_RE.fullmatch(args.branch) or ".." in args.branch:
             raise ValueError("--branch が不正（英数字・. _ / - のみ）")
         title = validate_text("title", args.title, required=True)

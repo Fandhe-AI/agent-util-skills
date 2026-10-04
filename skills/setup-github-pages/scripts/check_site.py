@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import PLACEHOLDER_RE, UPSTREAM_BRAND, BrandError, SubsetError, load_brand, parse_nav  # noqa: E402
+from _common import PLACEHOLDER_RE, UPSTREAM_BRAND, BrandError, has_upstream_word, SubsetError, load_brand, parse_nav  # noqa: E402
 
 # 上流のショーケース生成パス。nav の path がここから始まると部品ページ等が混入する。
 RESERVED_PATH_PREFIXES = ("/themes/", "/primitives/", "/blocks/", "/wireframes/")
@@ -91,12 +91,12 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
         if s is not None:
             sources.append(s)
         title = t.values.get("title")
-        if title is not None and UPSTREAM_BRAND in title.lower():
+        if title is not None and has_upstream_word(title):
             # title はヘッダー・サイドバー・フッター・<title> に出る。rebrand 後の残存検査
             # （帰属表記以外に上流名が残らないこと）と衝突し、ビルド最終段で原因不明に失敗するため先に拒否する。
             errors.append(
-                f"site/nav.toml line {t.line}: title `{title}` に `{UPSTREAM_BRAND}` を含められない"
-                "（生成後の残存検査と衝突する。別の表記にする）"
+                f"site/nav.toml line {t.line}: title `{title}` に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
+                "（生成後の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可）"
             )
 
     # 3. 予約アセット名
