@@ -246,6 +246,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 - **入力検証**: ブランド表示・URL・ブランチ名はすべて `scaffold.py` / `_common.py` が検証・エスケープする（リポジトリ URL は `https://github.com/<owner>/<repo>` のみ、HTML 出力は `html.escape`）。シェルへ渡す変数は常に `"${VAR}"` でクォートする。外部入力を `sed` や `bash -c` の文字列に展開しない
 - **CSP を壊さない**: 生成物の CSP は `script-src 'self'` 等で厳格。後処理はインライン script / style を一切追加しない。サイトへ手でインラインスクリプトを足さない
 - **置換は構造的に行う**: GitHub URL を一括置換しない。ヘッダー・フッターの「リポジトリへのリンク」要素だけを置換し、LICENSE-MIT / LICENSE-APACHE リンクと「Built with fandhe-frontend docs-site」の帰属表記は保持する。本文（`<main>`）は書き換えない
+- **書き込み先の限定**: `build-local.sh`・`scaffold.py`・`rebrand_site.py` が書く・消す先は、対象リポジトリの実体パス配下で、末端が symlink でないものに限る（`_ff/`・`tools/docs-site-gen/target/`・`Cargo.lock`・`THIRD-PARTY-LICENSES`・既定の `_site/`。bash は `guard_path`、Python は `resolves_inside` に集約）。違反したら何も書かず中止する。`--out` のみ対象リポジトリ外（CI の `${RUNNER_TEMP}` 等）を許すが、末端が symlink なら拒否する。既存の `_ff` は origin が上流 URL と一致する場合だけ再利用し、書き換えない。dist に symlink があれば `rebrand_site.py` は辿らず失敗する
 - **供給網**: 取得する上流は `FF_REV` の 40 桁 commit SHA で固定する。サードパーティ action は commit SHA 固定（tag はコメントで併記）。例外として `Fandhe-AI/actions` の reusable workflow は組織の運用方針により `@latest` を使う（ユーザー決定済み。呼び出し先は public リポジトリのため他組織のリポジトリからも呼べる）。キャッシュは wrapper の `target/` のみで、秘密情報は入れない
 - **`@latest` の可変参照**: `id-token: write` を持つ deploy ジョブへ可変参照 `Fandhe-AI/actions/.github/workflows/pages-deploy.yml@latest` を渡している。`latest` タグが書き換えられると任意のコードがその権限で動くため、Fandhe-AI/actions 側の `latest` タグ保護（更新権限の限定・ruleset）が前提になる。保護を確認できない環境では commit SHA 固定へ切り替える
 - **localStorage キー**: テーマ設定は `fandhe-docs-theme` で保存される。同一 origin（`<owner>.github.io`）の他サイトと共有されるが、保存されるのはテーマのみで無害なため置換しない
@@ -272,6 +273,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | nav.toml の title に `fandhe-frontend` を入れて失敗する | 独立した語としての上流名は残存検査と区別できない。`check_site.py` が事前に拒否するので別の表記にする（`fandhe-frontend-docs` のような別の語の一部は可） |
 | `rebrand_site.py` が「一致数が 0（期待 1）」で失敗する | 上流 DOM が変わったか、二重実行。dist を作り直して再実行する。`FF_REV` 更新直後なら「FF_REV の更新手順」で置換対象を再確認する |
 | `build-local.sh` が「`_ff` に未コミットの変更または未追跡ファイルがある」で止まる | `_ff/` はキャッシュ専用。必要な変更は退避し、不要なら `_ff/` を手動で削除して再実行する（スクリプトは破棄しない） |
+| `build-local.sh` が「シンボリックリンクのため、書き込み・削除をしない」「対象リポジトリの外へ解決される」で止まる | `_ff`・`target`・`Cargo.lock`・`THIRD-PARTY-LICENSES`・出力先のいずれかが symlink（または親が外を指す）。通常のファイル・ディレクトリに置き換える |
+| `build-local.sh` が「origin が期待する上流 URL と異なる」で止まる | `_ff/` が別のリポジトリになっている。不要なら手動で削除して再実行する（スクリプトは書き換えない） |
 | `build-local.sh` が「出力先が既に存在し空ではない」で止まる | `--clean` を付ける（既定の `_site/` のみ削除対象） |
 | build は成功するが deploy だけ失敗する | Pages の Source が「GitHub Actions」でない。Step 5 を実行する |
 | `${{ }}` を `run:` に書き足してしまう | env 経由で渡す（式の直書きはインジェクション経路になる） |

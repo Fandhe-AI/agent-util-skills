@@ -53,10 +53,33 @@ case "${OUT}" in
   *) OUT="${PWD}/${OUT}" ;;
 esac
 
-# `..` やシンボリックリンクを含む指定でも禁止判定をすり抜けられないよう、比較は正規化後のパスで行う。
+# >>> guards（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
+# 不変条件: このスクリプトが書く・消す先（_ff/・target/・Cargo.lock・THIRD-PARTY-LICENSES・既定の
+# 出力先 _site/）は、(a) 対象リポジトリの実体パス（ROOT_REAL）配下に解決され、(b) 末端自体が
+# symlink でないこと。`git init` / `fetch` / `checkout` / `cargo build` / `mv` / `rm -r` は
+# symlink を辿ってリンク先を書き換え得るため、書く前に必ずこの関数を通す。
+# 唯一の例外は --out（CI は ${RUNNER_TEMP} など対象リポジトリ外へ出力する）で、guard_out が別途検査する。
+#
 # macOS 標準の realpath には -m が無いため、移植性のある python3 の os.path.realpath（存在しない
-# パスも許容する非 strict 動作）を使う。
+# パスも許容する非 strict 動作）で正規化する。
 canon() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+
+guard_path() {   # guard_path <path> <label>
+  local p="$1" label="$2" real
+  if [[ -L "${p}" ]]; then
+    echo "エラー: ${label}（${p}）がシンボリックリンクのため、書き込み・削除をしない" >&2
+    return 1
+  fi
+  real="$(canon "${p}")"
+  case "${real}/" in
+    "${ROOT_REAL}/"*) ;;
+    *)
+      echo "エラー: ${label}（${p}）が対象リポジトリの外（${real}）へ解決される。親ディレクトリが symlink の可能性" >&2
+      return 1 ;;
+  esac
+}
+# <<< guards
+
 ROOT_REAL="$(canon "${ROOT}")"
 OUT_REAL="$(canon "${OUT}")"
 DEFAULT_OUT_REAL="$(canon "${DEFAULT_OUT}")"
@@ -71,7 +94,29 @@ if [[ ! "${FF_REV}" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
+# ---- 書き込み先の安全確認（symlink 経由で対象リポジトリの外へ書かない）
+guard_path "${SCRIPT_DIR}" "tools/docs-site-gen" || exit 2
+guard_path "${FF_DIR}" "_ff" || exit 2
+guard_path "${SCRIPT_DIR}/target" "tools/docs-site-gen/target（cargo の出力先）" || exit 2
+guard_path "${SCRIPT_DIR}/Cargo.lock" "tools/docs-site-gen/Cargo.lock（cargo が書く）" || exit 2
+if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
+  guard_path "${ROOT}/THIRD-PARTY-LICENSES" "THIRD-PARTY-LICENSES" || exit 2
+  if [[ -d "${ROOT}/THIRD-PARTY-LICENSES" ]]; then
+    echo "エラー: THIRD-PARTY-LICENSES がディレクトリ（mv が配下へ移動してしまう）" >&2
+    exit 2
+  fi
+fi
+
 # ---- 出力先の安全確認
+# --out は対象リポジトリの外でもよいが、末端が symlink なら拒否する（生成器・rm がリンク先を書き換えるため）。
+# 対象リポジトリ内を指す場合は、実体も対象リポジトリ内に収まること（親ディレクトリ経由の脱出を防ぐ）。
+if [[ -L "${OUT}" ]]; then
+  echo "エラー: 出力先 ${OUT} がシンボリックリンク" >&2
+  exit 2
+fi
+case "${OUT}/" in
+  "${ROOT}/"*|"${ROOT_REAL}/"*) guard_path "${OUT}" "出力先" || exit 2 ;;
+esac
 if [[ "${CLEAN}" -eq 1 ]]; then
   # 削除してよいのは既定の出力先だけ（任意パスの再帰削除を許さない）
   if [[ "${OUT_REAL}" != "${DEFAULT_OUT_REAL}" ]]; then
@@ -110,7 +155,17 @@ fetch_ff() {
     echo "エラー: ${FF_DIR} が git 作業ツリーではない（内容を確認して手動で退避してから再実行）" >&2
     return 1
   fi
-  if [[ -d "${FF_DIR}/.git" ]]; then
+  if [[ -e "${FF_DIR}/.git" || -L "${FF_DIR}/.git" ]]; then
+    if [[ -L "${FF_DIR}/.git" || ! -d "${FF_DIR}/.git" ]]; then
+      echo "エラー: ${FF_DIR}/.git が通常のディレクトリではない（symlink・gitdir ファイルはリンク先を書き換え得るため中止）" >&2
+      return 1
+    fi
+    local origin
+    if origin="$(git -C "${FF_DIR}" remote get-url origin 2>/dev/null)" && [[ "${origin}" != "${FF_URL}" ]]; then
+      echo "エラー: ${FF_DIR} の origin が期待する上流 URL と異なる（${origin}）。利用者の別リポジトリの可能性があるため書き換えず中止する。" >&2
+      echo "       不要なら手動で ${FF_DIR} を削除してから再実行する。" >&2
+      return 1
+    fi
     local dirty
     if ! dirty="$(git -C "${FF_DIR}" status --porcelain)"; then
       echo "エラー: ${FF_DIR} の git 状態を取得できない（破損の可能性。内容を確認して手動で退避してから再実行）" >&2
@@ -128,9 +183,8 @@ fetch_ff() {
   else
     git init -q "${FF_DIR}"
   fi
-  if git -C "${FF_DIR}" remote get-url origin >/dev/null 2>&1; then
-    git -C "${FF_DIR}" remote set-url origin "${FF_URL}"
-  else
+  # origin が無い場合（初回の git init 直後）だけ追加する。既存の origin は上で一致確認済みで、書き換えない
+  if ! git -C "${FF_DIR}" remote get-url origin >/dev/null 2>&1; then
     git -C "${FF_DIR}" remote add origin "${FF_URL}"
   fi
   # 認証プロンプトで止まらず失敗させる（CI・隔離環境での無限待機を避ける）
@@ -148,7 +202,7 @@ fetch_ff || exit 1
 if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
   step "THIRD-PARTY-LICENSES を生成"
   # 途中失敗で欠けたファイルを残さないよう、一時ファイルへ書いてから mv（同一ディレクトリ内で原子的に置換）
-  TPL_TMP="$(mktemp "${ROOT}/.THIRD-PARTY-LICENSES.XXXXXX")"
+  TPL_TMP="$(mktemp "${ROOT_REAL}/.THIRD-PARTY-LICENSES.XXXXXX")"
   trap 'rm -f -- "${TPL_TMP}"' EXIT   # 失敗時に一時ファイルを残さない（成功時は mv 済みで no-op）
   {
     printf '%s\n' \
@@ -159,7 +213,9 @@ if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
     cat "${FF_DIR}/LICENSE-MIT"
   } > "${TPL_TMP}"
   chmod 0644 "${TPL_TMP}"   # mktemp は 0600 で作るため、通常ファイルと同じ権限へ
-  mv -f -- "${TPL_TMP}" "${ROOT}/THIRD-PARTY-LICENSES"
+  # 宛先が symlink・ディレクトリでないことは冒頭で確認済み（mv は宛先が symlink なら symlink 自体を
+  # 置換するが、ディレクトリを指す symlink やディレクトリだと配下へ移動してしまうため事前に拒否している）
+  mv -f -- "${TPL_TMP}" "${ROOT_REAL}/THIRD-PARTY-LICENSES"
 fi
 
 # ---- 事前検証

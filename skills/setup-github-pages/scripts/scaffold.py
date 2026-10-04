@@ -30,7 +30,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, COLOR_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
-    has_upstream_word, is_upstream_repo, valid_owner, valid_repo_name,
+    has_upstream_word, is_upstream_repo, resolves_inside, valid_owner, valid_repo_name,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -77,22 +77,6 @@ def validate_text(name: str, value: str, *, required: bool) -> str:
             "--copyright の既定値は owner を含むため、必要なら --copyright を明示する）"
         )
     return value
-
-
-def resolves_inside(root_real: Path, path: Path) -> bool:
-    """`path`（未作成でもよい）を symlink 解決した実体が root_real の配下に収まるか。
-
-    未作成の末端は、存在する最も近い祖先を realpath してから残りの名前を連結して求める。
-    祖先の途中（tools/ や .github/ 等）が --target の外を指す symlink だと、mkdir や write が
-    target 外へ到達するため、書き込みの前にここで全件検証する。
-    """
-    probe = path
-    rest: list[str] = []
-    while not os.path.lexists(probe):
-        rest.append(probe.name)
-        probe = probe.parent
-    real = Path(os.path.realpath(probe)).joinpath(*reversed(rest))
-    return real == root_real or root_real in real.parents
 
 
 def main(argv: list[str] | None = None) -> int:

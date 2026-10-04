@@ -17,6 +17,7 @@ tomllib は上位互換のため「tomllib では通るが生成器が落とす�
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +96,23 @@ def is_upstream_repo(owner: str, repo: str) -> bool:
     if r.endswith(".git"):
         r = r[:-4]
     return owner.lower() == "fandhe-ai" and r == UPSTREAM_BRAND
+
+
+def resolves_inside(root_real: Path, path: Path) -> bool:
+    """`path`（未作成でもよい）を symlink 解決した実体が root_real の配下に収まるか。
+
+    書き込み先を限定する不変条件の Python 側の唯一の実装（bash 側は build-local.sh の guard_path）。
+    未作成の末端は、存在する最も近い祖先を realpath してから残りの名前を連結して求める。
+    祖先の途中が root の外を指す symlink だと、mkdir や write が root の外へ到達するため、
+    書き込みの前にここで検証する。
+    """
+    probe = path
+    rest: list[str] = []
+    while not os.path.lexists(probe):
+        rest.append(probe.name)
+        probe = probe.parent
+    real = Path(os.path.realpath(probe)).joinpath(*reversed(rest))
+    return real == root_real or root_real in real.parents
 
 
 class SubsetError(ValueError):

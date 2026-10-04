@@ -38,13 +38,14 @@ from __future__ import annotations
 
 import argparse
 import html
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import RESIDUAL_RE, UPSTREAM_BRAND, Brand, BrandError, load_brand  # noqa: E402
+from _common import RESIDUAL_RE, resolves_inside, UPSTREAM_BRAND, Brand, BrandError, load_brand  # noqa: E402
 
 UPSTREAM_REPO_URL = "https://github.com/Fandhe-AI/fandhe-frontend"
 ATTRIBUTION_TEXT = "Built with fandhe-frontend docs-site"
@@ -227,16 +228,34 @@ def missing_attribution(text: str) -> bool:
     )
 
 
+def find_symlinks(dist: Path) -> list[str]:
+    """dist 配下の symlink（ファイル・ディレクトリ両方）の相対パス一覧。
+
+    生成器は symlink を出力しない。存在する場合は、読み書きがリンク先（dist の外）へ及ぶ経路になるため、
+    辿らずに失敗として扱う。os.walk は followlinks=False（既定）で、symlink ディレクトリは
+    dirnames に現れるが降下しない。
+    """
+    found: list[str] = []
+    for cur, dirs, names in os.walk(dist, followlinks=False):
+        for n in dirs + names:
+            p = Path(cur) / n
+            if p.is_symlink():
+                found.append(p.relative_to(dist).as_posix())
+    return sorted(found)
+
+
 def _collect(dist: Path) -> dict[str, str]:
     files: dict[str, str] = {}
-    for p in sorted(dist.rglob("*")):
-        # symlink は dist の外を指し得るため読み書きしない。
-        if p.is_symlink() or not p.is_file():
-            continue
-        try:
-            files[p.relative_to(dist).as_posix()] = p.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue  # 画像等のバイナリは対象外
+    for cur, dirs, names in os.walk(dist, followlinks=False):
+        dirs.sort()
+        for n in sorted(names):
+            p = Path(cur) / n
+            if p.is_symlink() or not p.is_file():
+                continue
+            try:
+                files[p.relative_to(dist).as_posix()] = p.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue  # 画像等のバイナリは対象外
     return files
 
 
@@ -261,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dist.is_dir():
         print(f"エラー: --dist がディレクトリではない: {args.dist}", file=sys.stderr)
         return 2
+    links = find_symlinks(args.dist)
+    if links:
+        print("エラー: dist 内に symlink がある（リンク先へ読み書きが及ぶため中止）: "
+              + ", ".join(links[:10]), file=sys.stderr)
+        return 1
     files = _collect(args.dist)
     if not any(r.endswith(".html") for r in files):
         print("エラー: dist に HTML が 1 件も無い（生成失敗の可能性）", file=sys.stderr)
@@ -306,10 +330,16 @@ def main(argv: list[str] | None = None) -> int:
               "SKILL.md「FF_REV の更新手順」で置換対象を再確認すること。", file=sys.stderr)
         return 1
 
+    dist_real = Path(os.path.realpath(args.dist))
     changed = 0
     for rel, text in out.items():
         if text != files[rel]:
-            (args.dist / rel).write_text(text, encoding="utf-8")
+            target = args.dist / rel
+            # 書き込み先は dist の実体配下の通常ファイルに限る（find_symlinks 後の競合に備えた最終確認）
+            if target.is_symlink() or not resolves_inside(dist_real, target):
+                print(f"エラー: {rel} の書き込み先が dist の外へ解決される。中止", file=sys.stderr)
+                return 1
+            target.write_text(text, encoding="utf-8")
             changed += 1
     print(f"rebrand ok: HTML {html_count} 件を検査、{changed} ファイルを更新（残存 0・帰属表記あり）")
     return 0

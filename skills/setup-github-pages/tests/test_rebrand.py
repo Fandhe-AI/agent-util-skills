@@ -403,9 +403,41 @@ class FetchFfTest(unittest.TestCase):
         self.assertEqual((self.ff / "precious.txt").read_text(), "data\n")
         self.assertFalse((self.ff / ".git").exists())
 
+    def test_origin_mismatch_aborts_without_rewriting(self):
+        self.assertEqual(self.fetch(self.rev_a).returncode, 0)
+        other = "https://example.invalid/someone/else.git"
+        self.git(self.ff, "remote", "set-url", "origin", other)
+        r = self.fetch(self.rev_b)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("origin が期待する上流 URL と異なる", r.stderr)
+        self.assertEqual(self.git(self.ff, "remote", "get-url", "origin"), other)
+        self.assertEqual(self.git(self.ff, "rev-parse", "HEAD"), self.rev_a)
+        # HEAD が一致する再利用経路でも同じ
+        r = self.fetch(self.rev_a)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.git(self.ff, "remote", "get-url", "origin"), other)
+
+    def test_dot_git_symlink_or_file_aborts(self):
+        outside = self.base / "elsewhere.git"
+        outside.mkdir()
+        self.git(outside, "init", "-q", "--bare")
+        before = sorted(p.name for p in outside.iterdir())
+        self.ff.mkdir()
+        (self.ff / ".git").symlink_to(outside)
+        r = self.fetch(self.rev_a)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("通常のディレクトリではない", r.stderr)
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), before)
+        (self.ff / ".git").unlink()
+        (self.ff / ".git").write_text(f"gitdir: {outside}\n")
+        r = self.fetch(self.rev_a)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), before)
+
     def test_script_has_no_force_checkout_or_clean(self):
         code = "\n".join(l for l in self.func.split("\n") if not l.lstrip().startswith("#"))
         self.assertNotRegex(code, r"checkout\s+(-q\s+)?-f|--force|git[^\n]* clean|reset --hard")
+        self.assertNotIn("set-url", code, "既存 origin を書き換えてはいけない")
 
 class UpstreamLikeRepoNameTest(unittest.TestCase):
     """利用者のリポジトリ名・owner が `fandhe-frontend` を含む場合（例: Fandhe-AI/fandhe-frontend-docs）。
@@ -503,6 +535,146 @@ class UpstreamLikeRepoNameTest(unittest.TestCase):
         r = self.rebrand("--verify-only")
         self.assertEqual(r.returncode, 1)
         self.assertIn("残っている", r.stderr)
+
+class WriteBoundaryTest(unittest.TestCase):
+    """書き込み・削除先が対象リポジトリの外へ出ないことの回帰テスト（symlink 経由の脱出）。
+
+    build-local.sh は guard_path（bash）、scaffold.py / rebrand_site.py は resolves_inside（Python）を通す。
+    ガードは fetch・cargo より前で実行されるため、ネットワーク・ビルド無しで中止を確認できる。
+    各ケースで「リンク先（外部ディレクトリ）が無変更」であることを検証する。
+    """
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        r = run("scaffold.py", "--target", self.repo, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.outside = self.base / "outside"
+        self.outside.mkdir()
+        (self.outside / "keep.txt").write_text("keep\n")
+        self.snapshot = self.snap()
+
+    def snap(self):
+        return sorted((p.relative_to(self.outside).as_posix(), p.read_text() if p.is_file() else "") for p in self.outside.rglob("*"))
+
+    def build(self, *args):
+        return subprocess.run(["bash", str(self.repo / "tools/docs-site-gen/build-local.sh"), *args],
+                              capture_output=True, text=True, cwd=self.repo)
+
+    def assert_aborted(self, r, needle=None):
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.snap(), self.snapshot, "リンク先が変更されている")
+        if needle:
+            self.assertIn(needle, r.stderr)
+        self.assertNotIn("==> fandhe-frontend", r.stderr.split("エラー")[0] if "エラー" in r.stderr else "")
+
+    def test_ff_symlink_to_outside_dir(self):
+        (self.repo / "_ff").symlink_to(self.outside)
+        self.assert_aborted(self.build(), "_ff")
+
+    def test_ff_symlink_to_empty_outside_dir(self):
+        empty = self.base / "empty"
+        empty.mkdir()
+        (self.repo / "_ff").symlink_to(empty)
+        r = self.build()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(list(empty.iterdir()), [], "空のリンク先に git init された")
+
+    def test_target_dir_symlink(self):
+        (self.repo / "tools/docs-site-gen/target").symlink_to(self.outside)
+        self.assert_aborted(self.build(), "target")
+
+    def test_cargo_lock_symlink(self):
+        (self.repo / "tools/docs-site-gen/Cargo.lock").symlink_to(self.outside / "keep.txt")
+        self.assert_aborted(self.build(), "Cargo.lock")
+
+    def test_third_party_licenses_symlink_file_and_dir(self):
+        link = self.repo / "THIRD-PARTY-LICENSES"
+        link.symlink_to(self.outside / "keep.txt")
+        self.assert_aborted(self.build("--write-third-party"), "THIRD-PARTY-LICENSES")
+        link.unlink()
+        link.symlink_to(self.outside)
+        self.assert_aborted(self.build("--write-third-party"), "THIRD-PARTY-LICENSES")
+        link.unlink()
+        link.mkdir()
+        self.assert_aborted(self.build("--write-third-party"), "ディレクトリ")
+
+    def test_out_symlink_and_default_site_symlink_with_clean(self):
+        (self.repo / "_site").symlink_to(self.outside)
+        self.assert_aborted(self.build("--clean"), "シンボリックリンク")
+        self.assert_aborted(self.build(), "シンボリックリンク")
+        link = self.base / "outlink"
+        link.symlink_to(self.outside)
+        self.assert_aborted(self.build("--out", str(link)), "シンボリックリンク")
+
+    def test_out_inside_repo_via_symlinked_parent_escape(self):
+        (self.repo / "build").symlink_to(self.outside)
+        self.assert_aborted(self.build("--out", str(self.repo / "build" / "x")), "対象リポジトリの外")
+
+    def test_tools_dir_symlinked_outside(self):
+        real = self.base / "real-tools"
+        shutil.move(str(self.repo / "tools"), str(real))
+        (self.repo / "tools").symlink_to(real)
+        r = subprocess.run(["bash", str(self.repo / "tools/docs-site-gen/build-local.sh")],
+                           capture_output=True, text=True, cwd=self.repo)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("対象リポジトリの外", r.stderr)
+
+    def test_clean_only_removes_default_site_dir(self):
+        (self.repo / "_site").mkdir()
+        (self.repo / "_site" / "inner-link").symlink_to(self.outside)
+        # rm -r は dist 内の symlink を辿らず、リンク自体だけを消す。リンク先は無傷。
+        r = self.build("--clean", "--out", str(self.base / "elsewhere"))
+        self.assertEqual(r.returncode, 2)
+        self.assertTrue((self.repo / "_site").exists())
+        self.assertEqual(self.snap(), self.snapshot)
+
+    # ---- Python 側
+
+    def test_rebrand_refuses_dist_with_symlinks(self):
+        dist = self.base / "dist"
+        shutil.copytree(FIXTURE, dist)
+        (self.outside / "victim.html").write_text("untouched\n")
+        self.snapshot = self.snap()
+        brand = self.base / "b.toml"
+        brand.write_text(brand_toml(), encoding="utf-8")
+        (dist / "assets" / "favicon.svg").unlink()
+        (dist / "assets" / "favicon.svg").symlink_to(self.outside / "victim.html")
+        r = run("rebrand_site.py", "--dist", dist, "--brand", brand)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("symlink", r.stderr)
+        self.assertEqual(self.snap(), self.snapshot)
+        # ディレクトリ symlink（辿って中の HTML を書き換えない）
+        (dist / "assets" / "favicon.svg").unlink()
+        shutil.copy(FIXTURE / "assets/favicon.svg", dist / "assets/favicon.svg")
+        shutil.copy(FIXTURE / "index.html", self.outside / "index.html")
+        self.snapshot = self.snap()
+        (dist / "linked").symlink_to(self.outside)
+        r = run("rebrand_site.py", "--dist", dist, "--brand", brand)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.snap(), self.snapshot)
+        r = run("rebrand_site.py", "--dist", dist, "--brand", brand, "--verify-only")
+        self.assertEqual(r.returncode, 1)
+
+    def test_scaffold_gitignore_symlink_and_dangling(self):
+        repo2 = self.base / "repo2"
+        repo2.mkdir()
+        (repo2 / ".gitignore").symlink_to(self.base / "does-not-exist")  # 外を指すぶら下がりリンク
+        r = run("scaffold.py", "--target", repo2, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse((self.base / "does-not-exist").exists())
+
+    def test_resolves_inside_helper(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import _common
+        root = Path(os.path.realpath(self.repo))
+        (self.repo / "ln").symlink_to(self.outside)
+        self.assertTrue(_common.resolves_inside(root, self.repo / "new" / "deep" / "f"))
+        self.assertFalse(_common.resolves_inside(root, self.repo / "ln" / "f"))
+        self.assertFalse(_common.resolves_inside(root, self.repo / "ln" / "a" / "b"))
+        self.assertTrue(_common.resolves_inside(root, root))
 
 
 class CheckSiteTest(unittest.TestCase):
