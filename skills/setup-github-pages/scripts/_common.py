@@ -32,7 +32,11 @@ MAX_TEXT_LEN = 120
 PLACEHOLDER_RE = re.compile(r"__SGP_[A-Z0-9_]+__")
 
 # 表示順を偽装する双方向制御文字（Trojan Source）。ブランド表示・タイトルに混入させない。
-BIDI_RE = re.compile("[\u202a-\u202e\u2066-\u2069\u200e\u200f]")
+BIDI_RE = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+# C0・DEL・C1（NEL=\x85 を含む）と行・段落区切り（U+2028/2029）。行ベースの解釈が
+# 実装（Python / Rust / TOML 系パーサ）で食い違う文字を、表示値へ入れさせない。
+CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 REPOSITORY_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/(?P<repo>[A-Za-z0-9_.-]{1,100})$"
@@ -96,7 +100,10 @@ def parse_subset(text: str, allowed_headers: set[str]) -> list[Table]:
     if len(text.encode("utf-8")) > MAX_INPUT_BYTES:
         raise SubsetError("入力が 1 MiB 上限を超えている")
     tables: list[Table] = []
-    for no, raw in enumerate(text.splitlines(), start=1):
+    # str.splitlines() は \x0b \x0c \x1c-\x1e \x85 U+2028/2029 でも分割するが、生成器（Rust の
+    # str::lines）は \n のみで分割し末尾の \r を落とす。解釈を揃えるため \n 分割 + 末尾 \r 除去にする。
+    for no, raw in enumerate(text.split("\n"), start=1):
+        raw = raw[:-1] if raw.endswith("\r") else raw
         s = raw.strip()
         if not s or s.startswith("#"):
             continue
@@ -179,14 +186,13 @@ class BrandError(ValueError):
     pass
 
 
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _text(values: dict[str, str], key: str, *, required: bool) -> str:
     v = values.get(key, "")
     if required and not v.strip():
         raise BrandError(f"brand.toml: `{key}` は必須")
-    if _CONTROL_RE.search(v):
+    if CONTROL_RE.search(v):
         raise BrandError(f"brand.toml: `{key}` に制御文字を含められない")
     if len(v) > MAX_TEXT_LEN:
         raise BrandError(f"brand.toml: `{key}` は {MAX_TEXT_LEN} 文字以内")

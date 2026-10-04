@@ -186,6 +186,28 @@ class RebrandTest(unittest.TestCase):
         self.assertEqual(self.rebrand().returncode, 1)
 
 
+class SubsetParserTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import _common
+        self.c = _common
+
+    def test_splits_on_lf_only_and_accepts_crlf(self):
+        t = self.c.parse_subset('[site]\r\ntitle = "a"\r\nbase_path = "/b"\r\n', {"site"})
+        self.assertEqual(t[0].values, {"title": "a", "base_path": "/b"})
+
+    def test_unicode_line_separators_do_not_split_lines(self):
+        # Python の splitlines なら U+2028 / \x85 で分割され、Rust の lines() とは別解釈になる
+        for sep in ("\u2028", "\x85", "\x0b", "\x1c"):
+            with self.assertRaises(self.c.SubsetError, msg=repr(sep)):
+                self.c.parse_subset(f'[site]\ntitle = "a"{sep}base_path = "/b"\n', {"site"})
+
+    def test_line_numbers_follow_lf(self):
+        with self.assertRaises(self.c.SubsetError) as cm:
+            self.c.parse_subset('[site]\n\nbad line\n', {"site"})
+        self.assertIn("line 3", str(cm.exception))
+
+
 class CheckSiteTest(unittest.TestCase):
     NAV = """[site]
 title = "T"
@@ -315,7 +337,8 @@ class ScaffoldTest(unittest.TestCase):
 
     def test_placeholder_and_bidi_values_rejected(self):
         for kw in (["--tagline", "x __SGP_REPOSITORY__ y"], ["--title", "a __SGP_BASE_PATH__"],
-                   ["--tagline", "abc\u202edef"], ["--copyright", "\u2066x\u2069"], ["--tagline", "a\u200fb"]):
+                   ["--tagline", "abc\u202edef"], ["--tagline", "a\u061cb"], ["--tagline", "a\u0085b"],
+                   ["--tagline", "a\u2028b"], ["--tagline", "a\u2029b"], ["--tagline", "a\x9fb"], ["--copyright", "\u2066x\u2069"], ["--tagline", "a\u200fb"]):
             r = self.scaffold(*kw)
             self.assertEqual(r.returncode, 2, kw)
         self.assertFalse((self.tmp / "site").exists())

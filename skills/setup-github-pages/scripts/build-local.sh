@@ -128,6 +128,9 @@ fi
 
 if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
   step "THIRD-PARTY-LICENSES を生成"
+  # 途中失敗で欠けたファイルを残さないよう、一時ファイルへ書いてから mv（同一ディレクトリ内で原子的に置換）
+  TPL_TMP="$(mktemp "${ROOT}/.THIRD-PARTY-LICENSES.XXXXXX")"
+  trap 'rm -f -- "${TPL_TMP}"' EXIT   # 失敗時に一時ファイルを残さない（成功時は mv 済みで no-op）
   {
     printf '%s\n' \
       "This repository's documentation site is generated with the docs-site generator of" \
@@ -135,7 +138,9 @@ if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
       "which is licensed under MIT OR Apache-2.0. The MIT license text follows." \
       ""
     cat "${FF_DIR}/LICENSE-MIT"
-  } > "${ROOT}/THIRD-PARTY-LICENSES"
+  } > "${TPL_TMP}"
+  chmod 0644 "${TPL_TMP}"   # mktemp は 0600 で作るため、通常ファイルと同じ権限へ
+  mv -f -- "${TPL_TMP}" "${ROOT}/THIRD-PARTY-LICENSES"
 fi
 
 # ---- 事前検証
@@ -147,7 +152,7 @@ python3 "${SCRIPT_DIR}/check_site.py" --root "${ROOT}"
 # FF_REV を更新した上流が外部 crate を導入した場合にここで fail-closed になる。
 step "registry 依存が 0 件であることを検査"
 # cargo metadata の失敗を set -e で拾うため、プロセス置換ではなくコマンド置換で受ける。
-META="$(cargo metadata --format-version 1 --offline --manifest-path "${SCRIPT_DIR}/Cargo.toml")"
+META="$(cd "${SCRIPT_DIR}" && cargo metadata --format-version 1 --offline --manifest-path "${SCRIPT_DIR}/Cargo.toml")"
 printf '%s' "${META}" | python3 -c '
 import json, sys
 meta = json.load(sys.stdin)

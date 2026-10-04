@@ -28,7 +28,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
-    BIDI_RE, COLOR_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
+    BIDI_RE, COLOR_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
 )
 
 OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
@@ -61,7 +61,7 @@ def toml_escape(value: str) -> str:
 def validate_text(name: str, value: str, *, required: bool) -> str:
     if required and not value.strip():
         raise ValueError(f"--{name} は必須")
-    if re.search(r"[\x00-\x1f\x7f]", value):
+    if CONTROL_RE.search(value):
         raise ValueError(f"--{name} に制御文字を含められない")
     if len(value) > MAX_TEXT_LEN:
         raise ValueError(f"--{name} は {MAX_TEXT_LEN} 文字以内")

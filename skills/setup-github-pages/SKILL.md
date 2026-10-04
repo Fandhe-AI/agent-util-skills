@@ -176,7 +176,16 @@ esac
 5-a が表示した `build_type` / `source` を伝え、ブランチ配信から GitHub Actions 配信へ切り替えてよいかをユーザーに確認する。了承が得られるまで実行しない。
 
 ```bash
-REPO="owner/repo"   # 5-a と同じ値（check_repo を再度通す）
+REPO="owner/repo"   # 5-a と同じ値。別シェルで実行されても安全なよう、検証と権限確認をここでもやり直す
+check_repo() {
+  local owner="${1%%/*}" name="${1#*/}"
+  [[ "$1" == */* && "${name}" != */* ]] \
+    && [[ "${owner}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] \
+    && [[ "${name}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$ && "${name}" != *.git ]]
+}
+check_repo "${REPO}" || { echo "不正なリポジトリ指定: ${REPO}"; exit 1; }
+perm="$(gh repo view "${REPO}" --json viewerPermission --jq '.viewerPermission')"
+[[ "${perm}" == "ADMIN" ]] || { echo "管理者権限が無い（perm=${perm:-?}）。中止"; exit 1; }
 put="$(gh api -i -X PUT "repos/${REPO}/pages" -f build_type=workflow 2>/dev/null | awk 'NR==1{print $2}')"
 [[ "${put}" == "204" ]] || { echo "切り替えに失敗（HTTP ${put:-?}）。中止"; exit 1; }
 [[ "$(gh api "repos/${REPO}/pages" --jq '.build_type')" == "workflow" ]] || { echo "切り替え後も build_type が workflow でない。中止"; exit 1; }
@@ -290,7 +299,15 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | ブランド表示がハードコード（`[site]` で変えられるのは `title`（フッターのみ）と `base_path`） | `rebrand_site.py` + `brand.toml` | `[site]` にブランド名・リポジトリ URL・タグライン・著作権・lang・favicon 等のキーが追加されたら、`rebrand_site.py` と `brand.toml` を削除し `nav.toml` へ移す |
 | `cargo install --git` が submodule（`docs/spec` → private リポジトリ）で失敗する | 手動 shallow fetch + path 依存 | submodule の分離、または docs-site が crates.io などで配布されたらそちらへ切り替える |
 
-追跡 Issue: **未起票（起票後に URL を記入）**
+追跡 Issue: [https://github.com/Fandhe-AI/fandhe-frontend/issues/3713](https://github.com/Fandhe-AI/fandhe-frontend/issues/3713)（トラッキング）
+
+| Issue | 対象 |
+|-------|------|
+| [#3716](https://github.com/Fandhe-AI/fandhe-frontend/issues/3716) | registry 無効化 |
+| [#3717](https://github.com/Fandhe-AI/fandhe-frontend/issues/3717) | ショーケース注入 |
+| [#3718](https://github.com/Fandhe-AI/fandhe-frontend/issues/3718) | submodule |
+| [#3720](https://github.com/Fandhe-AI/fandhe-frontend/issues/3720) / [#3721](https://github.com/Fandhe-AI/fandhe-frontend/issues/3721) / [#3722](https://github.com/Fandhe-AI/fandhe-frontend/issues/3722) | ブランドキー |
+| [#3727](https://github.com/Fandhe-AI/fandhe-frontend/issues/3727) | 試行用リポジトリでの CI デプロイ確認 |
 
 対応状況の確認は、上記 Issue の状態と、上流の `crates/docs-site/src/{layout.rs,site_footer.rs,favicon.rs,nav.rs,page_sections.rs}` の変更を `FF_REV` 更新時に見比べて行う。
 
