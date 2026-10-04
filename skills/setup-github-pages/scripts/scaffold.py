@@ -10,11 +10,13 @@ SKILL.md の Step 2 から呼ばれ、スキル同梱の templates/ と scripts/
 
 # 契約
 
-- 既存ファイルは**上書きしない**（スキップして一覧に出す）。再実行しても利用者の編集を壊さない。
+- 既存ファイルの扱いは種別で分ける（FILES 参照）。スキル所有ファイルは内容一致ならスキップ・不一致なら競合で中止
+  （--update で上書き）、利用者編集ファイルは常に保持する。再実行しても利用者の編集を壊さない。
 - `.gitignore` へは未登録の行だけを追記する。
 - 配置先は `--target` 配下に限る（テンプレート側の相対パスにのみ依存し、入力値でパスを組み立てない）。
 
-終了コード: 0 成功 / 2 入力不正。
+終了コード: 0 成功 / 2 入力不正・書き込み先が不適 / 3 競合（スキル所有ファイルの内容不一致。--update で解消）/
+4 配置後の check_site 失敗（ファイルは配置済み。指摘箇所を直す）。
 """
 
 from __future__ import annotations
@@ -35,21 +37,30 @@ from _common import (  # noqa: E402
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 
-# (テンプレート相対パス, 配置先相対パス, 実行権限)
+# (テンプレート相対パス, 配置先相対パス, 実行権限, 種別)
+# 種別 OWNED: スキルが所有する機械的ファイル。内容はスキルの版と引数から一意に決まり、利用者が編集する前提では
+#   ない。既存の内容が生成予定と違えば「競合」とし、何も書かずに中止する（別用途の同名ファイルを黙って
+#   「配置済み」と扱うと、必要な構成が無いまま後続 Step へ進んでしまうため）。スキル更新時は --update で上書きする。
+# 種別 USER: 利用者が編集する前提のファイル。再実行時に必ず内容が食い違うため、既存なら「保持（利用者編集）」
+#   とし、書き換えない。内容の妥当性は check_site.py が検証する。
+OWNED, USER = "owned", "user"
 FILES = [
-    ("templates/docs-site-gen/Cargo.toml", "tools/docs-site-gen/Cargo.toml", False),
-    ("templates/docs-site-gen/src/main.rs", "tools/docs-site-gen/src/main.rs", False),
-    ("templates/docs-site-gen/FF_REV", "tools/docs-site-gen/FF_REV", False),
-    ("templates/brand.toml", "tools/docs-site-gen/brand.toml", False),
-    ("scripts/build-local.sh", "tools/docs-site-gen/build-local.sh", True),
-    ("scripts/rebrand_site.py", "tools/docs-site-gen/rebrand_site.py", False),
-    ("scripts/check_site.py", "tools/docs-site-gen/check_site.py", False),
-    ("scripts/_common.py", "tools/docs-site-gen/_common.py", False),
-    ("templates/pages.yml", ".github/workflows/pages.yml", False),
-    ("templates/nav.toml", "site/nav.toml", False),
-    ("templates/index.md", "site/index.md", False),
-    ("templates/rust-toolchain.toml", "rust-toolchain.toml", False),
+    ("templates/docs-site-gen/Cargo.toml", "tools/docs-site-gen/Cargo.toml", False, OWNED),
+    ("templates/docs-site-gen/src/main.rs", "tools/docs-site-gen/src/main.rs", False, OWNED),
+    ("templates/docs-site-gen/FF_REV", "tools/docs-site-gen/FF_REV", False, OWNED),
+    ("templates/brand.toml", "tools/docs-site-gen/brand.toml", False, USER),
+    ("scripts/build-local.sh", "tools/docs-site-gen/build-local.sh", True, OWNED),
+    ("scripts/rebrand_site.py", "tools/docs-site-gen/rebrand_site.py", False, OWNED),
+    ("scripts/check_site.py", "tools/docs-site-gen/check_site.py", False, OWNED),
+    ("scripts/_common.py", "tools/docs-site-gen/_common.py", False, OWNED),
+    ("templates/pages.yml", ".github/workflows/pages.yml", False, OWNED),
+    ("templates/nav.toml", "site/nav.toml", False, USER),
+    ("templates/index.md", "site/index.md", False, USER),
+    ("templates/rust-toolchain.toml", "rust-toolchain.toml", False, USER),
 ]
+
+# 終了コード: 0 成功 / 2 入力不正・書き込み先が不適 / 3 競合（OWNED の不一致）/ 4 配置後の check_site 失敗
+EXIT_CONFLICT, EXIT_CHECK_FAILED = 3, 4
 
 GITIGNORE_LINES = ["_ff/", "tools/docs-site-gen/target/", "tools/docs-site-gen/Cargo.lock", "_site/"]
 
@@ -93,6 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--version-badge", default="")
     ap.add_argument("--favicon-letter", default=None, help="既定: ブランド名の先頭英数字")
     ap.add_argument("--favicon-color", default="#2b6cb0")
+    ap.add_argument("--update", action="store_true",
+                    help="スキルが所有するファイル（workflow・wrapper・スクリプト・FF_REV）の不一致を上書きする。"
+                         "利用者編集ファイル（nav.toml・index.md・brand.toml・rust-toolchain.toml）は触らない")
     ap.add_argument("--year", default=None, help="著作権表記の年（既定: 現在の年）")
     args = ap.parse_args(argv)
 
@@ -154,20 +168,53 @@ def main(argv: list[str] | None = None) -> int:
         "__SGP_DEFAULT_BRANCH__": args.branch,
     }
 
+    def render(src_rel: str) -> str:
+        text = (SKILL_DIR / src_rel).read_text(encoding="utf-8")
+        # 1 パスの re.sub で置換する。key ごとに str.replace を重ねると、先に埋めた値が
+        # 後続の置換対象になり得る（値の中のプレースホルダーが再展開される）。
+        table = {"__SGP_SITE_TITLE__": title} if src_rel == "templates/index.md" else subs
+        return PLACEHOLDER_RE.sub(lambda m: table.get(m.group(0), m.group(0)), text)
+
+    # 全件を分類してから書く（部分書き込みなし）。
+    #   create    存在しない → 書く
+    #   same      存在し、生成予定の内容と一致 → 何もしない（冪等な再実行）
+    #   update    OWNED で不一致、かつ --update 指定 → 上書き
+    #   conflict  OWNED で不一致（--update なし）、または通常ファイルでない → 中止
+    #   keep      USER で既存 → 保持（利用者編集）
     root_real = Path(os.path.realpath(args.target))
-    plan: list[tuple[str, str, bool]] = []
-    skipped: list[str] = []
+    plan: list[tuple[str, str, bool, str]] = []   # 書くもの（create / update）
+    same: list[str] = []
+    keep: list[str] = []
+    conflicts: list[str] = []
     problems: list[str] = []
-    for src_rel, dst_rel, executable in FILES:
+    for src_rel, dst_rel, executable, kind in FILES:
         dst = args.target / dst_rel
-        if dst.exists() or dst.is_symlink():
-            # 既存（symlink を含む）は書かずにスキップする。symlink 先へは書かない
-            skipped.append(dst_rel)
+        text = render(src_rel)
+        if not (dst.exists() or dst.is_symlink()):
+            why = write_target_problem(root_real, dst)
+            if why:
+                problems.append(f"{dst_rel}（{why}）")
+            plan.append((dst_rel, text, executable, "create"))
             continue
-        why = write_target_problem(root_real, dst)
-        if why:
-            problems.append(f"{dst_rel}（{why}）")
-        plan.append((src_rel, dst_rel, executable))
+        if kind == USER:
+            keep.append(dst_rel)   # symlink でも書かない（リンク先へは決して書かない）
+            continue
+        if dst.is_symlink() or not dst.is_file():
+            conflicts.append(f"{dst_rel}（{'シンボリックリンク' if dst.is_symlink() else '通常ファイルではない'}）")
+            continue
+        try:
+            current = dst.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            current = None
+        if current == text:
+            same.append(dst_rel)
+        elif args.update:
+            why = write_target_problem(root_real, dst)
+            if why:
+                problems.append(f"{dst_rel}（{why}）")
+            plan.append((dst_rel, text, executable, "update"))
+        else:
+            conflicts.append(f"{dst_rel}（内容がスキルの生成予定と異なる）")
     gi = args.target / ".gitignore"
     why = write_target_problem(root_real, gi)
     if why:
@@ -177,20 +224,26 @@ def main(argv: list[str] | None = None) -> int:
         print("エラー: 書き込み先が不適（リンク先の内外を問わず symlink には書かない）: "
               + ", ".join(problems), file=sys.stderr)
         return 2
+    if conflicts:
+        print("エラー: スキルが所有するファイルが既存で、内容が生成予定と一致しない（競合）。何も書かずに中止する:",
+              file=sys.stderr)
+        for c in conflicts:
+            print(f"  - {c}", file=sys.stderr)
+        print("  対処: 別用途のファイルなら手動で統合する（スキルの templates/ と scripts/ の該当ファイルを参照）。"
+              "スキル更新後の差分を取り込むだけなら、同じ引数に --update を付けて再実行する"
+              "（上書きされるのは所有ファイルのみ。pages.yml の paths を手で足している場合は先に差分を控える）。",
+              file=sys.stderr)
+        return EXIT_CONFLICT
 
     created: list[str] = []
-    for src_rel, dst_rel, executable in plan:
+    updated: list[str] = []
+    for dst_rel, text, executable, action in plan:
         dst = args.target / dst_rel
-        text = (SKILL_DIR / src_rel).read_text(encoding="utf-8")
-        # 1 パスの re.sub で置換する。key ごとに str.replace を重ねると、先に埋めた値が
-        # 後続の置換対象になり得る（値の中のプレースホルダーが再展開される）。
-        table = {"__SGP_SITE_TITLE__": title} if src_rel == "templates/index.md" else subs
-        text = PLACEHOLDER_RE.sub(lambda m: table.get(m.group(0), m.group(0)), text)
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(text, encoding="utf-8")
         if executable:
             dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        created.append(dst_rel)
+        (created if action == "create" else updated).append(dst_rel)
 
     existing = gi.read_text(encoding="utf-8").splitlines() if gi.is_file() else []
     to_add = [line for line in GITIGNORE_LINES if line not in existing]
@@ -200,8 +253,29 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(prefix + "\n# docs サイト（setup-github-pages）\n" + "\n".join(to_add) + "\n")
 
     print("作成: " + (", ".join(created) or "なし"))
-    print("スキップ（既存のため未変更）: " + (", ".join(skipped) or "なし"))
+    print("更新（--update）: " + (", ".join(updated) or "なし"))
+    print("一致（変更なし）: " + (", ".join(same) or "なし"))
+    print("保持（利用者編集）: " + (", ".join(keep) or "なし"))
     print("追記した .gitignore 行: " + (", ".join(to_add) or "なし"))
+    if keep:
+        print("注: 保持したファイルの内容（brand.toml・nav.toml 等）は生成予定と一致する保証がない。"
+              "下の check_site で検証する（失敗したら該当ファイルを直す）。")
+
+    # 配置後の検証（利用者編集ファイルを含む構成全体が build の前提を満たすか）
+    import check_site
+    brand_path = args.target / "tools" / "docs-site-gen" / "brand.toml"
+    try:
+        errors, warnings = check_site.check(Path(os.path.realpath(args.target)), brand_path)
+    except ValueError as e:
+        errors, warnings = [str(e)], []
+    for w in warnings:
+        print(f"警告 {w}")
+    for e in errors:
+        print(f"NG {e}", file=sys.stderr)
+    if errors:
+        print("エラー: 配置後の検証（check_site）に失敗した。上の項目を直してから再実行する", file=sys.stderr)
+        return EXIT_CHECK_FAILED
+    print("check_site ok")
     return 0
 
 

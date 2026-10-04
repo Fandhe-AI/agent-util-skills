@@ -301,7 +301,7 @@ class ScaffoldSymlinkTest(unittest.TestCase):
         r = run("scaffold.py", "--target", target, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(keep.read_text(), "keep\n")
-        self.assertIn("site/index.md", r.stdout.split("スキップ")[1])
+        self.assertIn("site/index.md", r.stdout.split("保持（利用者編集）")[1])
 
     def test_write_target_problem_helper(self):
         sys.path.insert(0, str(SCRIPTS))
@@ -767,6 +767,117 @@ class WriteBoundaryTest(unittest.TestCase):
         self.assertFalse(_common.resolves_inside(root, self.repo / "ln" / "f"))
         self.assertFalse(_common.resolves_inside(root, self.repo / "ln" / "a" / "b"))
         self.assertTrue(_common.resolves_inside(root, root))
+
+class ScaffoldClassificationTest(unittest.TestCase):
+    """既存ファイルの 4 分類（作成・一致・競合・保持）と --update の回帰テスト。"""
+
+    ARGS = ("--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+    OWNED_REL = "tools/docs-site-gen/build-local.sh"
+
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.t, ignore_errors=True)
+
+    def sc(self, *extra, args=None):
+        return run("scaffold.py", "--target", self.t, *(args or self.ARGS), *extra)
+
+    def tree(self):
+        return {p.relative_to(self.t).as_posix(): (p.read_text() if p.is_file() else None)
+                for p in sorted(self.t.rglob("*")) if ".git" not in p.parts}
+
+    def test_second_run_is_idempotent_exit_0(self):
+        r1 = self.sc()
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        before = self.tree()
+        r2 = self.sc()
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(self.tree(), before)
+        out = r2.stdout
+        self.assertIn(self.OWNED_REL, out.split("一致（変更なし）:")[1].split("\n")[0])
+        self.assertIn("作成: なし", out)
+        self.assertIn("check_site ok", out)
+
+    def test_owned_file_mismatch_is_conflict_and_writes_nothing(self):
+        self.assertEqual(self.sc().returncode, 0)
+        (self.t / self.OWNED_REL).write_text("#!/bin/sh\necho unrelated\n")
+        (self.t / "tools/docs-site-gen/FF_REV").write_text("deadbeef\n")
+        (self.t / ".github/workflows/pages.yml").unlink()   # 作成されるはずのファイルも、競合時は作られない
+        before = self.tree()
+        r = self.sc()
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("競合", r.stderr)
+        self.assertIn(self.OWNED_REL, r.stderr)
+        self.assertIn("tools/docs-site-gen/FF_REV", r.stderr)
+        self.assertIn("--update", r.stderr)
+        self.assertEqual(self.tree(), before, "競合時に部分書き込みがあった")
+
+    def test_user_files_are_kept_and_reported(self):
+        self.assertEqual(self.sc().returncode, 0)
+        (self.t / "site/index.md").write_text("# my own\n")
+        (self.t / "site/nav.toml").write_text((self.t / "site/nav.toml").read_text() + "\n# edited\n")
+        (self.t / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.80"\n')
+        r = self.sc()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        kept = r.stdout.split("保持（利用者編集）:")[1].split("\n")[0]
+        for f in ("site/index.md", "site/nav.toml", "rust-toolchain.toml", "tools/docs-site-gen/brand.toml"):
+            self.assertIn(f, kept)
+        self.assertEqual((self.t / "site/index.md").read_text(), "# my own\n")
+        self.assertIn('channel = "1.80"', (self.t / "rust-toolchain.toml").read_text())
+        self.assertIn("check_site", r.stdout)
+
+    def test_kept_invalid_user_file_fails_post_check(self):
+        self.assertEqual(self.sc().returncode, 0)
+        nav = self.t / "site/nav.toml"
+        nav.write_text(nav.read_text() + '\n[[section.page]]\ntitle = "A"\nsource = "site/index.md"\npath = "/themes/x/"\n')
+        r = self.sc()
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertIn("予約パス", r.stderr)
+        self.assertIn("path = \"/themes/x/\"", nav.read_text())  # 利用者ファイルは書き換えない
+
+    def test_update_overwrites_owned_only(self):
+        self.assertEqual(self.sc().returncode, 0)
+        good_sh = (self.t / self.OWNED_REL).read_text()
+        (self.t / self.OWNED_REL).write_text("old script\n")
+        (self.t / ".github/workflows/pages.yml").write_text("name: stale\n")
+        (self.t / "site/index.md").write_text("# mine\n")
+        (self.t / "tools/docs-site-gen/brand.toml").write_text((self.t / "tools/docs-site-gen/brand.toml").read_text() + "# mine\n")
+        brand_before = (self.t / "tools/docs-site-gen/brand.toml").read_text()
+        r = self.sc("--update")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.t / self.OWNED_REL).read_text(), good_sh)
+        self.assertIn("branches:", (self.t / ".github/workflows/pages.yml").read_text())
+        self.assertEqual((self.t / "site/index.md").read_text(), "# mine\n")
+        self.assertEqual((self.t / "tools/docs-site-gen/brand.toml").read_text(), brand_before)
+        upd = r.stdout.split("更新（--update）:")[1].split("\n")[0]
+        self.assertIn(self.OWNED_REL, upd)
+        self.assertIn(".github/workflows/pages.yml", upd)
+        self.assertNotIn("site/index.md", upd)
+        self.assertTrue((self.t / self.OWNED_REL).stat().st_mode & 0o111)
+        self.assertEqual(self.sc().returncode, 0)  # 以後は冪等
+
+    def test_update_still_refuses_symlink_or_directory_destinations(self):
+        self.assertEqual(self.sc().returncode, 0)
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        victim = outside / "victim"
+        victim.write_text("keep\n")
+        pages = self.t / ".github/workflows/pages.yml"
+        pages.unlink()
+        pages.symlink_to(victim)
+        for extra in ((), ("--update",)):
+            r = self.sc(*extra)
+            self.assertNotEqual(r.returncode, 0, extra)
+            self.assertEqual(victim.read_text(), "keep\n")
+        pages.unlink()
+        pages.mkdir()
+        r = self.sc("--update")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_update_does_not_apply_other_args_to_user_files(self):
+        self.assertEqual(self.sc().returncode, 0)
+        r = self.sc("--update", args=("--owner", "acme", "--repo", "r", "--branch", "main", "--title", "Other"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('title = "T"', (self.t / "site/nav.toml").read_text())
 
 
 class CheckSiteTest(unittest.TestCase):

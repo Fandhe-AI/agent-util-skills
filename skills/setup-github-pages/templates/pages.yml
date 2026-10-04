@@ -11,6 +11,9 @@ name: pages
 # サードパーティ action はすべて commit SHA 固定（コメントに tag を併記）。例外は
 # Fandhe-AI/actions の reusable workflow で、組織の運用方針により @latest を使う。
 #
+# rust-toolchain.toml はビルド（wrapper の cargo build）の入力のため paths に含める。cache key へは
+# 含めない（toolchain が変われば rustc の commit-hash がキーに入るため、それで十分）。
+#
 # nav.toml の source に site/ 以外（docs/ や README.md 等）を指定する場合は、
 # 下の paths にその場所も追加する（追加しないとその更新で再デプロイされない）。
 
@@ -20,6 +23,7 @@ on:
     paths:
       - "site/**"
       - "tools/docs-site-gen/**"
+      - "rust-toolchain.toml"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 

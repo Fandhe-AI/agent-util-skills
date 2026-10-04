@@ -88,7 +88,27 @@ python3 "${SKILL_DIR}/scripts/scaffold.py" \
   --lang ja --favicon-letter "<英数字1文字>" --favicon-color "#2b6cb0"
 ```
 
-配置されるもの（既存ファイルは**上書きせずスキップ**して一覧に出す。再実行しても利用者の編集を壊さない。配置先の親ディレクトリが symlink で `--target` の外へ解決される場合は、1 件も書かずに中止する）:
+全配置先を先に分類してから書く（途中失敗による部分書き込みなし）。既存ファイルは種別で扱いを分ける。
+
+| 種別 | 対象 | 存在しない | 既存で内容一致 | 既存で内容不一致 |
+|------|------|-----------|---------------|-----------------|
+| スキル所有（機械的） | `tools/docs-site-gen/{Cargo.toml,src/main.rs,FF_REV,build-local.sh,rebrand_site.py,check_site.py,_common.py}`、`.github/workflows/pages.yml` | 作成 | 変更なし（冪等） | **競合**。何も書かず exit 3。`--update` で上書き |
+| 利用者編集 | `tools/docs-site-gen/brand.toml`、`site/{nav.toml,index.md}`、`rust-toolchain.toml` | 作成 | 保持 | **保持（利用者編集）**。書き換えない |
+
+出力は `作成` / `更新（--update）` / `一致（変更なし）` / `保持（利用者編集）` の 4 行で、続けて `.gitignore` の追記行（未登録行のみ追記: `_ff/` `tools/docs-site-gen/target/` `tools/docs-site-gen/Cargo.lock` `_site/`）を表示する。最後に配置後の検証（`check_site.py` 相当）を実行し、保持した利用者ファイルの内容（brand.toml の値・nav.toml の予約パス等）もここで検査される。
+
+終了コード:
+
+| 終了コード | 意味 | 対処 |
+|-----------|------|------|
+| 0 | 成功（配置後の check_site も通過） | Step 3 へ進む |
+| 2 | 入力不正、または書き込み先が不適（symlink・親が `--target` の外へ解決・`.gitignore` が通常ファイルでない等） | 指摘を直す。1 件も書かれていない |
+| 3 | 競合: スキル所有ファイルが既存で内容が生成予定と違う | 別用途の同名ファイルなら手動で統合する。スキル更新の取り込みなら同じ引数に `--update` を付けて再実行する（所有ファイルのみ上書き。symlink・ディレクトリの宛先は `--update` でも拒否）。`pages.yml` の `paths` を手で足している場合は上書き前に差分を控える |
+| 4 | 配置は完了したが check_site が失敗 | 表示された項目（利用者編集ファイルの不備）を直し、`check_site.py` で再確認する |
+
+**スキルを更新したあと**（`FF_REV` の更新を含む）は、初回と同じ引数に `--update` を付けて再実行し、所有ファイルを新しい版へそろえる。利用者編集ファイルは触られない。
+
+配置されるもの:
 
 | 配置先 | 役割 |
 |--------|------|
@@ -96,10 +116,10 @@ python3 "${SKILL_DIR}/scripts/scaffold.py" \
 | `tools/docs-site-gen/FF_REV` | 取得する fandhe-frontend の commit SHA（**唯一の定義元**） |
 | `tools/docs-site-gen/brand.toml` | ブランド表示の入力 |
 | `tools/docs-site-gen/{build-local.sh,rebrand_site.py,check_site.py,_common.py}` | ビルド入口・後処理・事前検証（4 ファイルは同じディレクトリに置く） |
-| `.github/workflows/pages.yml` | build → deploy の workflow |
+| `.github/workflows/pages.yml` | build → deploy の workflow（`paths` に `rust-toolchain.toml` を含む） |
 | `site/{nav.toml,index.md}` | 初期サイト |
 | `rust-toolchain.toml`（無い場合のみ） | `channel = "stable"` |
-| `.gitignore`（未登録行のみ追記） | `_ff/` `tools/docs-site-gen/target/` `tools/docs-site-gen/Cargo.lock` `_site/` |
+| `.gitignore`（未登録行のみ追記） | 上記の 4 行 |
 
 `Cargo.lock` を無視する理由: wrapper と上流の依存はすべて path 依存で crates.io の crate が 0 件のため、lock は `FF_REV` から決定的に導かれる。
 
@@ -273,6 +293,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | nav.toml の title に `fandhe-frontend` を入れて失敗する | 独立した語としての上流名は残存検査と区別できない。`check_site.py` が事前に拒否するので別の表記にする（`fandhe-frontend-docs` のような別の語の一部は可） |
 | `rebrand_site.py` が「一致数が 0（期待 1）」で失敗する | 上流 DOM が変わったか、二重実行。dist を作り直して再実行する。`FF_REV` 更新直後なら「FF_REV の更新手順」で置換対象を再確認する |
 | `build-local.sh` が「`_ff` に未コミットの変更または未追跡ファイルがある」で止まる | `_ff/` はキャッシュ専用。必要な変更は退避し、不要なら `_ff/` を手動で削除して再実行する（スクリプトは破棄しない） |
+| `scaffold.py` が「競合」で exit 3 になる | スキル所有ファイルが既存で内容不一致。Step 2 の終了コード表のとおり、別用途なら手動統合、更新の取り込みなら `--update` |
+| `scaffold.py` が exit 4（check_site 失敗） | 利用者編集ファイル（brand.toml・nav.toml）の不備。表示項目を直す |
 | `build-local.sh` が「シンボリックリンクのため、書き込み・削除をしない」「対象リポジトリの外へ解決される」で止まる | `_ff`・`target`・`Cargo.lock`・`THIRD-PARTY-LICENSES`・出力先のいずれかが symlink（または親が外を指す）。通常のファイル・ディレクトリに置き換える |
 | `build-local.sh` が「origin が期待する上流 URL と異なる」で止まる | `_ff/` が別のリポジトリになっている。不要なら手動で削除して再実行する（スクリプトは書き換えない） |
 | `build-local.sh` が「出力先が既に存在し空ではない」で止まる | `--clean` を付ける（既定の `_site/` のみ削除対象） |
@@ -288,7 +310,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 更新するときは次の順で行う。
 
 1. 上流の新しい commit を確認する（`gh api repos/Fandhe-AI/fandhe-frontend/commits/main --jq .sha`）。**固定値は 40 桁の commit SHA のみ**。ブランチ名・タグは使わない
-2. `FF_REV` を書き換える。このスキル内では `templates/docs-site-gen/FF_REV` と本節の「現在の固定値」を同時に更新する（`tests/rev-pin.test.mjs` が不一致を検出する）
+2. `FF_REV` を書き換える。このスキル内では `templates/docs-site-gen/FF_REV` と本節の「現在の固定値」を同時に更新する（`tests/rev-pin.test.mjs` が不一致を検出する）。すでに配置済みの対象リポジトリへは、初回と同じ引数に `--update` を付けた `scaffold.py` を再実行して `tools/docs-site-gen/FF_REV` ほか所有ファイルを更新する（`scaffold.py` を通さず手で `FF_REV` だけ書き換えた場合、次回の `scaffold.py` は競合として止まる）
 3. `bash tools/docs-site-gen/build-local.sh --clean` を実行する。「registry 依存が 0 件であることを検査」の工程（`cargo metadata` で `source` が null 以外のパッケージを数える）が失敗したら、上流が外部 crate を導入した合図なので、匿名・隔離ビルドの前提と供給網の固定方針を見直すまで更新しない。wrapper のコンパイルエラーは上流 API（`build_site_with` / `EMPTY_REGISTRY`）の変更を示す
 4. `rebrand_site.py` が「一致数が 0」で失敗したら、上流 DOM の変更を意味する。生成された HTML を読み、ヘッダー・フッターの該当要素を特定して `rebrand_site.py` のルールを直す。`brand.toml` に無い新しいハードコード表示が増えていないかも、`grep -o fandhe-frontend` と `Fandhe-AI` で確認する
 5. 帰属表記の件数を再確認する。`grep -o fandhe-frontend _site/index.html | wc -l` が 3（`Built with …` と LICENSE リンク 2 件）のままであること。増減していれば上流がフッターを変えている

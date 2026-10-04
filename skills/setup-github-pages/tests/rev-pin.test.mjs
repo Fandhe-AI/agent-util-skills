@@ -137,6 +137,8 @@ test('pages.yml の必須設定（runner-label・permissions・concurrency・art
   assert.match(y, /^permissions:\n\s+contents:\s*read$/m)
   assert.match(y, /pages:\s*write/)
   assert.match(y, /id-token:\s*write/)
+  assert.match(y, /^\s+- "rust-toolchain\.toml"$/m, 'rust-toolchain.toml はビルド入力のため paths に必要')
+  assert.match(y, /^\s+- "tools\/docs-site-gen\/\*\*"$/m)
   assert.match(y, /branches:\s*\["__SGP_DEFAULT_BRANCH__"\]/)
 })
 
