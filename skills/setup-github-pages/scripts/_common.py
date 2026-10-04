@@ -115,6 +115,23 @@ def resolves_inside(root_real: Path, path: Path) -> bool:
     return real == root_real or root_real in real.parents
 
 
+def write_target_problem(root_real: Path, path: Path) -> str | None:
+    """root 配下への書き込み先として不適なら理由、問題なければ None。
+
+    Python 側で「書く」前に必ず通す唯一のゲート。bash 側 guard_path と同じ不変条件
+    （実体が root 配下・末端が symlink でない）に加え、既存の宛先は通常ファイルに限る
+    （ディレクトリ・デバイス等へ書かない）。末端 symlink は、リンク先が root の内か外かを問わず拒否する
+    （リポジトリ内を指す `.gitignore -> .git/config` でも、追記が別の設定ファイルを壊すため）。
+    """
+    if path.is_symlink():
+        return "シンボリックリンク"
+    if not resolves_inside(root_real, path):
+        return "対象の外へ解決される（親ディレクトリが symlink の可能性）"
+    if os.path.lexists(path) and not path.is_file():
+        return "通常ファイルではない"
+    return None
+
+
 class SubsetError(ValueError):
     """TOML サブセットの構文違反。メッセージには行番号を含める。"""
 

@@ -30,7 +30,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, COLOR_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
-    has_upstream_word, is_upstream_repo, resolves_inside, valid_owner, valid_repo_name,
+    has_upstream_word, is_upstream_repo, write_target_problem, valid_owner, valid_repo_name,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -157,22 +157,25 @@ def main(argv: list[str] | None = None) -> int:
     root_real = Path(os.path.realpath(args.target))
     plan: list[tuple[str, str, bool]] = []
     skipped: list[str] = []
-    escapes: list[str] = []
+    problems: list[str] = []
     for src_rel, dst_rel, executable in FILES:
         dst = args.target / dst_rel
         if dst.exists() or dst.is_symlink():
+            # 既存（symlink を含む）は書かずにスキップする。symlink 先へは書かない
             skipped.append(dst_rel)
             continue
-        if not resolves_inside(root_real, dst):
-            escapes.append(dst_rel)
+        why = write_target_problem(root_real, dst)
+        if why:
+            problems.append(f"{dst_rel}（{why}）")
         plan.append((src_rel, dst_rel, executable))
     gi = args.target / ".gitignore"
-    if not resolves_inside(root_real, gi):
-        escapes.append(".gitignore")
-    if escapes:
-        # 部分書き込みを避けるため、1 件でも外れたら何も書かずに中止する
-        print("エラー: 配置先が --target の外へ解決される（親ディレクトリ等が symlink）: "
-              + ", ".join(escapes), file=sys.stderr)
+    why = write_target_problem(root_real, gi)
+    if why:
+        problems.append(f".gitignore（{why}）")
+    if problems:
+        # 部分書き込みを避けるため、1 件でも不適なら何も書かずに中止する
+        print("エラー: 書き込み先が不適（リンク先の内外を問わず symlink には書かない）: "
+              + ", ".join(problems), file=sys.stderr)
         return 2
 
     created: list[str] = []

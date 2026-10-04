@@ -269,6 +269,54 @@ class RepoNameTest(unittest.TestCase):
 
 
 class ScaffoldSymlinkTest(unittest.TestCase):
+    def test_gitignore_symlink_inside_repo_aborts_and_target_untouched(self):
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+        (target / ".git").mkdir()
+        cfg = target / ".git" / "config"
+        cfg.write_text("[core]\n")
+        (target / ".gitignore").symlink_to(cfg)  # リポジトリ内を指す symlink
+        r = run("scaffold.py", "--target", target, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(".gitignore", r.stderr)
+        self.assertEqual(cfg.read_text(), "[core]\n")
+        self.assertFalse((target / "tools").exists(), "部分書き込みが行われた")
+
+    def test_gitignore_directory_aborts(self):
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+        (target / ".gitignore").mkdir()
+        r = run("scaffold.py", "--target", target, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("通常ファイルではない", r.stderr)
+        self.assertFalse((target / "tools").exists())
+
+    def test_existing_symlinked_destination_is_skipped_not_written(self):
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+        (target / "site").mkdir()
+        keep = target / "keep.md"
+        keep.write_text("keep\n")
+        (target / "site" / "index.md").symlink_to(keep)  # 配置先がリポジトリ内を指す symlink
+        r = run("scaffold.py", "--target", target, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(keep.read_text(), "keep\n")
+        self.assertIn("site/index.md", r.stdout.split("スキップ")[1])
+
+    def test_write_target_problem_helper(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import _common
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        root = Path(os.path.realpath(d))
+        (d / "f").write_text("x")
+        (d / "ln").symlink_to(d / "f")
+        (d / "dir").mkdir()
+        self.assertIsNone(_common.write_target_problem(root, d / "f"))
+        self.assertIsNone(_common.write_target_problem(root, d / "new" / "x"))
+        self.assertIn("シンボリックリンク", _common.write_target_problem(root, d / "ln"))
+        self.assertIn("通常ファイルではない", _common.write_target_problem(root, d / "dir"))
+
     def setUp(self):
         self.base = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
@@ -291,7 +339,7 @@ class ScaffoldSymlinkTest(unittest.TestCase):
             (self.target / name).symlink_to(self.outside)
             r = self.scaffold()
             self.assertEqual(r.returncode, 2, name)
-            self.assertIn("--target の外", r.stderr)
+            self.assertIn("リンク先の内外を問わず", r.stderr)
             self.assert_nothing_written()
 
     def test_nested_symlink_in_missing_chain_detected(self):
@@ -609,9 +657,53 @@ class WriteBoundaryTest(unittest.TestCase):
         link.symlink_to(self.outside)
         self.assert_aborted(self.build("--out", str(link)), "シンボリックリンク")
 
-    def test_out_inside_repo_via_symlinked_parent_escape(self):
+    # --out の内外判定は正規化後のパスで行う（外は許可・末端 symlink のみ拒否、内は guard_path）。
+    # 実ビルドを避けるため、出力先を「非空ディレクトリ」にして、ガードを通過した場合は後段の
+    # 「出力先が既に存在し空ではない」（exit 1）で止まることを使い分けの目印にする。
+    def nonempty(self, path: Path):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "x").write_text("x")
+
+    def test_out_outside_via_dotdot_is_allowed_not_guarded(self):
+        self.nonempty(self.base / "dist")
+        r = subprocess.run(["bash", str(self.repo / "tools/docs-site-gen/build-local.sh"), "--out", "../dist"],
+                           capture_output=True, text=True, cwd=self.repo)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("出力先が既に存在し空ではない", r.stderr)
+        self.assertNotIn("対象リポジトリの外", r.stderr)
+
+    def test_out_inside_via_dotdot_is_treated_as_inside(self):
+        self.nonempty(self.repo / "_site2")
+        r = subprocess.run(["bash", str(self.repo / "tools/docs-site-gen/build-local.sh"), "--out", "sub/../_site2"],
+                           capture_output=True, text=True, cwd=self.repo)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("出力先が既に存在し空ではない", r.stderr)
+        # 内として扱うので、同じ指定の末端が symlink なら guard で拒否される（未作成の sub 経由でも検出）
+        shutil.rmtree(self.repo / "_site2")
+        (self.repo / "_site2").symlink_to(self.outside)
+        r = subprocess.run(["bash", str(self.repo / "tools/docs-site-gen/build-local.sh"), "--out", "sub/../_site2"],
+                           capture_output=True, text=True, cwd=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("シンボリックリンク", r.stderr)
+        self.assertEqual(self.snap(), self.snapshot)
+
+    def test_out_under_site_dir_still_rejected_after_normalization(self):
+        r = subprocess.run(["bash", str(self.repo / "tools/docs-site-gen/build-local.sh"), "--out", "site/../site/x"],
+                           capture_output=True, text=True, cwd=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("site/ 配下", r.stderr)
+
+    def test_out_symlinked_parent_escape_is_outside_so_only_leaf_checked(self):
         (self.repo / "build").symlink_to(self.outside)
-        self.assert_aborted(self.build("--out", str(self.repo / "build" / "x")), "対象リポジトリの外")
+        # 実体は外部（outside/x）。外部出力は許可される例外なので guard_path の「外へ解決」では止めない。
+        # 実ビルド（外部への書き込み）を避けるため、末端 x を symlink にして拒否されることだけ確認する。
+        shutil.rmtree(self.outside / "x", ignore_errors=True)
+        (self.outside / "x").symlink_to(self.base)
+        self.snapshot = self.snap()
+        r = self.build("--out", str(self.repo / "build" / "x"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("シンボリックリンク", r.stderr)
+        self.assertEqual(self.snap(), self.snapshot)
 
     def test_tools_dir_symlinked_outside(self):
         real = self.base / "real-tools"

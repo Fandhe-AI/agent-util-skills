@@ -64,6 +64,17 @@ esac
 # パスも許容する非 strict 動作）で正規化する。
 canon() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
+# 親ディレクトリだけを実体化し、末端の名前はそのまま残す。末端が symlink かの判定（-L）を
+# 正規化後のパスに対して正しく行うため（`sub/../x` のように途中が未作成でも `-L` が誤って偽にならない）。
+canon_leaf() {
+  python3 -c '
+import os, sys
+p = sys.argv[1].rstrip("/") or "/"
+b = os.path.basename(p)
+print(os.path.realpath(p) if b in ("", ".", "..") else os.path.join(os.path.realpath(os.path.dirname(p)), b))
+' "$1"
+}
+
 guard_path() {   # guard_path <path> <label>
   local p="$1" label="$2" real
   if [[ -L "${p}" ]]; then
@@ -81,6 +92,7 @@ guard_path() {   # guard_path <path> <label>
 # <<< guards
 
 ROOT_REAL="$(canon "${ROOT}")"
+OUT="$(canon_leaf "${OUT}")"
 OUT_REAL="$(canon "${OUT}")"
 DEFAULT_OUT_REAL="$(canon "${DEFAULT_OUT}")"
 
@@ -114,8 +126,10 @@ if [[ -L "${OUT}" ]]; then
   echo "エラー: 出力先 ${OUT} がシンボリックリンク" >&2
   exit 2
 fi
-case "${OUT}/" in
-  "${ROOT}/"*|"${ROOT_REAL}/"*) guard_path "${OUT}" "出力先" || exit 2 ;;
+# 内外の判定は正規化後（OUT_REAL）で行う。生パスで判定すると `--out ../dist` のように実際は外へ
+# 解決される指定を誤って「内」として扱い、外部出力を許す例外が効かなくなる。
+case "${OUT_REAL}/" in
+  "${ROOT_REAL}/"*) guard_path "${OUT}" "出力先" || exit 2 ;;
 esac
 if [[ "${CLEAN}" -eq 1 ]]; then
   # 削除してよいのは既定の出力先だけ（任意パスの再帰削除を許さない）

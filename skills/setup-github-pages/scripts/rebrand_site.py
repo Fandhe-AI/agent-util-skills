@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import RESIDUAL_RE, resolves_inside, UPSTREAM_BRAND, Brand, BrandError, load_brand  # noqa: E402
+from _common import RESIDUAL_RE, write_target_problem, UPSTREAM_BRAND, Brand, BrandError, load_brand  # noqa: E402
 
 UPSTREAM_REPO_URL = "https://github.com/Fandhe-AI/fandhe-frontend"
 ATTRIBUTION_TEXT = "Built with fandhe-frontend docs-site"
@@ -336,8 +336,9 @@ def main(argv: list[str] | None = None) -> int:
         if text != files[rel]:
             target = args.dist / rel
             # 書き込み先は dist の実体配下の通常ファイルに限る（find_symlinks 後の競合に備えた最終確認）
-            if target.is_symlink() or not resolves_inside(dist_real, target):
-                print(f"エラー: {rel} の書き込み先が dist の外へ解決される。中止", file=sys.stderr)
+            why = write_target_problem(dist_real, target)
+            if why:
+                print(f"エラー: {rel} の書き込み先が不適（{why}）。中止", file=sys.stderr)
                 return 1
             target.write_text(text, encoding="utf-8")
             changed += 1
