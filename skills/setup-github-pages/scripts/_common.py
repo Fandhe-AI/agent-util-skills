@@ -1,0 +1,258 @@
+"""setup-github-pages 共通部品: TOML サブセットのパーサと brand.toml の検証。
+
+# 役割・境界
+
+`rebrand_site.py`（生成 dist の後処理）と `check_site.py`（生成前の事前検証）が
+同じ解釈で `nav.toml` / `brand.toml` を読み、同じ入力検証を通すための共有モジュール。
+対象リポジトリの `tools/docs-site-gen/` へ 3 つの .py を一緒に配置する前提で、同じ
+ディレクトリからの `import _common` で読み込まれる。標準ライブラリのみに依存する。
+
+# なぜ tomllib を使わないか
+
+生成器（fandhe-frontend docs-site の nav.rs）は TOML の厳密なサブセット
+（`key = "文字列"` のみ。整数・bool・配列・inline table は不可）しか受理しない。
+tomllib は上位互換のため「tomllib では通るが生成器が落とす」入力を事前検知できない。
+事前検証の判定を生成器と揃えるため、nav.rs の文法を同じ制約で再実装している。
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# nav.rs の MAX_INPUT_BYTES と同値。
+MAX_INPUT_BYTES = 1024 * 1024
+
+# 生成物のブランド表示に使う文字列の上限。ヘッダー・フッターのレイアウトが崩れる長さを防ぐ。
+MAX_TEXT_LEN = 120
+
+# scaffold.py が書き込むプレースホルダー。他の記法と衝突しない固有接頭辞にして、
+# ユーザーの Markdown 本文に偶然現れる `__INIT__` 等を誤検出しないようにしている。
+PLACEHOLDER_RE = re.compile(r"__SGP_[A-Z0-9_]+__")
+
+# 表示順を偽装する双方向制御文字（Trojan Source）。ブランド表示・タイトルに混入させない。
+BIDI_RE = re.compile("[\u202a-\u202e\u2066-\u2069\u200e\u200f]")
+
+REPOSITORY_RE = re.compile(
+    r"^https://github\.com/(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/(?P<repo>[A-Za-z0-9_.-]{1,100})$"
+)
+LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{1,8})*$")
+COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+LETTER_RE = re.compile(r"^[A-Za-z0-9]$")
+FF_REV_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# 出力に上流ブランド名が残らないことを検査する語（大文字小文字を区別しない）。
+UPSTREAM_BRAND = "fandhe-frontend"
+
+
+class SubsetError(ValueError):
+    """TOML サブセットの構文違反。メッセージには行番号を含める。"""
+
+
+@dataclass
+class Table:
+    header: str
+    line: int
+    values: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_quoted(value_part: str, line: int) -> tuple[str, str]:
+    if not value_part.startswith('"'):
+        raise SubsetError(f"line {line}: 二重引用符の文字列のみ使用できる")
+    out: list[str] = []
+    i = 1
+    while i < len(value_part):
+        c = value_part[i]
+        if c == '"':
+            return "".join(out), value_part[i + 1 :]
+        if c == "\\":
+            i += 1
+            if i >= len(value_part):
+                raise SubsetError(f"line {line}: エスケープが途中で終わっている")
+            e = value_part[i]
+            mapping = {'"': '"', "\\": "\\", "n": "\n", "t": "\t"}
+            if e not in mapping:
+                raise SubsetError(f"line {line}: 未対応のエスケープ \\{e}")
+            out.append(mapping[e])
+        else:
+            out.append(c)
+        i += 1
+    raise SubsetError(f"line {line}: 文字列が閉じていない")
+
+
+def _check_trailing(rest: str, line: int) -> None:
+    rest = rest.lstrip()
+    if rest and not rest.startswith("#"):
+        raise SubsetError(f"line {line}: 末尾に余分な内容 `{rest}`")
+
+
+def parse_subset(text: str, allowed_headers: set[str]) -> list[Table]:
+    """TOML サブセットを `Table` のリスト（出現順）へ変換する。
+
+    `[a]` / `[[a.b]]` は同じく `Table(header="a" / "a.b")` として並べる。
+    ヘッダー名は `allowed_headers` に含まれるものだけを受理する（未知は SubsetError）。
+    """
+    if len(text.encode("utf-8")) > MAX_INPUT_BYTES:
+        raise SubsetError("入力が 1 MiB 上限を超えている")
+    tables: list[Table] = []
+    for no, raw in enumerate(text.splitlines(), start=1):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("[["):
+            end = s.find("]]")
+            if end < 0:
+                raise SubsetError(f"line {no}: `]]` が無い")
+            header = s[2:end].strip()
+            _check_trailing(s[end + 2 :], no)
+            if header not in allowed_headers:
+                raise SubsetError(f"line {no}: 未知のテーブル [[{header}]]")
+            tables.append(Table(header, no))
+            continue
+        if s.startswith("["):
+            end = s.find("]")
+            if end < 0:
+                raise SubsetError(f"line {no}: `]` が無い")
+            header = s[1:end].strip()
+            _check_trailing(s[end + 1 :], no)
+            if header not in allowed_headers:
+                raise SubsetError(f"line {no}: 未知のテーブル [{header}]")
+            tables.append(Table(header, no))
+            continue
+        eq = s.find("=")
+        if eq < 0:
+            raise SubsetError(f"line {no}: `key = \"value\"` の形式ではない")
+        key = s[:eq].strip()
+        if not key or not re.fullmatch(r"[A-Za-z0-9_]+", key):
+            raise SubsetError(f"line {no}: 不正なキー `{key}`")
+        if not tables:
+            raise SubsetError(f"line {no}: テーブルの外にキーがある")
+        value, rest = _parse_quoted(s[eq + 1 :].lstrip(), no)
+        _check_trailing(rest, no)
+        if key in tables[-1].values:
+            raise SubsetError(f"line {no}: キー `{key}` が重複している")
+        tables[-1].values[key] = value
+    return tables
+
+
+NAV_HEADERS = {
+    "site",
+    "section",
+    "section.page",
+    "section.group",
+    "section.group.page",
+    "menu",
+    "menu.item",
+}
+
+
+def parse_nav(text: str) -> list[Table]:
+    return parse_subset(text, NAV_HEADERS)
+
+
+# ---------------------------------------------------------------- brand.toml
+
+
+@dataclass
+class Brand:
+    brand: str
+    repository: str
+    owner: str
+    repo: str
+    tagline: str
+    copyright: str
+    lang: str
+    version_badge: str
+    favicon_letter: str
+    favicon_color: str
+
+    @property
+    def base_path(self) -> str:
+        """GitHub Pages の公開パス。`<owner>.github.io` リポジトリ（User/Org サイト）はルート配信。"""
+        if self.repo.lower() == f"{self.owner.lower()}.github.io":
+            return ""
+        return f"/{self.repo}"
+
+
+class BrandError(ValueError):
+    pass
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _text(values: dict[str, str], key: str, *, required: bool) -> str:
+    v = values.get(key, "")
+    if required and not v.strip():
+        raise BrandError(f"brand.toml: `{key}` は必須")
+    if _CONTROL_RE.search(v):
+        raise BrandError(f"brand.toml: `{key}` に制御文字を含められない")
+    if len(v) > MAX_TEXT_LEN:
+        raise BrandError(f"brand.toml: `{key}` は {MAX_TEXT_LEN} 文字以内")
+    if UPSTREAM_BRAND in v.lower():
+        # 後処理後の残存検査（出力に上流ブランド名が無いこと）と衝突するため入力段階で拒否する。
+        raise BrandError(f"brand.toml: `{key}` に `{UPSTREAM_BRAND}` を含められない")
+    if BIDI_RE.search(v):
+        raise BrandError(f"brand.toml: `{key}` に双方向制御文字を含められない")
+    if PLACEHOLDER_RE.search(v):
+        raise BrandError(f"brand.toml: `{key}` にプレースホルダー（__SGP_*__）が残っている")
+    return v
+
+
+def load_brand(path: Path) -> Brand:
+    try:
+        text = path.read_text(encoding="utf-8")
+        tables = parse_subset(text, {"brand"})
+    except (OSError, SubsetError, UnicodeDecodeError) as e:
+        raise BrandError(f"brand.toml を読めない: {e}") from e
+    if len(tables) != 1:
+        raise BrandError("brand.toml: [brand] テーブルがちょうど 1 つ必要")
+    v = tables[0].values
+    allowed = {
+        "brand", "repository", "tagline", "copyright", "lang",
+        "version_badge", "favicon_letter", "favicon_color",
+    }
+    unknown = set(v) - allowed
+    if unknown:
+        raise BrandError(f"brand.toml: 未知のキー {sorted(unknown)}")
+
+    brand = _text(v, "brand", required=True)
+    tagline = _text(v, "tagline", required=False)
+    copyright_ = _text(v, "copyright", required=True)
+    version_badge = _text(v, "version_badge", required=False)
+
+    repository = v.get("repository", "")
+    m = REPOSITORY_RE.fullmatch(repository)
+    if not m:
+        raise BrandError(
+            "brand.toml: `repository` は https://github.com/<owner>/<repo> 形式のみ許可"
+        )
+    repo = m.group("repo")
+    if repo.endswith(".git") or repo in (".", "..") or repo.startswith("."):
+        raise BrandError("brand.toml: `repository` の repo 名が不正（.git 終端・先頭ドット不可）")
+    if UPSTREAM_BRAND in repository.lower():
+        raise BrandError(f"brand.toml: `repository` に `{UPSTREAM_BRAND}` を含められない")
+
+    lang = v.get("lang", "")
+    if not LANG_RE.fullmatch(lang):
+        raise BrandError("brand.toml: `lang` は BCP 47 風（例: ja / en / en-US）")
+    letter = v.get("favicon_letter", "")
+    if not LETTER_RE.fullmatch(letter):
+        raise BrandError("brand.toml: `favicon_letter` は英数字 1 文字")
+    color = v.get("favicon_color", "")
+    if not COLOR_RE.fullmatch(color):
+        raise BrandError("brand.toml: `favicon_color` は #RRGGBB 形式")
+
+    return Brand(
+        brand=brand,
+        repository=repository,
+        owner=m.group("owner"),
+        repo=repo,
+        tagline=tagline,
+        copyright=copyright_,
+        lang=lang,
+        version_badge=version_badge,
+        favicon_letter=letter,
+        favicon_color=color,
+    )
