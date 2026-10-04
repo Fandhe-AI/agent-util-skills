@@ -38,9 +38,27 @@ BIDI_RE = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 # 実装（Python / Rust / TOML 系パーサ）で食い違う文字を、表示値へ入れさせない。
 CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
-REPOSITORY_RE = re.compile(
-    r"^https://github\.com/(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/(?P<repo>[A-Za-z0-9_.-]{1,100})$"
-)
+# GitHub の命名規則を 1 箇所で定義する（scaffold.py・check_repo（SKILL.md）・brand.toml 検証が共有）。
+# owner: 英数字とハイフン、先頭・末尾ハイフン不可、連続ハイフン不可、39 文字以内。
+# repo: 英数字・`-`・`_`・`.`、100 文字以内。`.` / `..` 単独と `.git` 終端は不可
+# （`_example` `.github` `a..b` は有効な名前）。
+OWNER_RE = re.compile(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
+REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+def valid_owner(owner: str) -> bool:
+    return len(owner) <= 39 and OWNER_RE.fullmatch(owner) is not None
+
+
+def valid_repo_name(name: str) -> bool:
+    return (
+        REPO_NAME_RE.fullmatch(name) is not None
+        and name not in (".", "..")
+        and not name.endswith(".git")
+    )
+
+
+REPOSITORY_RE = re.compile(r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)$")
 LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{1,8})*$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 LETTER_RE = re.compile(r"^[A-Za-z0-9]$")
@@ -230,13 +248,12 @@ def load_brand(path: Path) -> Brand:
 
     repository = v.get("repository", "")
     m = REPOSITORY_RE.fullmatch(repository)
-    if not m:
+    if not m or not valid_owner(m.group("owner")) or not valid_repo_name(m.group("repo")):
         raise BrandError(
             "brand.toml: `repository` は https://github.com/<owner>/<repo> 形式のみ許可"
+            "（GitHub の命名規則。`.` `..` 単独・.git 終端は不可）"
         )
     repo = m.group("repo")
-    if repo.endswith(".git") or repo in (".", "..") or repo.startswith("."):
-        raise BrandError("brand.toml: `repository` の repo 名が不正（.git 終端・先頭ドット不可）")
     if UPSTREAM_BRAND in repository.lower():
         raise BrandError(f"brand.toml: `repository` に `{UPSTREAM_BRAND}` を含められない")
 

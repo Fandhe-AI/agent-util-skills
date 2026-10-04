@@ -59,11 +59,13 @@ user-invocable: true
 
 ```bash
 REPO="owner/repo"   # 「最初にユーザーへ確認すること」で確認した値
-check_repo() {   # scaffold.py の OWNER_RE / REPO_RE と同じ規則（`.` `..` 単独や .git 終端も拒否）
+# GitHub の命名規則（owner: 英数字とハイフン・先頭末尾と連続ハイフン不可、repo: 英数字 - _ .・`.` `..` 単独と .git 終端は不可）。
+# 定義の正は scripts/_common.py の valid_owner / valid_repo_name で、tests が本関数との一致を検証する。
+check_repo() {
   local owner="${1%%/*}" name="${1#*/}"
-  [[ "$1" == */* && "${name}" != */* ]] \
-    && [[ "${owner}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] \
-    && [[ "${name}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$ && "${name}" != *.git ]]
+  [[ "$1" == */* && "${name}" != */* && "${#owner}" -le 39 && "${#name}" -le 100 ]] \
+    && [[ "${owner}" =~ ^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$ ]] \
+    && [[ "${name}" =~ ^[A-Za-z0-9_.-]+$ && "${name}" != "." && "${name}" != ".." && "${name}" != *.git ]]
 }
 check_repo "${REPO}" || { echo "不正なリポジトリ指定: ${REPO}"; exit 1; }
 
@@ -86,7 +88,7 @@ python3 "${SKILL_DIR}/scripts/scaffold.py" \
   --lang ja --favicon-letter "<英数字1文字>" --favicon-color "#2b6cb0"
 ```
 
-配置されるもの（既存ファイルは**上書きせずスキップ**して一覧に出す。再実行しても利用者の編集を壊さない）:
+配置されるもの（既存ファイルは**上書きせずスキップ**して一覧に出す。再実行しても利用者の編集を壊さない。配置先の親ディレクトリが symlink で `--target` の外へ解決される場合は、1 件も書かずに中止する）:
 
 | 配置先 | 役割 |
 |--------|------|
@@ -122,7 +124,7 @@ bash tools/docs-site-gen/build-local.sh --write-third-party
 `build-local.sh` は CI と同じ入口で、次を順に行う（失敗した工程は stderr の `==> ` 行で分かる）。
 
 1. `FF_REV` を `^[0-9a-f]{40}$` で検証
-2. fandhe-frontend を `_ff/` へ匿名 shallow fetch（submodule は取らない）
+2. fandhe-frontend を `_ff/` へ匿名 shallow fetch（submodule は取らない）。`_ff/` は生成器のキャッシュ専用で、未コミット変更・未追跡ファイルがある、または git 作業ツリーでない既存ディレクトリの場合は**破棄せず中止**する（退避または手動削除してから再実行）
 3. `--write-third-party` 指定時: `_ff/LICENSE-MIT` から `THIRD-PARTY-LICENSES` を生成
 4. `check_site.py`（予約パス・base_path 整合・予約アセット・プレースホルダー残存）
 5. wrapper を `cargo build --release`、サイトを `_site/` へ生成（リンク検査は fail-closed）
@@ -142,9 +144,9 @@ Pages の Source を「GitHub Actions」（`build_type=workflow`）にする。�
 REPO="owner/repo"   # Step 1 と同じ値
 check_repo() {
   local owner="${1%%/*}" name="${1#*/}"
-  [[ "$1" == */* && "${name}" != */* ]] \
-    && [[ "${owner}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] \
-    && [[ "${name}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$ && "${name}" != *.git ]]
+  [[ "$1" == */* && "${name}" != */* && "${#owner}" -le 39 && "${#name}" -le 100 ]] \
+    && [[ "${owner}" =~ ^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$ ]] \
+    && [[ "${name}" =~ ^[A-Za-z0-9_.-]+$ && "${name}" != "." && "${name}" != ".." && "${name}" != *.git ]]
 }
 check_repo "${REPO}" || { echo "不正なリポジトリ指定: ${REPO}"; exit 1; }
 status_of() { awk 'NR==1{print $2}'; }   # `gh api -i` の 1 行目（HTTP/x NNN）から status を取る
@@ -179,9 +181,9 @@ esac
 REPO="owner/repo"   # 5-a と同じ値。別シェルで実行されても安全なよう、検証と権限確認をここでもやり直す
 check_repo() {
   local owner="${1%%/*}" name="${1#*/}"
-  [[ "$1" == */* && "${name}" != */* ]] \
-    && [[ "${owner}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] \
-    && [[ "${name}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$ && "${name}" != *.git ]]
+  [[ "$1" == */* && "${name}" != */* && "${#owner}" -le 39 && "${#name}" -le 100 ]] \
+    && [[ "${owner}" =~ ^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$ ]] \
+    && [[ "${name}" =~ ^[A-Za-z0-9_.-]+$ && "${name}" != "." && "${name}" != ".." && "${name}" != *.git ]]
 }
 check_repo "${REPO}" || { echo "不正なリポジトリ指定: ${REPO}"; exit 1; }
 perm="$(gh repo view "${REPO}" --json viewerPermission --jq '.viewerPermission')"
@@ -269,6 +271,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | 画像が表示されない | 上流は画像非対応（`![a](x)` は `!` とリンクになる）。表・コードブロックで代替する |
 | nav.toml の title に `fandhe-frontend` を入れて失敗する | ヘッダー等に出る title は残存検査と衝突する。`check_site.py` が事前に拒否するので別の表記にする |
 | `rebrand_site.py` が「一致数が 0（期待 1）」で失敗する | 上流 DOM が変わったか、二重実行。dist を作り直して再実行する。`FF_REV` 更新直後なら「FF_REV の更新手順」で置換対象を再確認する |
+| `build-local.sh` が「`_ff` に未コミットの変更または未追跡ファイルがある」で止まる | `_ff/` はキャッシュ専用。必要な変更は退避し、不要なら `_ff/` を手動で削除して再実行する（スクリプトは破棄しない） |
 | `build-local.sh` が「出力先が既に存在し空ではない」で止まる | `--clean` を付ける（既定の `_site/` のみ削除対象） |
 | build は成功するが deploy だけ失敗する | Pages の Source が「GitHub Actions」でない。Step 5 を実行する |
 | `${{ }}` を `run:` に書き足してしまう | env 経由で渡す（式の直書きはインジェクション経路になる） |

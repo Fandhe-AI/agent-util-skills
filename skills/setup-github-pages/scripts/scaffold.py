@@ -20,6 +20,7 @@ SKILL.md の Step 2 から呼ばれ、スキル同梱の templates/ と scripts/
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import stat
 import sys
@@ -29,10 +30,9 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, COLOR_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
+    valid_owner, valid_repo_name,
 )
 
-OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
-REPO_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 
 # (テンプレート相対パス, 配置先相対パス, 実行権限)
@@ -75,6 +75,22 @@ def validate_text(name: str, value: str, *, required: bool) -> str:
     return value
 
 
+def resolves_inside(root_real: Path, path: Path) -> bool:
+    """`path`（未作成でもよい）を symlink 解決した実体が root_real の配下に収まるか。
+
+    未作成の末端は、存在する最も近い祖先を realpath してから残りの名前を連結して求める。
+    祖先の途中（tools/ や .github/ 等）が --target の外を指す symlink だと、mkdir や write が
+    target 外へ到達するため、書き込みの前にここで全件検証する。
+    """
+    probe = path
+    rest: list[str] = []
+    while not os.path.lexists(probe):
+        rest.append(probe.name)
+        probe = probe.parent
+    real = Path(os.path.realpath(probe)).joinpath(*reversed(rest))
+    return real == root_real or root_real in real.parents
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--target", required=True, type=Path, help="対象リポジトリのルート（既存ディレクトリ）")
@@ -95,9 +111,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.target.is_dir():
             raise ValueError("--target が既存ディレクトリではない")
-        if not OWNER_RE.fullmatch(args.owner):
+        if not valid_owner(args.owner):
             raise ValueError("--owner が GitHub の owner 名として不正")
-        if not REPO_RE.fullmatch(args.repo) or args.repo.endswith(".git"):
+        if not valid_repo_name(args.repo):
             raise ValueError("--repo が GitHub の repo 名として不正")
         if not BRANCH_RE.fullmatch(args.branch) or ".." in args.branch:
             raise ValueError("--branch が不正（英数字・. _ / - のみ）")
@@ -148,13 +164,30 @@ def main(argv: list[str] | None = None) -> int:
         "__SGP_DEFAULT_BRANCH__": args.branch,
     }
 
-    created: list[str] = []
+    root_real = Path(os.path.realpath(args.target))
+    plan: list[tuple[str, str, bool]] = []
     skipped: list[str] = []
+    escapes: list[str] = []
     for src_rel, dst_rel, executable in FILES:
         dst = args.target / dst_rel
         if dst.exists() or dst.is_symlink():
             skipped.append(dst_rel)
             continue
+        if not resolves_inside(root_real, dst):
+            escapes.append(dst_rel)
+        plan.append((src_rel, dst_rel, executable))
+    gi = args.target / ".gitignore"
+    if not resolves_inside(root_real, gi):
+        escapes.append(".gitignore")
+    if escapes:
+        # 部分書き込みを避けるため、1 件でも外れたら何も書かずに中止する
+        print("エラー: 配置先が --target の外へ解決される（親ディレクトリ等が symlink）: "
+              + ", ".join(escapes), file=sys.stderr)
+        return 2
+
+    created: list[str] = []
+    for src_rel, dst_rel, executable in plan:
+        dst = args.target / dst_rel
         text = (SKILL_DIR / src_rel).read_text(encoding="utf-8")
         # 1 パスの re.sub で置換する。key ごとに str.replace を重ねると、先に埋めた値が
         # 後続の置換対象になり得る（値の中のプレースホルダーが再展開される）。
@@ -166,7 +199,6 @@ def main(argv: list[str] | None = None) -> int:
             dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         created.append(dst_rel)
 
-    gi = args.target / ".gitignore"
     existing = gi.read_text(encoding="utf-8").splitlines() if gi.is_file() else []
     to_add = [line for line in GITIGNORE_LINES if line not in existing]
     if to_add:

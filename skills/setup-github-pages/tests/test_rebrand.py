@@ -4,6 +4,7 @@ fixtures/raw は生成器の実出力（rebrand 前）。手書き fixture で�
 実物を使う。`rebrand.test.mjs` から `node --test` 経由でも実行される。
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -206,6 +207,205 @@ class SubsetParserTest(unittest.TestCase):
         with self.assertRaises(self.c.SubsetError) as cm:
             self.c.parse_subset('[site]\n\nbad line\n', {"site"})
         self.assertIn("line 3", str(cm.exception))
+
+class RepoNameTest(unittest.TestCase):
+    """owner / repo の命名規則が _common.py に 1 箇所で定義され、全利用箇所と一致することを確認する。"""
+
+    CASES = [
+        ("acme", "_example", True), ("acme", ".github", True), ("acme", "a..b", True),
+        ("acme", "mini-repo", True), ("a", "r", True), ("a-b-c", "r", True), ("acme", "x" * 100, True),
+        ("acme", ".", False), ("acme", "..", False), ("acme", "r.git", False), ("acme", "", False),
+        ("acme", "a/b", False), ("acme", "a b", False), ("acme", "x" * 101, False),
+        ("-x", "r", False), ("x-", "r", False), ("a--b", "r", False), ("", "r", False),
+        ("a" * 40, "r", False), ("a_b", "r", False), ("a.b", "r", False),
+    ]
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import _common
+        self.c = _common
+
+    def test_common_validators(self):
+        for owner, repo, ok in self.CASES:
+            self.assertEqual(self.c.valid_owner(owner) and self.c.valid_repo_name(repo), ok, (owner, repo))
+
+    def test_scaffold_agrees_with_common(self):
+        for owner, repo, ok in self.CASES:
+            if not owner or not repo or "/" in repo or " " in repo:
+                continue  # 空・区切り文字は argparse / パス組み立ての前提外（common 側で拒否を確認済み）
+            tmp = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+            r = run("scaffold.py", "--target", tmp, "--owner", owner, "--repo", repo, "--branch", "main", "--title", "T")
+            self.assertEqual(r.returncode == 0, ok, (owner, repo, r.stderr))
+
+    def test_brand_toml_repository_agrees(self):
+        for owner, repo, ok in self.CASES:
+            if not owner or not repo or "/" in repo or " " in repo or '"' in repo:
+                continue
+            d = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+            (d / "b.toml").write_text(brand_toml(repository=f"https://github.com/{owner}/{repo}"), encoding="utf-8")
+            try:
+                self.c.load_brand(d / "b.toml")
+                got = True
+            except self.c.BrandError:
+                got = False
+            self.assertEqual(got, ok, (owner, repo))
+
+    def test_skill_md_check_repo_matches_common(self):
+        md = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        funcs = re.findall(r"(check_repo\(\) \{.*?\n\})", md, re.S)
+        self.assertGreaterEqual(len(funcs), 3, "SKILL.md に check_repo が 3 箇所（Step 1・5-a・5-b）無い")
+        self.assertEqual(len(set(funcs)), 1, "SKILL.md の check_repo 定義が箇所ごとに食い違っている")
+        for owner, repo, ok in self.CASES:
+            if not owner or not repo:
+                continue
+            r = subprocess.run(["bash", "-c", funcs[0] + '\ncheck_repo "$1"', "_", f"{owner}/{repo}"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode == 0, ok, (owner, repo, r.stderr))
+        for bad in ("acme", "acme/a/b", "/r", "acme/"):
+            r = subprocess.run(["bash", "-c", funcs[0] + '\ncheck_repo "$1"', "_", bad], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, bad)
+
+
+class ScaffoldSymlinkTest(unittest.TestCase):
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.target = self.base / "repo"
+        self.target.mkdir()
+        self.outside = self.base / "outside"
+        self.outside.mkdir()
+
+    def scaffold(self):
+        return run("scaffold.py", "--target", self.target, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+
+    def assert_nothing_written(self):
+        self.assertEqual(list(self.outside.iterdir()), [])
+        self.assertEqual([p.name for p in self.target.iterdir()], [p.name for p in self.target.iterdir() if p.is_symlink()])
+
+    def test_symlinked_parent_dir_outside_target_aborts_without_writing(self):
+        for name in ("tools", "site", ".github"):
+            for p in self.target.iterdir():
+                p.unlink()
+            (self.target / name).symlink_to(self.outside)
+            r = self.scaffold()
+            self.assertEqual(r.returncode, 2, name)
+            self.assertIn("--target の外", r.stderr)
+            self.assert_nothing_written()
+
+    def test_nested_symlink_in_missing_chain_detected(self):
+        (self.target / ".github").mkdir()
+        (self.target / ".github/workflows").symlink_to(self.outside)
+        self.assertEqual(self.scaffold().returncode, 2)
+        self.assertEqual(list(self.outside.iterdir()), [])
+        self.assertFalse((self.target / "tools").exists(), "全件検証前に一部を書いてはいけない")
+
+    def test_gitignore_symlink_outside_aborts(self):
+        (self.outside / "victim").write_text("keep\n")
+        (self.target / ".gitignore").symlink_to(self.outside / "victim")
+        self.assertEqual(self.scaffold().returncode, 2)
+        self.assertEqual((self.outside / "victim").read_text(), "keep\n")
+        self.assertFalse((self.target / "tools").exists())
+
+    def test_symlink_that_stays_inside_target_is_allowed(self):
+        (self.target / "real-tools").mkdir()
+        (self.target / "tools").symlink_to(self.target / "real-tools")
+        self.assertEqual(self.scaffold().returncode, 0)
+        self.assertTrue((self.target / "real-tools/docs-site-gen/FF_REV").is_file())
+
+    def test_target_itself_a_symlink_to_dir_is_fine(self):
+        link = self.base / "link"
+        link.symlink_to(self.target)
+        r = run("scaffold.py", "--target", link, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class FetchFfTest(unittest.TestCase):
+    """build-local.sh の fetch_ff（目印 `>>> fetch_ff` ～ `<<< fetch_ff` の区間）を一時 git リポで単体実行する。
+
+    `_ff` は生成器のキャッシュ専用だが、利用者が手で編集していた場合に変更を破棄しないこと
+    （P0 回帰）と、clean な場合だけ checkout で進むことを確認する。ネットワークは使わず、
+    FF_URL にローカルのリポジトリを渡す。
+    """
+
+    def git(self, cwd, *args):
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.src = self.base / "src"
+        self.src.mkdir()
+        self.git(self.src, "init", "-q", "-b", "main")
+        (self.src / "f.txt").write_text("one\n")
+        self.git(self.src, "add", ".")
+        self.git(self.src, "commit", "-q", "-m", "a")
+        self.rev_a = self.git(self.src, "rev-parse", "HEAD")
+        (self.src / "f.txt").write_text("two\n")
+        self.git(self.src, "commit", "-q", "-am", "b")
+        self.rev_b = self.git(self.src, "rev-parse", "HEAD")
+        sh = (SCRIPTS / "build-local.sh").read_text(encoding="utf-8")
+        body = re.search(r"# >>> fetch_ff.*?\n(.*?)# <<< fetch_ff", sh, re.S).group(1)
+        self.func = body
+        self.ff = self.base / "_ff"
+
+    def fetch(self, rev):
+        script = f'set -euo pipefail\nFF_DIR="$1"; FF_URL="$2"; FF_REV="$3"\n{self.func}\nfetch_ff'
+        return subprocess.run(["bash", "-c", script, "_", str(self.ff), f"file://{self.src}", rev],
+                              capture_output=True, text=True,
+                              env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"))
+
+    def test_fresh_fetch_and_clean_advance(self):
+        r = self.fetch(self.rev_a)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.ff / "f.txt").read_text(), "one\n")
+        r = self.fetch(self.rev_a)  # 一致 → 再利用
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("再利用", r.stderr)
+        r = self.fetch(self.rev_b)  # clean なら進められる
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.ff / "f.txt").read_text(), "two\n")
+
+    def test_uncommitted_change_aborts_and_is_preserved(self):
+        self.assertEqual(self.fetch(self.rev_a).returncode, 0)
+        (self.ff / "f.txt").write_text("my local edit\n")
+        r = self.fetch(self.rev_b)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("破棄しない", r.stderr)
+        self.assertEqual((self.ff / "f.txt").read_text(), "my local edit\n")
+        self.assertEqual(self.git(self.ff, "rev-parse", "HEAD"), self.rev_a)
+
+    def test_dirty_even_when_head_matches_aborts(self):
+        self.assertEqual(self.fetch(self.rev_a).returncode, 0)
+        (self.ff / "f.txt").write_text("edit\n")
+        r = self.fetch(self.rev_a)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual((self.ff / "f.txt").read_text(), "edit\n")
+
+    def test_untracked_file_aborts_and_is_preserved(self):
+        self.assertEqual(self.fetch(self.rev_a).returncode, 0)
+        (self.ff / "notes.txt").write_text("keep me\n")
+        r = self.fetch(self.rev_b)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual((self.ff / "notes.txt").read_text(), "keep me\n")
+
+    def test_non_git_nonempty_dir_aborts_and_is_preserved(self):
+        self.ff.mkdir()
+        (self.ff / "precious.txt").write_text("data\n")
+        r = self.fetch(self.rev_a)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("git 作業ツリーではない", r.stderr)
+        self.assertEqual((self.ff / "precious.txt").read_text(), "data\n")
+        self.assertFalse((self.ff / ".git").exists())
+
+    def test_script_has_no_force_checkout_or_clean(self):
+        code = "\n".join(l for l in self.func.split("\n") if not l.lstrip().startswith("#"))
+        self.assertNotRegex(code, r"checkout\s+(-q\s+)?-f|--force|git[^\n]* clean|reset --hard")
 
 
 class CheckSiteTest(unittest.TestCase):

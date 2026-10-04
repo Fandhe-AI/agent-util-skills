@@ -101,17 +101,33 @@ if [[ "${OUT_REAL}" == "${ROOT_REAL}" || "${ROOT_REAL}/" == "${OUT_REAL}/"* ]]; 
 fi
 
 # ---- 匿名 shallow fetch（submodule は取らない）
-step "fandhe-frontend ${FF_REV} を取得"
-if [[ -e "${FF_DIR}" && ! -d "${FF_DIR}/.git" && -n "$(ls -A "${FF_DIR}")" ]]; then
-  echo "エラー: ${FF_DIR} が git 作業ツリーではない（手動で退避してから再実行）" >&2
-  exit 1
-fi
-if [[ -d "${FF_DIR}/.git" ]] \
-  && [[ "$(git -C "${FF_DIR}" rev-parse HEAD 2>/dev/null || true)" == "${FF_REV}" ]] \
-  && [[ -z "$(git -C "${FF_DIR}" status --porcelain)" ]]; then
-  echo "  既存の _ff が FF_REV と一致するため再利用" >&2
-else
-  [[ -d "${FF_DIR}/.git" ]] || git init -q "${FF_DIR}"
+# >>> fetch_ff（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
+# _ff/ は生成器のキャッシュ専用ディレクトリで、利用者の作業物を置く場所ではない。それでも
+# 手で編集された場合に備え、未コミット変更・未追跡ファイルがあれば**破棄せず中止**する
+# （checkout -f / clean を使わない）。HEAD が FF_REV と違う clean な状態だけを checkout で進める。
+fetch_ff() {
+  if [[ -e "${FF_DIR}" && ! -d "${FF_DIR}/.git" && -n "$(ls -A "${FF_DIR}")" ]]; then
+    echo "エラー: ${FF_DIR} が git 作業ツリーではない（内容を確認して手動で退避してから再実行）" >&2
+    return 1
+  fi
+  if [[ -d "${FF_DIR}/.git" ]]; then
+    local dirty
+    if ! dirty="$(git -C "${FF_DIR}" status --porcelain)"; then
+      echo "エラー: ${FF_DIR} の git 状態を取得できない（破損の可能性。内容を確認して手動で退避してから再実行）" >&2
+      return 1
+    fi
+    if [[ -n "${dirty}" ]]; then
+      echo "エラー: ${FF_DIR} に未コミットの変更または未追跡ファイルがある。破棄しないため中止する。" >&2
+      echo "       必要な変更は退避し、不要なら手動で ${FF_DIR} を削除してから再実行する。" >&2
+      return 1
+    fi
+    if [[ "$(git -C "${FF_DIR}" rev-parse HEAD 2>/dev/null || true)" == "${FF_REV}" ]]; then
+      echo "  既存の _ff が FF_REV と一致するため再利用" >&2
+      return 0
+    fi
+  else
+    git init -q "${FF_DIR}"
+  fi
   if git -C "${FF_DIR}" remote get-url origin >/dev/null 2>&1; then
     git -C "${FF_DIR}" remote set-url origin "${FF_URL}"
   else
@@ -119,12 +135,15 @@ else
   fi
   # 認証プロンプトで止まらず失敗させる（CI・隔離環境での無限待機を避ける）
   GIT_TERMINAL_PROMPT=0 git -C "${FF_DIR}" fetch -q --depth 1 origin "${FF_REV}"
-  git -C "${FF_DIR}" checkout -q -f FETCH_HEAD
+  git -C "${FF_DIR}" checkout -q FETCH_HEAD
   if [[ "$(git -C "${FF_DIR}" rev-parse HEAD)" != "${FF_REV}" ]]; then
     echo "エラー: checkout 後の HEAD が FF_REV と一致しない" >&2
-    exit 1
+    return 1
   fi
-fi
+}
+# <<< fetch_ff
+step "fandhe-frontend ${FF_REV} を取得"
+fetch_ff || exit 1
 
 if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
   step "THIRD-PARTY-LICENSES を生成"
