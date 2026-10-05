@@ -508,32 +508,62 @@ def unexpected_buildable(target: Path, root_real: Path) -> list[str]:
     expected = {Path(dst).name for _, dst, _, _ in FILES if dst.startswith(_GEN_REL) and "/" not in dst[len(_GEN_REL):]}
     expected |= {Path(MANIFEST_REL).name, "src", "target", "Cargo.lock", "THIRD-PARTY-LICENSES"}
     found: list[str] = []
+
+    # この関数の判定はすべて「安全側の警告」を出すためのもの。実体を検証した結果が偽になることを理由に警告を
+    # 消してはいけない（cargo・python は symlink を辿る）。存在は内容を読まずに lstat 相当（lexists / is_symlink）で
+    # 判定し、symlink は「symlink」「対象の外を指す」とラベルだけ付けて警告する。リンク先の中身は読まない。
+    def label(entry: Path) -> str:
+        if entry.is_symlink():
+            return "（symlink" + ("" if resolves_inside(root_real, entry) else "、対象の外を指す") + "。中身は読まない）"
+        return ""
+
     gen = target / "tools" / "docs-site-gen"
-    if resolves_inside(root_real, gen) and gen.is_dir() and not gen.is_symlink():
-        try:
-            with os.scandir(gen) as it:   # 切り詰めずに全件走査する（ダミーで後ろの名前を隠せない）
-                found += [_GEN_REL + e.name for e in it if e.name not in expected]
-        except OSError:
-            pass
-    # 実行・読み込みに直結しやすい名前（Python・Rust のソース/バイトコード/拡張、ディレクトリ）を先に並べる。
+    if os.path.lexists(gen):
+        if gen.is_symlink() or not resolves_inside(root_real, gen):
+            found.append(_GEN_REL.rstrip("/") + label(gen) if gen.is_symlink() else _GEN_REL.rstrip("/") + "（親が対象の外へ解決される。中身は読まない）")
+        elif gen.is_dir():
+            try:
+                with os.scandir(gen) as it:   # 切り詰めずに全件走査する（ダミーで後ろの名前を隠せない）
+                    for e in it:
+                        if e.name not in expected:
+                            found.append(_GEN_REL + e.name + (label(gen / e.name) if e.is_symlink() else ""))
+                        elif e.is_symlink():   # 既知の名前でも symlink なら警告する（外を指し得る）
+                            found.append(_GEN_REL + e.name + label(gen / e.name))
+            except OSError:
+                pass
+    # 実行・読み込みに直結しやすい名前（Python・Rust のソース/バイトコード/拡張、ディレクトリ、symlink）を先に並べる。
     # 表示は件数で切るため、ダミーの大量のファイルの後ろに危険な名前が隠れないようにする。
     def risk(rel: str) -> tuple[int, str]:
-        n = rel[len(_GEN_REL):]
+        n = rel[len(_GEN_REL):].split("（")[0]
         risky = (re.search(r"\.(py|pyc|pyd|so|dylib|rs)$", n) is not None or n == "__pycache__"
-                 or (gen / n).is_symlink() or (gen / n).is_dir())
+                 or "symlink" in rel or (gen / n).is_dir())
         return (0 if risky else 1, n)
 
     found.sort(key=risk)
     for d in ("", "tools/", _GEN_REL):
-        if exists_inside(root_real, target / d / ".cargo") and (d + ".cargo") not in found:
-            found.append(d + ".cargo")
+        parent = target / d if d else target
+        if not resolves_inside(root_real, parent):
+            # 親ディレクトリが対象の外へ解決される（symlink）: その下の .cargo・rust-toolchain は確認できないので警告する
+            if os.path.lexists(parent):
+                found.append(f"{d or './'}（親が対象の外へ解決される。.cargo・rust-toolchain を確認できない）")
+            continue
+        cargo = parent / ".cargo"
+        if os.path.lexists(cargo) and (d + ".cargo") not in found:
+            found.append(d + ".cargo" + label(cargo))
         for name in ("rust-toolchain", "rust-toolchain.toml"):
-            f = target / d / name
+            f = parent / name
+            if not os.path.lexists(f):
+                continue
+            if f.is_symlink():
+                found.append(f"{d}{name}{label(f)}")   # 中身を読まずに警告する
+                continue
             try:
-                if regular_inside(root_real, f) and _TOOLCHAIN_PATH_RE.search(read_capped(f, 64 * 1024)):
+                if not f.is_file():
+                    found.append(f"{d}{name}（通常ファイルではない）")
+                elif _TOOLCHAIN_PATH_RE.search(read_capped(f, 64 * 1024)):
                     found.append(f"{d}{name}（path キーを持つ）")
             except (OSError, OverflowError):
-                pass
+                found.append(f"{d}{name}（読めない）")
     return found
 
 

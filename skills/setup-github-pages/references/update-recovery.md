@@ -30,7 +30,10 @@
 - **ハッシュ**: `git hash-object --no-filters`。選んだ理由: macOS と Linux で同じ結果になる（`sha256sum` と `shasum` の違いに依存しない）、`core.autocrlf`・属性のフィルタを通さないので設定で結果が変わらない、ファイルを書き込まない。symlink は辿らず（`-L` を先に判定）、通常ファイル以外はハッシュしない
 - **パス**: ルートからの相対パスに限り、`..`・絶対パス・末尾の `/`・`.git`（大文字小文字を区別しない）配下・先頭の `-` などを拒否する。祖先ディレクトリが symlink なら（記録時も復旧時も）触らない。すべてクォートして `--` の後に渡す
 - **HEAD での存在判定**: `git ls-tree HEAD -- <path>` の終了コードと出力で判定する。終了コード 0 で出力が空 = HEAD に無いと確定（削除してよい）、出力あり = HEAD に通常ファイルとして在る（復元する）、終了コード非 0・通常ファイル以外 = 判定不能（`ASK`）。`git ls-files --error-unmatch` は使わない（致命的エラー・index から外された場合も「未追跡」と誤判定し、HEAD にあるファイルを削除し得る）
-- **対象リポジトリの設定**: git は `-c core.fsmonitor=false -c core.hooksPath=/dev/null` を付けて実行する。さらに `restore`（`--dry-run` を含む）は、リポジトリのローカル設定に `filter.*.(smudge|clean|process)`・`core.fsmonitor`・`core.hooksPath`・`diff.*.(textconv|command)`・`include.path` / `includeIf.*.path` が 1 件でもあれば、何も戻さず `ASK-ALL` で止める（`git restore` は smudge フィルタを実行するため）。`record`・`guard`・`status` は `hash-object --no-filters` と `ls-tree` だけの読み取りなので止めない
+- **対象リポジトリの設定**: git は `-c core.fsmonitor=false -c core.hooksPath=/dev/null` を付けて実行する。次の 2 段で外部コマンドの実行を防ぐ。
+  - **ローカル設定の検査（`ASK-ALL`）**: `restore`（`--dry-run` を含む）は、リポジトリのローカル設定に `filter.*.(smudge|clean|process)`・`core.fsmonitor`・`core.hooksPath`・`diff.*.(textconv|command)`・`include.path` / `includeIf.*.path` が 1 件でもあれば、何も戻さず `ASK-ALL` で止める
+  - **パスごとの filter 属性の検査（`ASK`）**: 戻そうとするパスごとに `git check-attr filter -- <path>` を調べ、`unspecified` / `unset` 以外（フィルタ名・`set`）、判定不能（`check-attr` の失敗・想定外の出力形式）は、自動では戻さず `ASK` にする。filter の**定義**がグローバル・システム設定にあっても、対象リポジトリの `.gitattributes`（信頼しない）が `filter=<name>` を付ければ `git restore` は smudge / process フィルタを実行する（実際の git で確認済み）ため、定義のスコープにかかわらずパスごとに止める。`check-attr` は属性（`.gitattributes`・`info/attributes`・`core.attributesFile`）を読むだけで外部コマンドを起動しない。git-lfs などを使う利用者でも、filter 属性の付かないパスの復旧は止まらない
+  - 復元経路で他に外部コマンドを実行し得るものは無い: `required` は filter の定義がある場合だけ効く、フックは `git restore` では呼ばれない（念のため `hooksPath` も無効化）、`core.alternateRefsCommand`・`credential`・`sshCommand` はネットワーク系で復元の経路に無い、`diff.external`・`textconv`・`merge.*` は `diff` / `merge` の経路。`record`・`guard`・`status` は `hash-object --no-filters` と `ls-tree` だけの読み取りなので止めない
 
 ## 保証する範囲
 
@@ -55,7 +58,7 @@ bash "${SKILL_DIR}/scripts/update-snapshot.sh" restore "${SNAP}"            # �
 | `WOULD-RESTORE` / `WOULD-DELETE <path>`（`--dry-run`） | 戻す・消す予定 | 利用者に示す |
 | `RESTORED <path>` | 記録と一致し、HEAD に通常ファイルとして在ったので、HEAD へ復元した | 済み |
 | `DELETED <path>` | 記録と一致し、HEAD に無いと確定できたので、削除した | 済み |
-| `ASK <path> …` | 記録と一致しない・TAINT・消えた・symlink に変わった・祖先が symlink・HEAD での状態を判定できない・復元や削除に失敗した。**何もしていない** | 利用者に差分を示して個別に判断を仰ぐ（戻す・残す・手動で統合）。差分は下の `git diff`（外部 diff・textconv を使わず、行数と制御文字を絞る）や `scaffold.py --show-diff` で見せる。symlink・特殊ファイルは内容を読まない |
+| `ASK <path> …` | 記録と一致しない・TAINT・消えた・symlink に変わった・祖先が symlink・HEAD での状態を判定できない・filter 属性が指定されている（または判定できない）・復元や削除に失敗した。**何もしていない** | 利用者に差分を示して個別に判断を仰ぐ（戻す・残す・手動で統合）。差分は下の `git diff`（外部 diff・textconv を使わず、行数と制御文字を絞る）や `scaffold.py --show-diff` で見せる。symlink・特殊ファイルは内容を読まない |
 | `ASK-ALL …`（stderr） | `${SNAP}` が無い・空・読めない、HEAD が動いた（更新用ブランチでコミットした等）、HEAD を解決できない、ローカル設定に外部コマンドを実行し得るキーがある。**何も戻していない** | すべて利用者に確認する |
 
 差分の見せ方（`ASK` のパスごと）:

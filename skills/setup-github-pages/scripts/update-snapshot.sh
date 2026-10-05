@@ -26,6 +26,15 @@
 # -c core.hooksPath=/dev/null` を付けて実行する（対象リポジトリの設定で外部コマンドが走らないように）。さらに
 # `restore` は、リポジトリのローカル設定に filter（smudge/clean/process）・core.fsmonitor・core.hooksPath・
 # diff の textconv/command・include があれば、何も戻さず ASK-ALL で止める（git restore が smudge フィルタを実行するため）。
+# ローカル設定だけでは足りない: filter の定義がグローバル・システム設定にあっても、対象リポジトリの .gitattributes
+# （信頼しない）が `filter=<name>` を付ければ git restore は外部コマンドを実行する。そこで**戻そうとするパスごと**に
+# `git check-attr filter -- <path>` を調べ、filter 属性が指定されているパスは、定義がどのスコープにあるかにかかわらず
+# 自動では戻さず ASK にする（git-lfs などを使う利用者の、filter の付かないパスの復旧は止めない）。check-attr は
+# 属性を読むだけで外部コマンドを起動しない（core.attributesFile・info/attributes・.gitattributes をすべて見る）。
+# 失敗・出力の形式が想定と違うときも ASK（fail-closed）。git restore が復元経路で実行し得る外部コマンドは filter
+# （smudge / process。required は filter の定義がある場合だけ効く）と core.fsmonitor だけで、フックは restore では
+# 呼ばれず（念のため hooksPath も無効化）、core.alternateRefsCommand・credential・sshCommand 等はネットワーク系で
+# restore の経路に無い。
 # 「HEAD に在るか」は `git ls-tree HEAD -- <path>`（終了コード 0 で出力が空 = HEAD に無いと確定、出力あり = 在る、
 # 非 0 = 判定不能）で判定し、判定不能は触らない。パスの祖先に symlink があれば触らない。
 #
@@ -48,6 +57,16 @@ ALLOWED=""
 
 die() { echo "エラー: $*" >&2; exit 2; }
 
+# 出力に出す文字列の無害化。対象リポジトリ由来の文字列（.gitattributes の値・設定のキー名・git の出力など）は
+# 制御文字・ESC・bidi・不可視文字を含められるため、安全な文字種に一致するときだけ表示し、それ以外は値を出さない。
+# このスクリプトの出力は、検証済みのパス・固定の文言・この関数を通した値だけにする。
+SAFE_RE='^[A-Za-z0-9_./:@+-]{1,200}$'   # `${2:-…}` の中に `{1,200}` を書くと最初の `}` で展開が終わるため、変数に出す
+safe() {   # safe <値> [正規表現]
+  local re="${2:-${SAFE_RE}}"
+  if [[ "$1" =~ ${re} ]]; then printf '%s' "$1"; else printf '（表示しない）'; fi
+}
+safe_name() { safe "$1" '^[A-Za-z0-9_.-]{1,64}$'; }
+
 # 対象リポジトリの設定に左右されない git 実行（fsmonitor・フックを無効化）
 g() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 
@@ -57,7 +76,7 @@ require_root() {
   g rev-parse --git-dir >/dev/null 2>&1 || die "git リポジトリではない"
   top="$(g rev-parse --show-toplevel 2>/dev/null)" || die "作業ツリーのルートを取得できない"
   ROOT_REAL="$(pwd -P)"
-  [[ "${ROOT_REAL}" == "$(cd "${top}" && pwd -P)" ]] || die "リポジトリのルートで実行する（現在: ${ROOT_REAL}）"
+  [[ "${ROOT_REAL}" == "$(cd "${top}" && pwd -P)" ]] || die "リポジトリのルートで実行する（現在: $(safe "${ROOT_REAL}")）"
 }
 
 # 許可リスト: scaffold.py が唯一の定義元（所有ファイル・マニフェスト・.gitignore・THIRD-PARTY-LICENSES）
@@ -144,12 +163,12 @@ parse_snapshot() {
 # 記録先は作業ツリーの外の通常ファイルに限る
 check_snap_for_write() {
   local snap="$1" dir real
-  [[ ! -L "${snap}" ]] || die "SNAP がシンボリックリンク: ${snap}"
-  [[ ! -e "${snap}" || -f "${snap}" ]] || die "SNAP が通常ファイルでない: ${snap}"
+  [[ ! -L "${snap}" ]] || die "SNAP がシンボリックリンク: $(safe "${snap}")"
+  [[ ! -e "${snap}" || -f "${snap}" ]] || die "SNAP が通常ファイルでない: $(safe "${snap}")"
   dir="$(dirname "${snap}")"
-  real="$(cd "${dir}" 2>/dev/null && pwd -P)" || die "SNAP の置き場所を解決できない: ${dir}"
+  real="$(cd "${dir}" 2>/dev/null && pwd -P)" || die "SNAP の置き場所を解決できない: $(safe "${dir}")"
   if [[ "${real}" == "${ROOT_REAL}" || "${real}" == "${ROOT_REAL}"/* ]]; then
-    die "SNAP を対象リポジトリの中に置かない（作業ツリーを汚す）: ${snap}"
+    die "SNAP を対象リポジトリの中に置かない（作業ツリーを汚す）: $(safe "${snap}")"
   fi
 }
 
@@ -170,16 +189,16 @@ cmd_record() {
   check_snap_for_write "${snap}"
   ensure_head "${snap}"
   for p in "$@"; do
-    valid_path "${p}" || die "不正なパス: ${p}"
+    valid_path "${p}" || die "不正なパス: $(safe "${p}")"
     if ! is_allowed "${p}"; then
-      [[ "${strict}" == 1 ]] && die "許可リスト外のパス（所有ファイル・マニフェスト・.gitignore・THIRD-PARTY-LICENSES 以外は記録しない）: ${p}"
-      echo "記録しない（対象外）: ${p}" >&2
+      [[ "${strict}" == 1 ]] && die "許可リスト外のパス（所有ファイル・マニフェスト・.gitignore・THIRD-PARTY-LICENSES 以外は記録しない）: $(safe "${p}")"
+      echo "記録しない（対象外）: $(safe "${p}")" >&2
       continue
     fi
-    if ! ancestors_ok "${p}"; then echo "記録しない（祖先が symlink 等）: ${p}" >&2; continue; fi
+    if ! ancestors_ok "${p}"; then echo "記録しない（祖先が symlink 等）: $(safe "${p}")" >&2; continue; fi
     st="$(current_state "${p}")"
     if [[ ! "${st}" =~ ^[0-9a-f]{40,64}$ ]]; then
-      echo "記録しない（${st}）: ${p}" >&2
+      echo "記録しない（${st}）: $(safe "${p}")" >&2
       continue
     fi
     printf 'REC\t%s\t%s\n' "${st}" "${p}" >> "${snap}"
@@ -245,26 +264,53 @@ cmd_guard() {
 
 cmd_status() {
   local snap="$1" parsed h t p st
-  parsed="$(parse_snapshot "${snap}")" || { echo "スナップショットが無い・読めない: ${snap}"; return 3; }
+  parsed="$(parse_snapshot "${snap}")" || { echo "スナップショットが無い・読めない: $(safe "${snap}")"; return 3; }
   while IFS=$'\t' read -r h t p; do
     [[ "${h}" == REC && -n "${p}" ]] || continue
-    if printf '%s\n' "${parsed}" | grep -Fxq -- "$(printf 'TAINT\t%s' "${p}")"; then echo "taint ${p}"; continue; fi
+    if printf '%s\n' "${parsed}" | grep -Fxq -- "$(printf 'TAINT\t%s' "${p}")"; then echo "taint $(safe "${p}")"; continue; fi
     st="$(current_state "${p}")"
-    if [[ "${st}" == "${t}" ]]; then echo "match ${p}"
-    elif [[ "${st}" == MISSING ]]; then echo "missing ${p}"
-    elif [[ "${st}" == SYMLINK ]]; then echo "symlink ${p}"
-    elif [[ "${st}" == SPECIAL ]]; then echo "special ${p}"
-    else echo "changed ${p}"
+    if [[ "${st}" == "${t}" ]]; then echo "match $(safe "${p}")"
+    elif [[ "${st}" == MISSING ]]; then echo "missing $(safe "${p}")"
+    elif [[ "${st}" == SYMLINK ]]; then echo "symlink $(safe "${p}")"
+    elif [[ "${st}" == SPECIAL ]]; then echo "special $(safe "${p}")"
+    else echo "changed $(safe "${p}")"
     fi
   done <<< "${parsed}"
+}
+
+# パスの filter 属性: 0 = 指定なし（unspecified / unset）/ 1 = 指定あり（値は FILTER_ATTR）/ 2 = 判定不能
+# 出力は `<path>: filter: <value>`。パスは valid_path の文字種（コロン・空白を含まない）なので、先頭の完全一致で堅く解析する
+FILTER_ATTR=""
+attr_filter() {
+  local out rc prefix val
+  FILTER_ATTR=""
+  out="$(g check-attr filter -- "$1" 2>/dev/null)"; rc=$?
+  [[ ${rc} -eq 0 ]] || return 2
+  prefix="$1: filter: "
+  [[ "${out}" == "${prefix}"* && "${out}" != *$'\n'* ]] || return 2
+  val="${out#"${prefix}"}"
+  FILTER_ATTR="${val}"
+  case "${val}" in
+    unspecified|unset) return 0 ;;
+    "") return 2 ;;
+    *) return 1 ;;
+  esac
 }
 
 # リポジトリのローカル設定に、git restore で外部コマンドが走り得るキーがあるか（あれば 0）
 unsafe_local_config() {
   local out rc
   out="$(git config --local --get-regexp '^(filter\..*\.(smudge|clean|process)|core\.(fsmonitor|hookspath)|diff\..*\.(textconv|command)|include\.path|includeif\..*\.path)$' 2>/dev/null)"; rc=$?
+  # キー名（filter.<サブセクション名>.smudge の名前部分は対象リポジトリ由来で信頼できない）は、安全な文字種のときだけ
+  # 表示する。それ以外は「<セクション>.（名前は表示しない）」にする（セクション名は git が英数字とハイフンに制限する）
   case ${rc} in
-    0) printf '%s\n' "${out}" | cut -d' ' -f1 | sort -u | tr '\n' ' '; return 0 ;;
+    0)
+      printf '%s\n' "${out}" | cut -d' ' -f1 | sort -u | while IFS= read -r k; do
+        if [[ "${k}" =~ ^[A-Za-z0-9_.-]{1,100}$ ]]; then printf '%s ' "${k}"
+        elif [[ "${k%%.*}" =~ ^[A-Za-z0-9-]{1,32}$ ]]; then printf '%s.（名前は表示しない） ' "${k%%.*}"
+        else printf '（表示しない） '; fi
+      done
+      return 0 ;;
     1) return 1 ;;
     *) printf '(git config を取得できない)'; return 0 ;;
   esac
@@ -286,7 +332,7 @@ cmd_restore() {
   fi
   while IFS=$'\t' read -r kind h p; do
     [[ "${kind}" == REC && -n "${p}" ]] || continue
-    if ! usable_path "${p}"; then echo "ASK ${p} 許可リスト外・不正なパス"; asks=$((asks + 1)); continue; fi
+    if ! usable_path "${p}"; then echo "ASK $(safe "${p}") 許可リスト外・不正なパス"; asks=$((asks + 1)); continue; fi
     if printf '%s\n' "${parsed}" | grep -Fxq -- "$(printf 'TAINT\t%s' "${p}")"; then
       echo "ASK ${p} 記録の基準を信頼できない（記録の前に利用者が触った）。差分を示して判断を仰ぐ"; asks=$((asks + 1)); continue
     fi
@@ -308,6 +354,12 @@ cmd_restore() {
       *) echo "ASK ${p} HEAD での状態を判定できない（git のエラー・通常ファイルでない）"; asks=$((asks + 1)); continue ;;
     esac
     if [[ "${act}" == restore ]]; then
+      attr_filter "${p}"; he=$?
+      if [[ ${he} -ne 0 ]]; then
+        if [[ ${he} -eq 1 ]]; then echo "ASK ${p} filter 属性が指定されている（$(safe_name "${FILTER_ATTR}")）。復元で外部コマンドが動き得るため自動では戻さない"
+        else echo "ASK ${p} filter 属性を判定できない（git check-attr の失敗・想定外の出力）"; fi
+        asks=$((asks + 1)); continue
+      fi
       if [[ -n "${dry}" ]]; then echo "WOULD-RESTORE ${p}"
       elif g restore --source=HEAD --staged --worktree -- "${p}" 2>/dev/null; then echo "RESTORED ${p}"
       else echo "ASK ${p} git restore に失敗した"; asks=$((asks + 1)); fi

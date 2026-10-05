@@ -1998,7 +1998,7 @@ class ScaffoldRound2Test(unittest.TestCase):
                 self.assertIn(ref, heads, f"{f.relative_to(SKILL)} が存在しない Step {ref} を参照している")
 
 class ScaffoldRound3Test(unittest.TestCase):
-    """3 巡目の小修正（K1 許可リスト・K2 隔離起動・K3 マーカーの区切り・K6）の回帰テスト。"""
+    """3 巡目の小修正（K1 許可リスト・K2 隔離起動・K3 マーカーの区切り・K6・W2）の回帰テスト。"""
 
     ARGS = ScaffoldHardeningTest.ARGS
     PAGES = ScaffoldHardeningTest.PAGES
@@ -2086,6 +2086,51 @@ class ScaffoldRound3Test(unittest.TestCase):
                 self.fail(f"-I -B なしの python3 起動: {l.strip()}")
         for name in ("check_site.py", "rebrand_site.py", "scaffold.py", "_common.py"):
             self.assertNotIn("sys.path.insert(0", (SCRIPTS / name).read_text(encoding="utf-8"), name)
+
+    # ---- W2: 外を指す symlink でも想定外ファイルの警告は消えない
+
+    def test_w2_symlinked_cargo_and_toolchain_warn_without_reading_targets(self):
+        self.init()
+        sentinel = "OUTSIDE-CFG-SENTINEL-9d2"
+        (self.outside / "config.toml").write_text(f"[build]\n# {sentinel}\n")
+        (self.outside / "tc.toml").write_text(f'[toolchain]\npath = "{sentinel}"\n')
+        (self.outside / "cargo-dir").mkdir()
+        (self.outside / "cargo-dir/config.toml").write_text(f"# {sentinel}\n")
+        gen = self.t / "tools/docs-site-gen"
+        (self.t / ".cargo").symlink_to(self.outside / "cargo-dir")
+        (self.t / "tools/.cargo").symlink_to(self.outside / "cargo-dir")
+        (gen / ".cargo").symlink_to(self.outside / "cargo-dir")
+        (self.t / "rust-toolchain").symlink_to(self.outside / "tc.toml")        # 既存の rust-toolchain.toml とは別の名前
+        (gen / "rust-toolchain.toml").symlink_to(self.outside / "tc.toml")
+        (gen / "helper.py").symlink_to(self.outside / "config.toml")
+        r = self.sc("--json", args=())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        blob = r.stdout + r.stderr
+        self.assertNotIn(sentinel, blob, "外側のファイルの内容が出力に出た")
+        w = " ".join(json.loads(r.stdout)["warnings"])
+        for needle in (".cargo（symlink、対象の外を指す", "tools/.cargo（symlink", "tools/docs-site-gen/.cargo（symlink",
+                       "rust-toolchain（symlink、対象の外を指す", "tools/docs-site-gen/rust-toolchain.toml（symlink、対象の外を指す",
+                       "tools/docs-site-gen/helper.py（symlink"):
+            self.assertIn(needle, w, needle)
+
+    def test_w2_symlinked_known_name_and_parent_dirs_still_warn(self):
+        self.init()
+        sentinel = "OUTSIDE-CFG-SENTINEL-9d2"
+        (self.outside / "x").write_text(sentinel)
+        gen = self.t / "tools/docs-site-gen"
+        (gen / "Cargo.lock").symlink_to(self.outside / "x")   # 既知の名前でも symlink なら警告する
+        w = " ".join(json.loads(self.sc("--json", args=()).stdout)["warnings"])
+        self.assertIn("tools/docs-site-gen/Cargo.lock（symlink、対象の外を指す", w)
+        (gen / "Cargo.lock").unlink()
+        # 親ディレクトリ自体が外を指す: その下の .cargo・rust-toolchain を確認できないので警告する
+        (self.outside / "tools-real").mkdir()
+        shutil.move(str(self.t / "tools"), str(self.outside / "tools-real" / "tools"))
+        (self.t / "tools").symlink_to(self.outside / "tools-real" / "tools")
+        r = self.sc("--json")   # 全引数あり（新規構築と同じ入力）。親が外を指すので競合 / exit 2 で止まるが、警告も出る
+        self.assertNotIn(sentinel, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertIn(r.returncode, (2, 3))
+        self.assertIn("tools/docs-site-gen（親が対象の外へ解決される", " ".join(j["warnings"]))
 
     # ---- K3
 
@@ -2905,6 +2950,132 @@ class OutsideRootReadTest(unittest.TestCase):
         self.assertNotRegex(body, r"os\.open\(")
         self.assertNotRegex(body, r"\.read_text\(\)(?!\.strip)")  # SKILL_DIR 側のテンプレート読みを除き、直接の read_text は使わない
         self.assertIn("raise OutsideRootError", src)
+
+class UpdateSnapshotFilterAttrTest(unittest.TestCase):
+    """W1: グローバル・システム設定の filter でも、.gitattributes（対象リポジトリ内・信頼しない）が filter=<name> を
+    付けたパスは、restore が自動では戻さず ASK にする（番兵が作られない）。filter 属性の無いパスは従来どおり戻る。"""
+
+    SH = UpdateSnapshotTest.SH
+    ARGS = UpdateSnapshotTest.ARGS
+    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    PAGES = UpdateSnapshotTest.PAGES
+    MANIFEST = UpdateSnapshotTest.MANIFEST
+    BUILD_SH = UpdateSnapshotTest.BUILD_SH
+    RB = UpdateSnapshotTest.RB
+    TPL = UpdateSnapshotTest.TPL
+    setUp = UpdateSnapshotTest.setUp
+    git = UpdateSnapshotTest.git
+    sc = UpdateSnapshotTest.sc
+    sh = UpdateSnapshotTest.sh
+    skill_copy = UpdateSnapshotTest.skill_copy
+    baseline_and_u1 = UpdateSnapshotTest.baseline_and_u1
+    restore = UpdateSnapshotTest.restore
+
+    def use_global_filter(self, extra="", process=True):
+        self.sentinel = self.base / "GLOBAL-FILTER-RAN"
+        self.glob = self.base / "global-gitconfig"   # 利用者の実際のグローバル設定には触れない
+        proc = f"\tprocess = touch {self.sentinel}-p; cat\n" if process else ""
+        self.glob.write_text(f'[filter "evil"]\n\tsmudge = touch {self.sentinel}; cat\n{proc}' + extra)
+        self.env = dict(self.env, GIT_CONFIG_GLOBAL=str(self.glob))
+
+    def test_global_filter_with_gitattributes_is_asked_not_restored(self):
+        self.use_global_filter()
+        self.baseline_and_u1()
+        (self.t / ".gitattributes").write_text(f"{self.RB} filter=evil\n")   # 対象リポジトリ内の（信頼しない）属性
+        for mode in (("--dry-run",), ()):
+            r = self.sh("restore", self.snap, *mode)
+            self.assertEqual(r.returncode, 4, f"{mode}: {r.stdout}{r.stderr}")
+            self.assertIn(f"ASK {self.RB}", r.stdout)
+            self.assertIn("filter 属性が指定されている（evil）", r.stdout)
+            self.assertFalse(self.sentinel.exists(), f"{mode}: グローバルの smudge フィルタが実行された")
+            self.assertFalse(Path(str(self.sentinel) + "-p").exists(), f"{mode}: process フィルタが実行された")
+        self.assertIn("# v9", (self.t / self.RB).read_text(), "filter 属性のパスは戻さない")
+        # filter 属性の無いパスは、グローバルに filter 定義があっても従来どおり戻る
+        self.assertNotIn("// v9", (self.t / self.MAIN_RS).read_text())
+        self.assertFalse(self.sentinel.exists())
+
+    def test_dry_run_and_real_run_agree(self):
+        self.use_global_filter()
+        self.baseline_and_u1()
+        (self.t / ".gitattributes").write_text(f"{self.RB} filter=evil\n")
+        d = self.sh("restore", self.snap, "--dry-run").stdout
+        self.assertIn(f"WOULD-RESTORE {self.MAIN_RS}", d)
+        self.assertIn(f"ASK {self.RB}", d)
+        r = self.sh("restore", self.snap).stdout
+        self.assertIn(f"RESTORED {self.MAIN_RS}", r)
+        self.assertIn(f"ASK {self.RB}", r)
+
+    def test_attribute_from_global_attributesfile_is_covered(self):
+        attrs = self.base / "global-attrs"
+        attrs.write_text(f"{self.BUILD_SH} filter=evil\n")
+        self.use_global_filter(f'[core]\n\tattributesFile = {attrs}\n', process=False)
+        self.baseline_and_u1()
+        # build-local.sh は U1 で更新されないため、記録して現在の内容のまま戻せる状態にする
+        self.assertEqual(self.sh("record", self.snap, self.BUILD_SH).returncode, 0)
+        r = self.sh("restore", self.snap)
+        self.assertIn(f"ASK {self.BUILD_SH}", r.stdout)
+        self.assertFalse(self.sentinel.exists())
+
+    def test_unset_filter_attribute_is_allowed(self):
+        self.use_global_filter()
+        self.baseline_and_u1()
+        (self.t / ".gitattributes").write_text(f"{self.RB} -filter\n")   # unset = フィルタを使わない
+        r = self.sh("restore", self.snap)
+        self.assertIn(f"RESTORED {self.RB}", r.stdout)
+
+    def test_check_attr_failure_is_ask_fail_closed(self):
+        self.baseline_and_u1()
+        fake = self.base / "fakebin"
+        fake.mkdir()
+        real_git = shutil.which("git")
+        (fake / "git").write_text(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = "check-attr" ] && exit 1; done\nexec {real_git} "$@"\n')
+        (fake / "git").chmod(0o755)
+        self.env = dict(self.env, PATH=f"{fake}:{self.env['PATH']}")
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("filter 属性を判定できない", r.stdout)
+        self.assertIn("# v9", (self.t / self.RB).read_text(), "判定不能のパスを戻してはいけない")
+        # 想定外の出力形式も ASK
+        (fake / "git").write_text(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = "check-attr" ] && {{ echo "garbage"; exit 0; }}; done\nexec {real_git} "$@"\n')
+        r = self.sh("restore", self.snap)
+        self.assertIn("filter 属性を判定できない", r.stdout)
+
+
+    def test_x1_untrusted_attribute_value_and_config_keys_are_not_echoed_raw(self):
+        """X1: .gitattributes の filter 名・ローカル設定のキー名は対象リポジトリ由来。制御文字・ESC・bidi・不可視文字を出力に出さない。"""
+        self.use_global_filter()
+        self.baseline_and_u1()
+        evil = "ev\x1b]0;PWN\u202eil\u200b"
+        (self.t / ".gitattributes").write_text(f"{self.RB} filter={evil}\n", encoding="utf-8")
+        r = self.sh("restore", self.snap, "--dry-run")
+        self.assertIn(f"ASK {self.RB}", r.stdout)
+        self.assertIn("（表示しない）", r.stdout)
+        for ch in ("\x1b", "\u202e", "\u200b", "PWN"):
+            self.assertNotIn(ch, r.stdout + r.stderr, repr(ch))
+        # 安全な名前はそのまま表示する
+        (self.t / ".gitattributes").write_text(f"{self.RB} filter=my-filter_1.x\n")
+        self.assertIn("（my-filter_1.x）", self.sh("restore", self.snap, "--dry-run").stdout)
+        # ローカル設定のキー名（filter.<細工した名前>.smudge）
+        (self.t / ".gitattributes").unlink()
+        self.git("config", f"filter.{evil}.smudge", "cat")
+        for mode in ((), ("--dry-run",)):
+            r = self.sh("restore", self.snap, *mode)
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertIn("ASK-ALL", r.stderr)
+            self.assertIn("filter.（名前は表示しない）", r.stderr)
+            for ch in ("\x1b", "\u202e", "\u200b", "PWN"):
+                self.assertNotIn(ch, r.stdout + r.stderr, repr(ch))
+
+    def test_x1_script_output_only_validated_values(self):
+        sh = (SCRIPTS / "update-snapshot.sh").read_text(encoding="utf-8")
+        self.assertIn("safe_name \"${FILTER_ATTR}\"", sh)
+        self.assertNotIn("（${FILTER_ATTR}）", sh)
+        self.assertRegex(sh, r"safe\(\) \{")
+
+    def test_check_attr_runs_through_the_safe_wrapper(self):
+        sh = (SCRIPTS / "update-snapshot.sh").read_text(encoding="utf-8")
+        self.assertRegex(sh, r"out=\"\$\(g check-attr filter -- ")
+        self.assertIn("core.fsmonitor=false -c core.hooksPath=/dev/null", sh)
 
 
 class CheckSiteTest(unittest.TestCase):
