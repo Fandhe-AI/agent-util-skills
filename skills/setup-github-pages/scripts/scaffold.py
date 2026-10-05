@@ -858,6 +858,8 @@ def main(argv: list[str] | None = None) -> int:
             status, lines = build_diff(root_real, args.target / path, path, desired[path])
             diffs[path] = {"conflict_kind": kind, "reason": reason, "status": status, "lines": lines}
         summary["diffs"] = diffs
+        # 復旧手順（references/update-recovery.md）が「スキルが書いたままのファイル」を判定するのに使う
+        summary.update(same=same, kept=keep, missing=missing)
         summary["conflicts"] = [{"path": p, "kind": k, "reason": r} for p, k, r in conflicts]
         if not args.json:
             if not conflicts:

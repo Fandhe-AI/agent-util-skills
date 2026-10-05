@@ -1329,6 +1329,24 @@ class ScaffoldHardeningTest(unittest.TestCase):
         j = json.loads(self.sc("--show-diff", "--json", args=()).stdout)
         self.assertEqual(j["diffs"][self.MAIN_RS]["status"], "not_utf8")
 
+    def test_show_diff_lists_unchanged_owned_files_for_recovery(self):
+        """復旧手順は --show-diff の same（スキルが書いたまま）と conflicts（手が入った）で自動で戻す対象を決める。"""
+        self.init()
+        (self.t / self.MAIN_RS).write_text("// hand merge\n")
+        before = self.tree()
+        j = json.loads(self.sc("--show-diff", "--json", args=()).stdout)
+        self.assertEqual(self.tree(), before, "--show-diff は書き込まない（欠けたファイルの再作成も含む）")
+        self.assertIn(self.BUILD_SH, j["same"])
+        self.assertIn(self.PAGES, j["same"])
+        self.assertNotIn(self.MAIN_RS, j["same"])
+        self.assertEqual([c["path"] for c in j["conflicts"]], [self.MAIN_RS])
+        # 欠落した所有ファイルは書かれず、same にも conflicts にも出ない（復旧は自動で戻さず確認に回す）
+        (self.t / self.BUILD_SH).unlink()
+        j = json.loads(self.sc("--show-diff", "--json", args=()).stdout)
+        self.assertFalse((self.t / self.BUILD_SH).exists())
+        self.assertNotIn(self.BUILD_SH, j["same"])
+        self.assertNotIn(self.BUILD_SH, [c["path"] for c in j["conflicts"]])
+
     def test_show_diff_without_conflicts(self):
         self.init()
         r = self.sc("--show-diff", args=())
@@ -1649,7 +1667,8 @@ class ScaffoldHardeningTest(unittest.TestCase):
 
     def test_skill_md_scaffold_options_exist_in_argparse(self):
         md = (SKILL / "SKILL.md").read_text(encoding="utf-8") + "\n" + \
-            (SKILL / "references" / "scaffold-reference.md").read_text(encoding="utf-8")
+            (SKILL / "references" / "scaffold-reference.md").read_text(encoding="utf-8") + "\n" + \
+            (SKILL / "references" / "update-recovery.md").read_text(encoding="utf-8")
         r = subprocess.run([sys.executable, str(SCRIPTS / "scaffold.py"), "-h"], capture_output=True, text=True)
         known = set(re.findall(r"--[a-z][a-z-]*", r.stdout))
         # scaffold.py を含む論理行（バックスラッシュ継続を結合）と、共通節「scaffold.py の概要と終了コード」

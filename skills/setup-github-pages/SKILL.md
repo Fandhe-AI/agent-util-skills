@@ -141,8 +141,20 @@ START_BRANCH="$(git branch --show-current)"   # 復旧で戻る先。値を控�
 test -n "${START_BRANCH}" || { echo "detached HEAD。ブランチへ移ってから再実行する（中止）"; exit 1; }
 BASE="<Step 1 で解決した既定ブランチ>"
 test "${START_BRANCH}" = "${BASE}" || { echo "既定ブランチ（${BASE}）ではなく ${START_BRANCH} にいる。利用者に確認する。了承がなければ中止。了承が得られたら BASE=\"${START_BRANCH}\" として続ける"; exit 1; }
-git fetch origin "${BASE}" || echo "fetch できない（ネットワーク・認証）。利用者に報告する"
-git rev-list --left-right --count "origin/${BASE}...${BASE}"   # 「behind ahead」。どちらかが 0 でなければ（リモートより古い・未 push のコミットあり）利用者に確認する
+# リモートを確認できないまま進まない。fetch・rev-list の失敗、数値でない結果は中止する
+git fetch origin "${BASE}" || { echo "fetch に失敗。リモートを確認できないため中止（ネットワーク・認証・origin を確認する）"; exit 1; }
+COUNTS="$(git rev-list --left-right --count "origin/${BASE}...${BASE}")" || { echo "rev-list に失敗。中止"; exit 1; }
+read -r BEHIND AHEAD <<< "${COUNTS}"          # 「behind ahead」（origin より古い件数・未 push の件数）
+[[ "${BEHIND}" =~ ^[0-9]+$ && "${AHEAD}" =~ ^[0-9]+$ ]] || { echo "ahead/behind を数値で取れない（${COUNTS}）。中止"; exit 1; }
+if [ "${BEHIND}" -ne 0 ] || [ "${AHEAD}" -ne 0 ]; then
+  echo "behind=${BEHIND} ahead=${AHEAD}。この数を利用者に示して確認する。了承が得られるまで更新用ブランチを作らない（了承後は、下の 2 つ目のブロックだけを実行する）"
+  exit 1
+fi
+```
+
+両方 0 のときだけ、そのまま次へ進む。**利用者の了承が得られた場合**は、上のブロックの判定を飛ばして、ブランチ作成だけを実行する。
+
+```bash
 NAME="chore/docs-pages-update-$(date +%Y%m%d)"; n=1
 while git show-ref --verify --quiet "refs/heads/${NAME}"; do n=$((n+1)); NAME="chore/docs-pages-update-$(date +%Y%m%d)-${n}"; done   # 同名があれば連番
 git switch -c "${NAME}" "${BASE}"             # 起点を明示する。NAME も控える
@@ -183,28 +195,9 @@ python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<Step 1 で解�
 
 「ローカルビルド（新規・更新共通）」節のコマンドを実行する（信頼できないリポジトリでは実行しない）。ネットワーク断や cargo の一時障害は、まず**再試行**する。
 
-`rebrand_site.py` が「一致数が 0」で失敗する、`verify` が失敗する、など**決定的な失敗**は、デザインの更新で上流の HTML 構造が変わり、後処理の置換対象が合わなくなったことの検知である。対象リポジトリ側の後処理は書き換えず、**更新を取り消して**、スキル側の修正が必要であることを利用者に報告する。取り消しは、U0 以降に利用者が手で行った変更（exit 3 の手動統合、exit 4 の `brand.toml` 追記、新規ファイル）を消さないよう、`git clean` や `git restore -- .` を使わず、U1 の JSON のパスだけを対象にする。
+復旧するのは**決定的な失敗**（`rebrand_site.py` の「一致数が 0」、`verify` の失敗など。上流のデザイン更新で HTML 構造が変わり、後処理の置換対象が合わなくなったことの検知）に限る。対象リポジトリ側の後処理は書き換えず、**更新を取り消して**、スキル側の修正が必要であることを利用者に報告する。
 
-```bash
-git status --short                 # 利用者へ示し、了承を取る
-revert_path() {   # 追跡されていれば HEAD へ復元、未追跡（今回新規作成）なら削除する
-  if git ls-files --error-unmatch -- "$1" >/dev/null 2>&1; then
-    git restore --source=HEAD --staged --worktree -- "$1"
-  else
-    rm -f -- "$1"
-  fi
-}
-# U1 の JSON の形に注意: updated は {"path": …, "reason": …} のオブジェクトの配列（path の値を使う）、
-# created は文字列（パス）の配列。転記するのは path の値だけ（1 回目と再実行の分を合わせる）
-git restore --source=HEAD --staged --worktree -- <updated[].path の各値>
-rm -f -- <created[] の各値>        # created が空なら実行しない
-revert_path tools/docs-site-gen/.scaffold-manifest.json   # manifest_written が true のときだけ
-revert_path THIRD-PARTY-LICENSES                          # --write-third-party を付けたビルドのときだけ（U0 の時点で追跡されていなければ今回新規作成）
-revert_path .gitignore                                    # gitignore_added が空でないときだけ
-git switch "${START_BRANCH}" && git branch -D "${NAME}"     # U0 で控えた値
-```
-
-復旧後、利用者が U0 以降に手で行った変更（exit 3 の統合、exit 4 の `brand.toml` 追記、新規ファイル）は作業ツリーに残り、元のブランチへ持ち越される。その旨を利用者に伝える。
+取り消しの前に、`git status --short` を利用者へ示して了承を取る。手順の詳細は [`references/update-recovery.md`](references/update-recovery.md)「復旧の手順」に従う。**自動で戻すのは、スキルが書いたままの（U1 の後に手が入っていない）ファイルだけ**で、U1 の後に手が入ったファイルや、利用者編集ファイルの `created` は、利用者に差分を示して個別に判断を仰ぐ（`git clean` や `git restore -- .` は使わない）。
 
 #### Step U3: 変更内容を報告する
 
