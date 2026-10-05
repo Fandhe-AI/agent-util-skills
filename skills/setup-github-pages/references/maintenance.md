@@ -10,7 +10,7 @@
 
 ## FF_REV の更新手順
 
-現在の固定値: `b3e31ef663a98b6080feb98c84ade238d1074a08`（2026-10-06 時点で匿名ビルド・生成・rebrand を実測済み）。
+現在の固定値: `b3e31ef663a98b6080feb98c84ade238d1074a08`（2026-10-05 時点で匿名ビルド・生成・rebrand を実測済み）。
 
 唯一の定義元は `tools/docs-site-gen/FF_REV`（スキル側は `templates/docs-site-gen/FF_REV`）。`pages.yml` と
 `build-local.sh` は値を直書きせずこのファイルを読み、使用前に `^[0-9a-f]{40}$` で検証する。cache キーも同ファイルの
