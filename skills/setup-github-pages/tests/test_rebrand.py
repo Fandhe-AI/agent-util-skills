@@ -342,14 +342,14 @@ class ScaffoldSymlinkTest(unittest.TestCase):
                 p.unlink()
             (self.target / name).symlink_to(self.outside)
             r = self.scaffold()
-            self.assertEqual(r.returncode, 2, name)
-            self.assertIn("リンク先の内外を問わず", r.stderr)
+            self.assertIn(r.returncode, (2, 3), name)   # 競合（outside_root, exit 3）またはマニフェストの書き込み先が不適（exit 2）。何も書かず、外側も読まない
+            self.assertIn("対象の外", r.stderr)
             self.assert_nothing_written()
 
     def test_nested_symlink_in_missing_chain_detected(self):
         (self.target / ".github").mkdir()
         (self.target / ".github/workflows").symlink_to(self.outside)
-        self.assertEqual(self.scaffold().returncode, 2)
+        self.assertEqual(self.scaffold().returncode, 3)
         self.assertEqual(list(self.outside.iterdir()), [])
         self.assertFalse((self.target / "tools").exists(), "全件検証前に一部を書いてはいけない")
 
@@ -1422,7 +1422,7 @@ class ScaffoldHardeningTest(unittest.TestCase):
         (self.t / "tools").symlink_to(self.outside)
         j = json.loads(self.sc("--detect", "--json", args=()).stdout)
         self.assertEqual((j["mode"], j["kind"]), ("new", "none"))
-        self.assertTrue(any("無視" in r for r in j["reasons"]), j["reasons"])
+        self.assertTrue(any("読まない" in r or "無視" in r for r in j["reasons"]), j["reasons"])
 
     def test_resolves_inside_rejects_dot_git(self):
         sys.path.insert(0, str(SCRIPTS))
@@ -2778,6 +2778,133 @@ class UpdateSnapshotHardeningTest(unittest.TestCase):
         self.assertIn("git diff --no-ext-diff --no-textconv --no-color HEAD --", doc)
         self.assertIn("| head -200 | cat -v", doc)
         self.assertNotIn("git diff HEAD --", doc)
+
+class OutsideRootReadTest(unittest.TestCase):
+    """V1: 親ディレクトリの symlink で root の外へ解決される配置先は、存在も内容も読まない（外側の状態に左右されない）。
+
+    外側に所有ファイル・利用者編集ファイルと同名のファイル（番兵文字列入り）を置き、--detect・通常実行・--update・
+    --show-diff のいずれでも、番兵が出力・JSON に出ず、外側のファイルが変更されず、競合（exit 3）または exit 2 で止まる。
+    """
+
+    SENT = "OUTSIDE-SENTINEL-77c1"
+    ARGS = ScaffoldHardeningTest.ARGS
+    setUp = ScaffoldHardeningTest.setUp
+    sc = ScaffoldHardeningTest.sc
+    init = ScaffoldHardeningTest.init
+
+    def outside_tree(self, top):
+        """外側に、top 配下の配置先と同名のファイル（番兵入り）を作る。"""
+        sys.path.insert(0, str(SCRIPTS))
+        import scaffold
+        made = {}
+        for _, dst, _, _ in scaffold.FILES:
+            if dst.startswith(top + "/"):
+                f = self.outside / dst[len(top) + 1:]
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(f"{self.SENT} {dst}\n")
+                made[f] = f.read_bytes()
+        self.assertTrue(made, top)
+        return made
+
+    def snapshot_outside(self):
+        return {p: p.read_bytes() for p in self.outside.rglob("*") if p.is_file()}
+
+    def assert_not_read(self, runs, before):
+        for name, r in runs.items():
+            blob = r.stdout + r.stderr
+            self.assertNotIn(self.SENT, blob, f"{name}: 外側のファイルの内容が出力に出た")
+            self.assertIn(r.returncode, (0, 2, 3, 4), name)
+        self.assertEqual(self.snapshot_outside(), before, "外側のファイルが変更・作成された")
+
+    def run_all(self, args):
+        return {
+            "detect": self.sc("--detect", "--json", args=()),
+            "run": self.sc("--json", args=args),
+            "update": self.sc("--update", "--json", args=args),
+            "show-diff": self.sc("--show-diff", "--json", args=args),
+        }
+
+    def test_tools_symlink_to_outside_new_mode(self):
+        self.outside_tree("tools")
+        (self.t / "tools").symlink_to(self.outside)
+        (self.outside / "docs-site-gen").mkdir(exist_ok=True)
+        runs = self.run_all(self.ARGS)
+        self.assertEqual(json.loads(runs["detect"].stdout)["mode"], "new", "外側の同名ファイルで update/foreign 判定にならない")
+        for name in ("run", "update"):   # マニフェストの書き込み先が外へ解決されるため exit 2、または競合 exit 3。どちらも何も書かない
+            self.assertIn(runs[name].returncode, (2, 3), name)
+            kinds = {c["kind"] for c in json.loads(runs[name].stdout)["conflicts"]}
+            self.assertEqual(kinds, {"outside_root"}, name)
+        self.assertEqual(runs["show-diff"].returncode, 0)
+        diffs = json.loads(runs["show-diff"].stdout)["diffs"]
+        self.assertTrue(diffs and all(d["status"] == "outside" for d in diffs.values()))
+        self.assert_not_read(runs, self.snapshot_outside())
+        self.assertFalse((self.t / "site").exists(), "競合時に部分書き込みがあった")
+
+    def test_symlinked_dirs_after_install_update_mode(self):
+        for top in ("tools", ".github", "site"):
+            self.setUp()
+            self.init()
+            moved = self.base / "moved"
+            shutil.move(str(self.t / top), str(moved))
+            shutil.rmtree(self.outside)
+            shutil.copytree(moved, self.outside)
+            for p in self.outside.rglob("*"):
+                if p.is_file() and p.suffix in (".py", ".toml", ".yml", ".md", ".sh", ".rs", "") and p.stat().st_size < 200000:
+                    try:
+                        p.write_text(p.read_text() + f"\n{self.SENT}\n")
+                    except UnicodeDecodeError:
+                        pass
+            (self.t / top).symlink_to(self.outside)
+            before = self.snapshot_outside()
+            runs = self.run_all(("--branch", "main"))
+            self.assert_not_read(runs, before)
+            self.assertIn(runs["run"].returncode, (2, 3, 4), top)
+            self.assertIn(runs["update"].returncode, (2, 3, 4), top)
+            j = json.loads(runs["run"].stdout)
+            if runs["run"].returncode == 3:
+                self.assertTrue(any(c["kind"] == "outside_root" for c in j["conflicts"]), top)
+            self.assertEqual(self.snapshot_outside(), before, top)
+
+    def test_user_files_outside_are_neither_kept_nor_missing(self):
+        """site が外を指す場合、kept / missing の判定が外側の状態に左右されない（外側に nav.toml があっても kept にしない）。"""
+        self.init()
+        moved = self.base / "moved-site"
+        shutil.move(str(self.t / "site"), str(moved))
+        shutil.rmtree(self.outside)
+        shutil.copytree(moved, self.outside)
+        (self.t / "site").symlink_to(self.outside)
+        j = json.loads(self.sc("--json", args=("--branch", "main")).stdout)
+        self.assertNotIn("site/nav.toml", j["kept"])
+        self.assertNotIn("site/nav.toml", j["missing"])
+        self.assertIn("site/nav.toml", [c["path"] for c in j["conflicts"] if c["kind"] == "outside_root"])
+
+    def test_directory_symlink_inside_root_is_allowed(self):
+        """方針: root 内を指すディレクトリ symlink は許可する（実体が root 配下で、`.git` 配下でなければ読み書きする）。"""
+        self.init()
+        real = self.t / "real-tools"
+        shutil.move(str(self.t / "tools"), str(real))
+        (self.t / "tools").symlink_to(real)
+        r = self.sc("--json", args=("--branch", "main"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(j["conflicts"], [])
+        self.assertIn("tools/docs-site-gen/build-local.sh", j["same"])
+        # .git 配下を指すものは拒否する
+        (self.t / "tools").unlink()
+        (self.t / ".git").mkdir(exist_ok=True)
+        shutil.move(str(real), str(self.t / ".git" / "tools"))
+        (self.t / "tools").symlink_to(self.t / ".git" / "tools")
+        r = self.sc("--json", args=("--branch", "main"))
+        self.assertIn(r.returncode, (2, 3))
+        self.assertTrue(all(c["kind"] == "outside_root" for c in json.loads(r.stdout)["conflicts"]))
+
+    def test_scaffold_scripts_open_target_files_only_through_guarded_entrypoints(self):
+        """読み取りの入口の集約: scaffold.py が対象リポジトリのファイルを開くのは _open_regular（root 外を拒否）だけ。"""
+        src = (SCRIPTS / "scaffold.py").read_text(encoding="utf-8")
+        body = re.sub(r"(?s)def _open_regular.*?return fd\n", "", src, count=1)
+        self.assertNotRegex(body, r"os\.open\(")
+        self.assertNotRegex(body, r"\.read_text\(\)(?!\.strip)")  # SKILL_DIR 側のテンプレート読みを除き、直接の read_text は使わない
+        self.assertIn("raise OutsideRootError", src)
 
 
 class CheckSiteTest(unittest.TestCase):

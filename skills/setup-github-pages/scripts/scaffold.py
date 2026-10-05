@@ -95,7 +95,7 @@ DEPRECATED_OWNED: tuple[str, ...] = ()
 # 終了コード: 0 成功 / 2 入力不正・書き込み先が不適 / 3 競合（OWNED の不一致）/ 4 配置後の check_site 失敗
 EXIT_CONFLICT, EXIT_CHECK_FAILED = 3, 4
 # --update でも解消しない競合の種別（手動で解消する。案内も --update を勧めない）
-UNFIXABLE_KINDS = frozenset({"symlink", "not_regular", "unreadable"})
+UNFIXABLE_KINDS = frozenset({"symlink", "not_regular", "unreadable", "outside_root"})
 
 MANIFEST_REL = "tools/docs-site-gen/.scaffold-manifest.json"
 MANIFEST_VERSION = 1
@@ -141,8 +141,26 @@ def out(msg: object, *, err: bool = False) -> None:
 # ---------------------------------------------------------------- 安全な読み取り
 
 
+# 対象リポジトリのルート（実体）。設定されていれば、対象リポジトリのファイルを開く入口（_open_regular）が、
+# 親ディレクトリの symlink を含めた実体が root の外（`.git` 配下を含む）へ解決されるパスを、開く前に拒否する。
+# 読み取りの入口をここ 1 か所に集約し、分類・差分・ハッシュ・マニフェスト・pages.yml 解析などの呼び出し側が
+# 個別に確認を忘れても、root 外のファイルを読まないようにする。main が最初に設定する。
+_ROOT_GUARD: Path | None = None
+
+
+class OutsideRootError(OSError):
+    """読み取り先の実体が対象リポジトリの外（または .git 配下）へ解決される。"""
+
+
+def exists_inside(root_real: Path, path: Path) -> bool:
+    """実体が root 内に解決される場合に限り、存在を判定する（親 symlink を辿って root 外の状態を見ない）。"""
+    return resolves_inside(root_real, path) and os.path.lexists(path)
+
+
 def _open_regular(path: Path) -> int:
     """symlink を辿らず、通常ファイルだけを開く（FIFO 等で読み取りが止まらないよう非ブロッキング）。"""
+    if _ROOT_GUARD is not None and not resolves_inside(_ROOT_GUARD, path):
+        raise OutsideRootError("対象の外（または .git 配下）へ解決される")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(path, flags)
     try:
@@ -183,7 +201,8 @@ def safe_sha256(path: Path) -> str | None:
 
 
 def regular_inside(root_real: Path, path: Path) -> bool:
-    return path.is_file() and not path.is_symlink() and resolves_inside(root_real, path)
+    # 先に実体を検証する（is_file は親 symlink を辿って root 外を stat するため、検証の後に呼ぶ）
+    return resolves_inside(root_real, path) and path.is_file() and not path.is_symlink()
 
 
 # ---------------------------------------------------------------- 入力検証
@@ -252,10 +271,14 @@ def load_manifest(target: Path, root_real: Path) -> tuple[tuple[str, dict[str, s
     読む前に、実体が root 配下（`.git` 配下を除く）の通常ファイルであることを確認する。
     """
     path = target / MANIFEST_REL
+    if not resolves_inside(root_real, path):
+        # 親ディレクトリが root の外へ解決される場合は、存在も見ない（外側の状態に左右されない）
+        warn = [f"{MANIFEST_REL} が対象の外（または .git 配下）へ解決されるため読まない"] if os.path.lexists(target / "tools") else []
+        return None, warn
     if not os.path.lexists(path):
         return None, []
-    if path.is_symlink() or not path.is_file() or not resolves_inside(root_real, path):
-        return None, [f"{MANIFEST_REL} が通常ファイルでない（symlink・対象の外へ解決など）ため無視した"]
+    if path.is_symlink() or not path.is_file():
+        return None, [f"{MANIFEST_REL} が通常ファイルでない（symlink など）ため無視した"]
     try:
         obj = json.loads(read_capped(path, MANIFEST_MAX_BYTES).decode("utf-8"))
         return validate_manifest(obj), []
@@ -333,7 +356,11 @@ def detect(target: Path, root_real: Path) -> dict:
     if len(legacy) == len(LEGACY_TRACES):
         reasons.append("旧版配置の痕跡（FF_REV・wrapper・build-local.sh）がある（マニフェストなし）")
         return {"mode": "update", "kind": "legacy", "reasons": reasons}
-    present = [dst for _, dst, _, kind in FILES if kind == OWNED and os.path.lexists(target / dst)]
+    present = [dst for _, dst, _, kind in FILES if kind == OWNED and exists_inside(root_real, target / dst)]
+    outside = [dst for _, dst, _, _ in FILES if not resolves_inside(root_real, target / dst)]
+    if outside:
+        reasons.append("次の配置先は対象の外（または .git 配下）へ解決されるため読まない（親ディレクトリが symlink 等）: "
+                       + ", ".join(outside[:6]) + (f" ほか {len(outside) - 6} 件" if len(outside) > 6 else ""))
     if present:
         reasons.append("スキル所有の配置先に既存ファイルがあるが、スキルの配置とは認められない: " + ", ".join(present))
         return {"mode": "foreign", "kind": "unrelated", "reasons": reasons}
@@ -482,7 +509,7 @@ def unexpected_buildable(target: Path, root_real: Path) -> list[str]:
     expected |= {Path(MANIFEST_REL).name, "src", "target", "Cargo.lock", "THIRD-PARTY-LICENSES"}
     found: list[str] = []
     gen = target / "tools" / "docs-site-gen"
-    if gen.is_dir() and not gen.is_symlink() and resolves_inside(root_real, gen):
+    if resolves_inside(root_real, gen) and gen.is_dir() and not gen.is_symlink():
         try:
             with os.scandir(gen) as it:   # 切り詰めずに全件走査する（ダミーで後ろの名前を隠せない）
                 found += [_GEN_REL + e.name for e in it if e.name not in expected]
@@ -493,12 +520,12 @@ def unexpected_buildable(target: Path, root_real: Path) -> list[str]:
     def risk(rel: str) -> tuple[int, str]:
         n = rel[len(_GEN_REL):]
         risky = (re.search(r"\.(py|pyc|pyd|so|dylib|rs)$", n) is not None or n == "__pycache__"
-                 or (gen / n).is_dir())
+                 or (gen / n).is_symlink() or (gen / n).is_dir())
         return (0 if risky else 1, n)
 
     found.sort(key=risk)
     for d in ("", "tools/", _GEN_REL):
-        if os.path.lexists(target / d / ".cargo") and (d + ".cargo") not in found:
+        if exists_inside(root_real, target / d / ".cargo") and (d + ".cargo") not in found:
             found.append(d + ".cargo")
         for name in ("rust-toolchain", "rust-toolchain.toml"):
             f = target / d / name
@@ -619,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.target.is_dir():
         return finish(2, "エラー: --target が既存ディレクトリではない")
     root_real = Path(os.path.realpath(args.target))
+    global _ROOT_GUARD
+    _ROOT_GUARD = root_real   # 以後、対象リポジトリのファイルを開く入口が root 外への解決を拒否する
 
     det = detect(args.target, root_real)
     summary.update(mode=det["mode"], kind=det["kind"], detect=[sanitize(r) for r in det["reasons"]])
@@ -771,6 +800,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for src_rel, dst_rel, executable, kind in FILES:
             dst = args.target / dst_rel
+            text = render(src_rel, kind)
+            if text is not None:
+                desired[dst_rel] = text
+            if kind == OWNED:
+                owned_texts[dst_rel] = text
+            # 先に実体を検証する。親ディレクトリの symlink で root の外（`.git` 配下を含む）へ解決される配置先は、
+            # exists / is_file / 読み取りがすべて外側の状態を見るため、存在も内容も見ずに競合として扱う
+            # （所有ファイル・利用者編集ファイルとも。--update でも上書きしない。kept / missing の判定も外側に左右されない）。
+            if not resolves_inside(root_real, dst):
+                conflicts.append((dst_rel, "outside_root",
+                                  "対象の外（または .git 配下）へ解決される（親ディレクトリが symlink 等）。内容を読まない。"
+                                  "手動で解消する（--update では上書きされない）"))
+                continue
             exists = dst.exists() or dst.is_symlink()
             if kind == USER:
                 if exists:
@@ -778,11 +820,8 @@ def main(argv: list[str] | None = None) -> int:
                 elif subs is None:
                     missing.append(dst_rel)   # 更新モードでは再作成しない（利用者が意図して消した可能性）
                 else:
-                    plan_write(dst_rel, dst, render(src_rel, kind), executable, "create", "新規作成")
+                    plan_write(dst_rel, dst, text, executable, "create", "新規作成")
                 continue
-            text = render(src_rel, kind)
-            owned_texts[dst_rel] = text
-            desired[dst_rel] = text
             if not exists:
                 plan_write(dst_rel, dst, text, executable, "create", "新規作成")
                 continue
@@ -865,7 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_diff:
         diffs: dict[str, dict] = {}
         for path, kind, reason in conflicts:
-            status, lines = build_diff(root_real, args.target / path, path, desired[path])
+            status, lines = build_diff(root_real, args.target / path, path, desired.get(path, ""))
             diffs[path] = {"conflict_kind": kind, "reason": reason, "status": status, "lines": lines}
         summary["diffs"] = diffs
         # 注意: same は「いま生成する内容と一致するか」であり、「適用直後から変わっていないか」ではない。更新の取り消しの
@@ -930,7 +969,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     new_manifest = json.dumps(new_manifest_obj, indent=2, sort_keys=True) + "\n"
     manifest_changed = True
-    if os.path.lexists(manifest_path) and regular_inside(root_real, manifest_path):
+    if regular_inside(root_real, manifest_path):
         try:
             manifest_changed = read_capped(manifest_path, MANIFEST_MAX_BYTES).decode("utf-8") != new_manifest
         except (OSError, OverflowError, UnicodeDecodeError):

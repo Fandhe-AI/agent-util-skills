@@ -72,7 +72,7 @@ user-invocable: true
 |-----------|------|------|
 | 0 | 成功（配置後の check_site も通過） | 次の手順へ進む |
 | 2 | 入力不正、書き込み先が不適（symlink・親が `--target` の外へ解決・`.git` 配下・`.gitignore` の不備等）、または適用対象外（上流リポジトリ自身）。1 件も書かれていない | JSON の `error` を読み、指摘を直す |
-| 3 | 競合（スキル所有ファイルが配置後に編集されている、またはマニフェストがない） | `--show-diff` で差分を確認して利用者に見せ、判断を仰ぐ。`--update` は所有ファイルを強制上書きする（利用者の了承後のみ）が、**symlink・通常ファイルでない・読めない（`kind` が `symlink` / `not_regular` / `unreadable`）競合には効かない**。それらは手動で解消する |
+| 3 | 競合（スキル所有ファイルが配置後に編集されている、またはマニフェストがない） | `--show-diff` で差分を確認して利用者に見せ、判断を仰ぐ。`--update` は所有ファイルを強制上書きする（利用者の了承後のみ）が、**symlink・通常ファイルでない・読めない・対象の外へ解決される（`kind` が `symlink` / `not_regular` / `unreadable` / `outside_root`）競合には効かない**。それらは手動で解消する |
 | 4 | 配置・更新は完了したが check_site が失敗 | 表示された項目（`brand.toml` の不足キー・`nav.toml` の予約パス、`nav.toml`・`brand.toml` の欠落など）を直し、同じコマンドを再実行する（収束する） |
 
 ## ローカルビルド（新規・更新共通）
@@ -188,7 +188,7 @@ bash "${SKILL_DIR}/scripts/update-snapshot.sh" record-json "${SNAP}" < "${RESULT
   ```
 
   `git log -p` は利用者自身の編集の履歴を見るためで、git 管理下のオブジェクトを読むので symlink を辿らない（出力は `cat -v` と `head` で絞る）。`kind` ごとに扱いが違う（詳細は [`references/scaffold-reference.md`](references/scaffold-reference.md)）。
-  - **`symlink` / `not_regular` / `unreadable`**: `--update` では解消しない。手動で通常ファイルへ直してから再実行する
+  - **`symlink` / `not_regular` / `unreadable` / `outside_root`**: `--update` では解消しない。手動で通常ファイルへ直す（`outside_root` は親ディレクトリの symlink が対象の外を指しているので、通常のディレクトリへ直す）。直してから再実行する
   - それ以外: 利用者の編集を残したい場合は手動で統合し、置き換えてよいと確認できたときだけ `--update` 付きで再実行する（編集を失わせる。実行前に差分を控える。この再実行の JSON を以降の報告に使う）
   - `pages.yml` の追加の監視パス: **区間のある版**は、利用者区間へ書き足してから再実行する。**旧版（区間なし）**は、`--update` の実行が追加 paths のうち検証を通ったものを自動で利用者区間へ移す（落とした分は `warnings` に出る）
 - **exit 4**: `brand.toml` に新しい必須キーが無い、`nav.toml`・`brand.toml` が欠落している等。所有ファイルは書き込み済みである。表示された項目と追記例を利用者と確認して直し、同じコマンドを再実行する（JSON の扱いは上記）
@@ -424,7 +424,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | nav.toml の title に `fandhe-frontend` を入れて失敗する | 独立した語としての上流名は残存検査と区別できない。`check_site.py` が事前に拒否するので別の表記にする（`fandhe-frontend-docs` のような別の語の一部は可） |
 | `rebrand_site.py` が「一致数が 0（期待 1）」で失敗する | 上流 DOM が変わったか、二重実行。dist を作り直して再実行する。スキル保守者は [`references/maintenance.md`](references/maintenance.md) の「FF_REV の更新手順」で置換対象を再確認する。対象リポジトリ側の利用者は更新を取り消してスキル側の修正を待つ（Step U2） |
 | `build-local.sh` が「`_ff` に未コミットの変更または未追跡ファイルがある」で止まる | `_ff/` はキャッシュ専用。必要な変更は退避し、不要なら `_ff/` を手動で削除して再実行する（スクリプトは破棄しない） |
-| `scaffold.py` が「競合」で exit 3 になる | スキル所有ファイルが配置後に編集されている、またはマニフェストが無い（旧版配置・別用途）。`--show-diff` で差分を確認して利用者に見せ、編集を残すなら手動統合、置き換えてよいときだけ `--update`。**`kind` が `symlink` / `not_regular` / `unreadable` の競合は `--update` でも解消しない**ので、手動で通常ファイルへ直す。旧版からの移行は `--update` 1 回でマニフェストが書かれ、以後は未編集なら自動更新される。`pages.yml` の追加 paths は利用者区間へ書く |
+| `scaffold.py` が「競合」で exit 3 になる | スキル所有ファイルが配置後に編集されている、またはマニフェストが無い（旧版配置・別用途）。`--show-diff` で差分を確認して利用者に見せ、編集を残すなら手動統合、置き換えてよいときだけ `--update`。**`kind` が `symlink` / `not_regular` / `unreadable` / `outside_root` の競合は `--update` でも解消しない**ので、手動で通常ファイルへ直す。旧版からの移行は `--update` 1 回でマニフェストが書かれ、以後は未編集なら自動更新される。`pages.yml` の追加 paths は利用者区間へ書く |
 | `pages.yml` に足した `paths` が更新で競合する・消える | 区間の外へ書いている。`sgp:user-paths:begin` と `end` の間（利用者区間）へ書く。旧版（区間なし）の追加 paths は初回の更新で区間へ移る |
 | 更新したのにスキルの新しい変更が反映されない | スキル側が更新されていない（`npx skills update` 等でスキルを最新にしてから再実行する）。マニフェストが不正で無視されている場合は警告が出る |
 | `scaffold.py` の更新が exit 2（既定ブランチを決められない） | 既存の `pages.yml` から `branches` を読めない（編集済み）。`--branch <既定ブランチ>` を付ける |

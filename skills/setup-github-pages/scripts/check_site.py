@@ -142,7 +142,7 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
 
     # 3. 予約アセット名
     assets = root / "site" / "assets"
-    if assets.is_dir():
+    if resolves_inside(root, assets) and assets.is_dir():   # 実体の検証が先（is_dir は親 symlink を辿って外を見る）
         for child in sorted(assets.iterdir()):
             if child.is_dir() and child.name in RESERVED_ASSET_DIRS:
                 errors.append(f"site/assets/{child.name}/ は予約ディレクトリ（生成物と衝突）")
@@ -153,7 +153,8 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
     scan = [nav_path, brand_path, root / ".github" / "workflows" / "pages.yml"]
     scan += [root / s for s in sources if not Path(s).is_absolute() and ".." not in Path(s).parts]
     for f in scan:
-        if not os.path.lexists(f):
+        # 実体の検証が先。root 外へ解決されるものは（存在の有無にかかわらず）読まずにエラーにする
+        if resolves_inside(root, f) and not os.path.lexists(f):
             continue
         try:
             body = _read_in_root(root, f, WORKFLOW_MAX_BYTES if f.suffix == ".yml" else MD_MAX_BYTES)
@@ -167,8 +168,8 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
     # 警告: Markdown（コードフェンス内は除外）
     for s in sources:
         f = root / s
-        if Path(s).is_absolute() or ".." in Path(s).parts or not os.path.lexists(f):
-            continue  # 生成器が拒否・報告する
+        if Path(s).is_absolute() or ".." in Path(s).parts or not resolves_inside(root, f) or not os.path.lexists(f):
+            continue  # 生成器が拒否・報告する（root 外へ解決されるものは、上のプレースホルダー検査でエラーにしている）
         try:
             body = _INLINE_CODE_RE.sub("", _strip_fences(_read_in_root(root, f, MD_MAX_BYTES)))
         except ValueError:
@@ -179,7 +180,8 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
             if base and not (link == base or link.startswith(base + "/")):
                 warnings.append(f"{s}: 絶対パスリンク `{link}` が base_path `{base}` を含まない（リンク検査で失敗する）")
 
-    if not (root / "THIRD-PARTY-LICENSES").is_file():
+    tpl = root / "THIRD-PARTY-LICENSES"
+    if not (resolves_inside(root, tpl) and tpl.is_file()):
         warnings.append("THIRD-PARTY-LICENSES が無い（build-local.sh --write-third-party で生成する）")
     return errors, warnings
 
