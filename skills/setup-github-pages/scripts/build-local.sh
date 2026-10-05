@@ -200,8 +200,11 @@ write_third_party() {
     return 1
   fi
   local pat
-  for pat in '^Copyright \(c\) [0-9]{4} Fandhe-AI / fandhe-frontend contributors$' \
-             '^Permission is hereby granted, free of charge, to any'; do
+  local -a pats=(
+    '^Copyright \(c\) [0-9]{4} Fandhe-AI / fandhe-frontend contributors$'
+    '^Permission is hereby granted, free of charge, to any'
+  )
+  for pat in "${pats[@]}"; do
     rc=0
     grep -Eq -- "${pat}" "${dl_tmp}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
@@ -212,16 +215,28 @@ write_third_party() {
       return 1
     fi
   done
-  {
+  # 呼び出し側が `|| exit 1` で受けるため、bash はこの関数内の set -e を無効にする。
+  # 書き込み・chmod・mv は失敗を明示的に検査し、不完全なファイルで置き換えない。
+  if ! {
     printf '%s\n' \
       "This repository's documentation site is generated with the docs-site generator of" \
       "fandhe-frontend (https://github.com/Fandhe-AI/fandhe-frontend, commit ${FF_REV})," \
       "which is licensed under MIT OR Apache-2.0. The MIT license text follows." \
-      ""
+      "" &&
     cat "${dl_tmp}"
-  } > "${tpl_tmp}"
-  chmod 0644 "${tpl_tmp}"   # mktemp は 0600 で作るため、通常ファイルと同じ権限へ
-  mv -f -- "${tpl_tmp}" "${ROOT_REAL}/THIRD-PARTY-LICENSES"
+  } > "${tpl_tmp}"; then
+    echo "エラー: THIRD-PARTY-LICENSES の一時ファイルへの書き込みに失敗。THIRD-PARTY-LICENSES は変更しない" >&2
+    return 1
+  fi
+  # mktemp は 0600 で作るため、通常ファイルと同じ権限へ
+  if ! chmod 0644 "${tpl_tmp}"; then
+    echo "エラー: 一時ファイルの chmod に失敗。THIRD-PARTY-LICENSES は変更しない" >&2
+    return 1
+  fi
+  if ! mv -f -- "${tpl_tmp}" "${ROOT_REAL}/THIRD-PARTY-LICENSES"; then
+    echo "エラー: THIRD-PARTY-LICENSES への置き換えに失敗" >&2
+    return 1
+  fi
 }
 # <<< third_party
 
@@ -236,9 +251,63 @@ python3 -I -B "${SCRIPT_DIR}/check_site.py" --root "${ROOT}"
 
 # ---- docs-site をインストール（匿名・FF_REV 固定・--locked。同一 rev なら cargo が再インストールを省略する）
 step "docs-site をインストール"
+#
+# 依存検査（インストール前）: 固定 rev の Cargo.lock を固定 URL から取得し、docs-site から辿れる依存の
+# すべてが path 依存（lock 上で source なし）であることを機械的に確認する。crates.io 等の registry・git
+# 依存が FF_REV 更新で混入すると、匿名・隔離ビルドの前提と供給網の固定方針が崩れるため、fail-closed で停止する。
+step "registry 依存が 0 件であることを検査"
+LOCK_URL="https://raw.githubusercontent.com/Fandhe-AI/fandhe-frontend/${FF_REV}/Cargo.lock"
+LOCK_BODY="$(curl --fail --silent --show-error \
+  --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --max-time 30 --max-filesize 4194304 \
+  "${LOCK_URL}")" || { echo "エラー: 固定 rev の Cargo.lock の取得に失敗。依存を検査できないためインストールしない" >&2; exit 1; }
+printf '%s' "${LOCK_BODY}" | python3 -I -B -c '
+import sys
+try:
+    import tomllib
+except ImportError:
+    print("エラー: Python に tomllib が無い（3.11 以上が必要）。依存を検査できないためインストールしない", file=sys.stderr)
+    sys.exit(1)
+root = "fandhe-frontend-docs-site"
+pkgs = tomllib.loads(sys.stdin.read()).get("package", [])
+by = {}
+for p in pkgs:
+    by.setdefault(p["name"], []).append(p)
+if root not in by:
+    print("エラー: Cargo.lock に %s が無い。依存を検査できないためインストールしない" % root, file=sys.stderr)
+    sys.exit(1)
+seen, stack, ext = set(), [root], []
+while stack:
+    ref = stack.pop()
+    if ref in seen:
+        continue
+    seen.add(ref)
+    # 依存の表記は "name" または "name version"（同名複数版・source 付きの場合は後者）
+    name = ref.split(" ")[0]
+    for p in by.get(name, []):
+        if p.get("source") is not None:
+            ext.append("%s %s" % (p["name"], p["version"]))
+        stack.extend(p.get("dependencies", []))
+if ext:
+    print("エラー: registry/git 依存が混入している（%d 件）: %s" % (len(ext), ", ".join(sorted(set(ext))[:10])), file=sys.stderr)
+    sys.exit(1)
+print("registry 依存 0 件（docs-site から辿れる packages=%d・すべて path 依存）" % len(seen), file=sys.stderr)
+'
+
+# インストール先の各階層（bin・実行ファイル・cargo の台帳ファイルを含む）が symlink でなく、対象リポジトリ内に
+# 収まることを、cargo install が書く前に確認する（--root はリンク先へ書き込み得るため）。
+guard_install_tree() {
+  guard_path "${INSTALL_ROOT}/bin" "docs-site のインストール先 bin" || return 1
+  guard_path "${INSTALL_ROOT}/bin/docs-site" "docs-site の実行ファイル" || return 1
+  guard_path "${INSTALL_ROOT}/.crates.toml" "cargo install の台帳 .crates.toml" || return 1
+  guard_path "${INSTALL_ROOT}/.crates2.json" "cargo install の台帳 .crates2.json" || return 1
+}
+guard_install_tree || exit 2
 GIT_TERMINAL_PROMPT=0 cargo install --git "${FF_URL}" --rev "${FF_REV}" --locked --root "${INSTALL_ROOT}" fandhe-frontend-docs-site
-if [[ ! -x "${INSTALL_ROOT}/bin/docs-site" ]]; then
-  echo "エラー: ${INSTALL_ROOT}/bin/docs-site が生成されていない" >&2
+# インストール後・実行前にも再確認し、実行ファイルが通常ファイルであることを要求する
+guard_install_tree || exit 2
+if [[ ! -f "${INSTALL_ROOT}/bin/docs-site" || ! -x "${INSTALL_ROOT}/bin/docs-site" ]]; then
+  echo "エラー: ${INSTALL_ROOT}/bin/docs-site が生成されていない、または実行可能な通常ファイルではない" >&2
   exit 1
 fi
 
