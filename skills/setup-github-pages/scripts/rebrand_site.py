@@ -34,9 +34,10 @@ brand.toml の値は `html.escape` を通してから HTML へ入れる。リポ
 # 読み込みの上限
 
 dist の読み込みはメモリを有界にする。UTF-8 テキストは 1 件 `MAX_TEXT_FILE_BYTES`・合計 `MAX_TOTAL_TEXT_BYTES`
-まで。上限を超えるファイルは、先頭 `BINARY_PROBE_BYTES` だけを読んでバイナリ（UTF-8 として不正）か判定し、
-バイナリは従来どおり検査対象外、テキストに見えるものは「検査すべきなのに読めない」ため黙って外さず、相対パスだけを
-示して失敗（終了コード 1）にする。ファイル内容の断片はエラーに載せない。
+まで。上限を超えるファイルは、内容を保持せず `SCAN_CHUNK_BYTES` ずつ最後まで走査して UTF-8 として妥当かを判定する
+（先頭だけでは判定しない。先頭が妥当でも後続に不正なバイトがあればバイナリのため）。バイナリは従来どおり検査対象外、
+全体が UTF-8 として妥当なものは「検査すべきなのに読めない」ため黙って外さず、相対パスだけを示して失敗（終了コード 1）に
+する。ファイル内容の断片はエラーに載せない。
 
 終了コード: 0 成功 / 1 置換・検証の失敗（上限超過で読めない場合を含む） / 2 引数・入力の不正。
 """
@@ -74,8 +75,8 @@ _FOOTER_RE = re.compile(r'<footer class="docs-footer">.*?</footer>', re.S)
 # 通常数百 KiB 以下のため、余裕を持たせた値にしている。
 MAX_TEXT_FILE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_TEXT_BYTES = 256 * 1024 * 1024
-# 上限を超えるファイルが「バイナリ」かを、全体を読まず先頭だけで判定する長さ。
-BINARY_PROBE_BYTES = 64 * 1024
+# 上限を超えるファイルが「バイナリ」かを、内容を保持せず最後まで走査して判定するときの読み込み単位。
+SCAN_CHUNK_BYTES = 64 * 1024
 
 # 検索インデックスはユーザー本文由来のため、本文中の言及を残存検査の対象外にする。
 _RESIDUAL_SKIP_PREFIXES = ("assets/search-index",)
@@ -267,12 +268,28 @@ class DistReadError(Exception):
     """生成物を安全に読み切れない（検査すべきテキストが上限超過など）。メッセージには相対パスだけを載せる。"""
 
 
+def _is_utf8_stream(fh) -> bool:
+    """fh の残り全体が UTF-8 として妥当か。チャンク境界で多バイト文字が切れても不正扱いにしない（増分デコーダ）。
+    内容は保持しない（メモリは SCAN_CHUNK_BYTES 分）。"""
+    dec = codecs.getincrementaldecoder("utf-8")()
+    try:
+        while True:
+            chunk = fh.read(SCAN_CHUNK_BYTES)
+            if not chunk:
+                dec.decode(b"", final=True)  # 末尾で多バイト文字が途切れていれば不正
+                return True
+            dec.decode(chunk, final=False)
+    except UnicodeDecodeError:
+        return False
+
+
 def _read_text_or_none(p: Path, max_bytes: int) -> tuple[str | None, bool]:
     """(text, too_large)。UTF-8 テキストなら (text, False)、バイナリなら (None, False)、
     上限超過のテキストなら (None, True)。メモリ使用量は max_bytes + 1 バイトで頭打ちになる。
 
-    サイズ（fstat）を読む前に見て、上限超過のファイルは先頭 BINARY_PROBE_BYTES だけでバイナリか判定する。
-    バイナリ（UTF-8 として不正）は従来どおり検査対象外。テキストに見えるものは、検査できない（読めない）以上
+    サイズ（fstat）を読む前に見て、上限超過のファイルは SCAN_CHUNK_BYTES ずつ最後まで走査して UTF-8 の妥当性を
+    判定する（先頭だけでは判定しない。メモリは 1 チャンク分で頭打ち、不正バイトを見つけた時点で打ち切る）。
+    バイナリ（UTF-8 として不正）は従来どおり検査対象外。全体が妥当なテキストは、検査できない（読めない）以上
     黙って対象から外さず too_large として呼び出し側で fail-closed にする。
     """
     fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
@@ -283,13 +300,7 @@ def _read_text_or_none(p: Path, max_bytes: int) -> tuple[str | None, bool]:
         with os.fdopen(fd, "rb") as fh:
             fd = -1
             if st.st_size > max_bytes:
-                head = fh.read(min(BINARY_PROBE_BYTES, max_bytes))
-                try:
-                    # 先頭断片の末尾で多バイト文字が切れても不正扱いにしない（final=False）
-                    codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
-                except UnicodeDecodeError:
-                    return None, False
-                return None, True
+                return None, _is_utf8_stream(fh)
             data = fh.read(max_bytes + 1)  # stat 後に伸びても上限で止める
     finally:
         if fd >= 0:

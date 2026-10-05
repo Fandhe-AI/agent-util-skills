@@ -255,8 +255,28 @@ class CollectSizeCapTest(unittest.TestCase):
         (self.dist / "assets" / "x.bin").write_bytes(b"\x89PNG\xff\xfe")
         self.assertEqual(self.rebrand().returncode, 0)
 
+    def test_oversize_file_with_valid_head_but_invalid_tail_is_binary(self):
+        # 先頭チャンクが UTF-8 として妥当でも、後続に不正バイトがあれば従来どおりバイナリ（検査対象外）
+        probe = self.mod.SCAN_CHUNK_BYTES
+        body = b"a" * (probe * 2) + b"\xff" + b"a" * self.cap
+        (self.dist / "assets" / "big.dat").write_bytes(body)
+        before = self.tree()
+        r = self.rebrand()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.tree()["assets/big.dat"], before["assets/big.dat"])
+
+    def test_oversize_file_with_invalid_byte_in_last_chunk_is_binary(self):
+        body = b"a" * (self.cap + self.mod.SCAN_CHUNK_BYTES) + b"\xff"
+        (self.dist / "assets" / "tail.dat").write_bytes(body)
+        self.assertEqual(self.rebrand().returncode, 0)
+
+    def test_oversize_file_truncated_multibyte_at_eof_is_binary(self):
+        body = b"a" * self.cap + "あ".encode("utf-8")[:2]  # 末尾で途切れた多バイト文字
+        (self.dist / "assets" / "cut.dat").write_bytes(body)
+        self.assertEqual(self.rebrand().returncode, 0)
+
     def test_multibyte_text_split_at_probe_boundary_is_not_mistaken_for_binary(self):
-        probe = self.mod.BINARY_PROBE_BYTES
+        probe = self.mod.SCAN_CHUNK_BYTES
         body = ("a" * (probe - 1) + "あ").encode("utf-8") + b"a" * self.cap  # 「あ」(3B) が先頭断片の末尾で切れる
         (self.dist / "assets" / "big.txt").write_bytes(body)
         r = self.rebrand("--verify-only")
@@ -301,6 +321,20 @@ class CollectSizeCapTest(unittest.TestCase):
         tracemalloc.start()
         try:
             self.assertEqual(self.mod._collect(d, max_file=1024 * 1024), {})
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 * 1024 * 1024)
+
+    def test_memory_is_bounded_for_huge_valid_text_scan(self):
+        import tracemalloc
+        d = self.tmp / "memtext"
+        d.mkdir()
+        (d / "huge.txt").write_bytes(b"a" * (16 * 1024 * 1024))
+        tracemalloc.start()
+        try:
+            with self.assertRaises(self.mod.DistReadError):
+                self.mod._collect(d, max_file=1024 * 1024)
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
