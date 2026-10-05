@@ -4635,6 +4635,26 @@ class VerifyAttributionTest(unittest.TestCase):
         self.mutate("index.html", dup)
         self.assertEqual(self.verify().returncode, 1)
 
+    def verify_with_nav(self, nav_text):
+        nav = self.base / "nav.toml"
+        nav.write_text(nav_text, encoding="utf-8")
+        script = "set -euo pipefail\n" + self.func + '\nverify_attribution "$1" "$2" || exit 1\n'
+        return subprocess.run(["bash", "-c", script, "_", str(self.dist), str(nav)], capture_output=True, text=True)
+
+    def test_upstream_brand_left_in_header_fails(self):
+        self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
+                    '<header class="docs-header"><span>fandhe-frontend</span>', 1))
+        r = self.verify_with_nav('[site]\nbrand = "Mine"\n')
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("index.html", r.stderr)
+        self.assertNotIn("<span>", r.stderr)
+
+    def test_upstream_brand_in_user_site_value_is_allowed(self):
+        self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
+                    '<header class="docs-header"><span>fandhe-frontend fork</span>', 1))
+        r = self.verify_with_nav('[site]\nbrand = "fandhe-frontend fork"\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_missing_404_and_symlinks_fail(self):
         (self.dist / "404.html").unlink()
         self.assertEqual(self.verify().returncode, 1)

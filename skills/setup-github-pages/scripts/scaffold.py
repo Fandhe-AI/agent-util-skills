@@ -240,7 +240,7 @@ def legacy_brand_site_proposal(root_real: Path) -> dict | None:
     """旧 `tools/docs-site-gen/brand.toml` から nav.toml `[site]` への移行案を作る（読むだけ。何も書かない・消さない）。
 
     brand.toml が通常ファイルとして無い・読めない・形式が違うときは None。案は check_site と同じ検証器を通し、
-    通らないキーは名前だけ `problems` に出す（値は載せない）。通ったときだけ `block` に追記用の文面を入れる。
+    通らないキーは名前だけ `problems` に出す（値は載せない）。通ったときだけ `block` に追記用の文面を入れる。block が持つのは旧 brand.toml 由来のキーだけで、nav.toml の既存 `[site]` の他のキー（title・base_path 等）は含まない。呼び出し側は丸ごと置き換えず、キー単位で追加・更新する。
     """
     path = root_real / "tools" / "docs-site-gen" / "brand.toml"
     try:
@@ -1284,7 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
             summary["site_migration"] = proposal
             if not args.json:
                 if proposal["block"]:
-                    out("旧 brand.toml からの [site] 移行案（nav.toml の既存 [site] を確認のうえ置き換える。自動では書き換えない）:", err=True)
+                    out("旧 brand.toml からの [site] 移行案（下のキーだけを nav.toml の既存 [site] へ追加・更新する。[site] を丸ごと置き換えない — 既存の title・base_path 等は残す。自動では書き換えない）:", err=True)
                     out(proposal["block"], err=True)
                 else:
                     out("旧 brand.toml から [site] を作れない項目: " + "; ".join(proposal["problems"]), err=True)

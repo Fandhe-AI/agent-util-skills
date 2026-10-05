@@ -392,9 +392,10 @@ fi
 # 出力する。これは MIT / Apache-2.0 の通知義務を担う部分のため、上流の DOM が変わっても黙って
 # 消えないよう、文言とリンクが 1 つの連続した並びとして存在することを見る（FF_REV 更新時に実出力で再確認する）。
 # 読むだけで書かない。エラーには dist からの相対パスだけを出し、ファイルの内容は出さない。
+# 第 2 引数は利用者の nav.toml（`[site]` の文言に含まれる上流名を許容するために読む。省略時は許容なし）。
 # 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
 verify_attribution() {
-  local dist="$1" up pat list links f rel rc n=0 has_chrome has_refresh
+  local dist="$1" nav="${2:-}" up pat list links f rel rc n=0 has_chrome has_refresh
   up='https://github\.com/Fandhe-AI/fandhe-frontend'
   pat="Built with <a [^>]*href=\"${up}\"[^>]*>fandhe-frontend docs-site</a> \\(<a [^>]*href=\"${up}/blob/main/LICENSE-MIT\"[^>]*>MIT</a> OR <a [^>]*href=\"${up}/blob/main/LICENSE-APACHE\"[^>]*>Apache-2\\.0</a>\\)"
 
@@ -431,16 +432,42 @@ verify_attribution() {
     # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
     # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
     rc=0
-    SGP_PAT="${pat}" python3 -I -B -c '
+    SGP_PAT="${pat}" SGP_NAV="${nav}" python3 -I -B -c '
 import os, re, sys
 t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 foots = re.findall(r"<footer class=\"docs-footer\">.*?</footer>", t, re.S)
 if len(foots) != 1:
     sys.exit(1)
-sys.exit(0 if len(re.findall(os.environ["SGP_PAT"], foots[0])) == 1 else 1)
+if len(re.findall(os.environ["SGP_PAT"], foots[0])) != 1:
+    sys.exit(1)
+# 生成器由来の表示領域（ヘッダー・フッター）に、帰属表記以外で上流名が残っていないことを見る。
+# 利用者が [site] に書いた文言（上流名を含む正当な値）は許容するため、先に取り除く。
+user = []
+try:
+    if os.path.islink(os.environ.get("SGP_NAV", "")):
+        raise OSError("symlink")
+    with open(os.environ.get("SGP_NAV", ""), encoding="utf-8", errors="replace") as nf:
+        nav = nf.read(256 * 1024)
+    m = re.search(r"^\[site\][ \t]*$(.*?)(?=^\[|\Z)", nav, re.S | re.M)
+    if m:
+        user = [v.replace("\\\"", "\"").replace("\\\\", "\\")
+                for v in re.findall(r"^[ \t]*[A-Za-z_]+[ \t]*=[ \t]*\"((?:[^\"\\\\]|\\\\.)*)\"", m.group(1), re.M)]
+except OSError:
+    pass
+heads = re.findall(r"<header class=\"docs-header\".*?</header>", t, re.S)
+resid = "".join(heads) + re.sub(os.environ["SGP_PAT"], "", foots[0])
+import html
+for v in sorted({x for x in user if "fandhe-frontend" in x.lower()}, key=len, reverse=True):
+    for form in (v, html.escape(v), html.escape(v, quote=False)):
+        resid = resid.replace(form, "")
+sys.exit(2 if "fandhe-frontend" in resid.lower() else 0)
 ' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
       echo "エラー: ${rel} のフッター（docs-footer）に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）がちょうど 1 件ない" >&2
+      return 1
+    fi
+    if [[ "${rc}" -eq 2 ]]; then
+      echo "エラー: ${rel} のヘッダー・フッターに帰属表記以外の上流名（fandhe-frontend）が残っている（[site] の値以外）" >&2
       return 1
     fi
     [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査が失敗した（exit ${rc}）" >&2; return 1; }
@@ -459,6 +486,6 @@ step "verify"
 for f in index.html 404.html assets/site.css assets/site.js assets/search-index.json; do
   test -s "${OUT}/${f}" || { echo "エラー: ${f} が無い、または空" >&2; exit 1; }
 done
-verify_attribution "${OUT}" || exit 1
+verify_attribution "${OUT}" "${ROOT}/site/nav.toml" || exit 1
 
 step "完了: ${OUT}"
