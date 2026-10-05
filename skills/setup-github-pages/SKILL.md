@@ -88,7 +88,7 @@ bash tools/docs-site-gen/build-local.sh --clean --write-third-party
 1. `FF_REV` を `^[0-9a-f]{40}$` で検証
 2. `--write-third-party` 指定時: 固定 rev（`FF_REV`）の `LICENSE-MIT` を `raw.githubusercontent.com` から取得して `THIRD-PARTY-LICENSES` を生成（`FF_REV` が変わると commit の記載も変わるため、更新でも付ける）。取得は https 限定・リダイレクト非追従・30 秒・64KiB 上限で、HTTP 200 以外・上流の著作権行や許諾文が無い本文は**既存ファイルを変えずに停止**する
 3. `check_site.py`（予約パス・base_path 整合・予約アセット・プレースホルダー残存）
-4. `docs-site` を匿名 `cargo install --git`（`--rev "${FF_REV}" --locked`、インストール先は `tools/docs-site-gen/target/docs-site-install`）。同じ rev なら cargo が再インストールを省略する
+4. `docs-site` を匿名 `cargo install --git`（`--rev "${FF_REV}" --locked`、インストール先は `tools/docs-site-gen/target/docs-site-install`）。検査済み記録・実行ファイル・台帳（`.crates.toml`）の URL と `FF_REV` がすべて一致する場合は `build-local.sh` が再インストールを省略し、欠落・不一致は再インストールへ倒す
 5. `docs-site --no-page-sections` でサイトを `_site/` へ生成（リンク検査は fail-closed）
 6. `rebrand_site.py` による置換と、最小 verify・残存検査
 
