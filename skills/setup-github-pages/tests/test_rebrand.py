@@ -2647,14 +2647,41 @@ class ScaffoldRound4Test(unittest.TestCase):
 # 書き込み途中の失敗を注入して scaffold.py を起動するラッパー。RLIMIT_FSIZE でファイルサイズの上限を設け、
 # 上限を超える書き込みを「前半だけ書いてから EFBIG」にする（ディスクフル・I/O エラーと同じ「途中で止まる書き込み」。
 # `os.write` の差し替えと違い、書き込み方式（write_bytes / 一時ファイル + os.replace）に依らず同じ条件で再現できる）。
+# 上限の下でインポートされるモジュールの `.pyc` も同じ上限で切り詰められる（Linux では短い書き込みのまま `__pycache__` へ
+# 置き換えられ、上限なしの次の実行が `EOFError: marshal data too short` で落ちる）ため、先にバイトコードの書き出しを止める。
 FAIL_MID_WRITE = """
 import os, resource, runpy, signal, sys
+sys.dont_write_bytecode = True
 signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 limit = int(os.environ["SGP_FSIZE"])
 resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 """
+
+
+class FailMidWriteWrapperTest(unittest.TestCase):
+    """失敗注入ラッパー自体が、ファイルサイズ上限の下でバイトコードキャッシュ（.pyc）を書かないことの回帰テスト。
+
+    上限を超える書き込みは前半だけ書かれて短い書き込みとして返る（Linux）。Python は `.pyc` をその短い書き込みのまま
+    `__pycache__` へ置き換えるため、上限より大きいモジュール（`_common.py` など）の切り詰められた `.pyc` が
+    スキルのコピー（またはリポジトリ）に残り、上限なしの再実行が `EOFError: marshal data too short` で落ちる。
+    """
+
+    def test_wrapper_does_not_create_bytecode_cache_under_the_limit(self):
+        if os.name == "nt":
+            self.skipTest("RLIMIT_FSIZE が使えない")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "big_helper.py").write_text("DATA = %r\n" % ("x" * 5000))   # 上限（1000B）より大きい .pyc になる
+            (root / "main.py").write_text("import sys\nsys.path.insert(0, %r)\nimport big_helper\nprint(len(big_helper.DATA))\n" % d)
+            r = subprocess.run([sys.executable, "-c", FAIL_MID_WRITE, str(root / "main.py")],
+                               capture_output=True, text=True, env=dict(os.environ, SGP_FSIZE="1000"))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(r.stdout.strip(), "5000")
+            self.assertEqual(sorted(p.name for p in root.rglob("__pycache__")), [],
+                             "上限下の起動が __pycache__ を作った（切り詰められた .pyc が残り得る）")
+            self.assertEqual(sorted(p.name for p in root.rglob("*.pyc")), [])
 
 
 class ScaffoldAtomicWriteTest(unittest.TestCase):
