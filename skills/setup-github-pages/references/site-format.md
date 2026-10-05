@@ -1,4 +1,4 @@
-<!-- source: https://github.com/Fandhe-AI/fandhe-frontend/tree/cf5edb9b8f1bf2a63d51dcf50a8d2806e2d8f9f9/crates/docs-site/src (nav.rs, markdown.rs, highlight.rs, linkcheck.rs, redirect.rs, build.rs) -->
+<!-- source: https://github.com/Fandhe-AI/fandhe-frontend/tree/b3e31ef663a98b6080feb98c84ade238d1074a08/crates/docs-site/src (nav.rs, markdown.rs, highlight.rs, linkcheck.rs, redirect.rs, build.rs) -->
 <!-- 最終確認日: 2026-10-04 -->
 <!-- 取得状況: ✅ 取得済み（ソース精読 + 同 rev のビルド・生成での実測。redirects.toml は生成も実測済み） -->
 
