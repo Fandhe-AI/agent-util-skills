@@ -42,7 +42,7 @@ SKILL.md の Step 1（`--detect` によるモード判定）、新規構築フ�
 `tools/docs-site-gen` / `src` が対象内を指す symlink は --update でも進めない（kind=symlink の競合）。
 
 終了コード: 0 成功 / 2 入力不正・書き込み先が不適（親パスが通常ファイルなどを含む。書き込み前の検査で止まれば何も書かない。
-書き込み途中の OS エラーも 2 で、書けた分は created / updated に残る）・適用対象外 / 3 競合（所有ファイルの不一致・
+書き込み途中の OS エラーも 2 で、失敗したファイルは未変更か未作成のまま（ファイル単位で原子的に書く）、それ以前に書けた分は created / updated に残る）・適用対象外 / 3 競合（所有ファイルの不一致・
 配置後に編集）/ 4 配置後の check_site 失敗（ファイルは配置済み。指摘箇所を直す）。`--json` 指定時は、どの終了コードでも
 JSON を 1 つ標準出力へ出す。
 """
@@ -65,7 +65,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, COLOR_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
-    has_upstream_word, is_upstream_repo, resolves_inside, sanitize, write_target_problem, valid_owner, valid_repo_name,
+    atomic_write_bytes, has_upstream_word, is_upstream_repo, resolves_inside, sanitize, write_target_problem, valid_owner, valid_repo_name,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -1056,12 +1056,14 @@ def main(argv: list[str] | None = None) -> int:
     gi = args.target / ".gitignore"
     gi_lines: list[str] = []
     gi_ends_nl = True
+    gi_raw = b""   # 追記は「既存の全バイト + 追記分」を原子的に書き直す（部分追記で行が壊れて、再実行で重複追記にならないよう）
     why = write_target_problem(root_real, gi)
     if why:
         problems.append(f".gitignore（{why}）")
     elif os.path.lexists(gi):
         try:
-            gi_text = read_text_capped(gi)
+            gi_raw = read_capped(gi, TEXT_READ_CAP)
+            gi_text = gi_raw.decode("utf-8")
             gi_lines = gi_text.splitlines()
             gi_ends_nl = gi_text.endswith("\n") or not gi_text
         except (OSError, OverflowError, UnicodeDecodeError):
@@ -1145,6 +1147,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # 書き込みの途中で OS のエラーが出ても（権限・容量・分類後の競合する変更など）、トレースバックで落とさず、
     # 既存の終了コードの流儀（exit 2・--json は JSON 1 つ）で報告する。書けた分は created / updated に残る。
+    # 書き込みはファイル単位で原子的（atomic_write_bytes。失敗したファイルは未変更か未作成のまま）なので、
+    # 書けたファイルは生成予定と完全に一致し、再実行では `same`（未着手の更新は自動更新、未作成は新規作成）に
+    # 分類されて収束する。
     current = ""
     to_add: list[str] = []
     try:
@@ -1152,15 +1157,14 @@ def main(argv: list[str] | None = None) -> int:
             current = dst_rel
             dst = args.target / dst_rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(text.encode("utf-8"))   # バイト列で書く（プラットフォームの改行変換を通さない）
-            if executable:
-                dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            # バイト列で書く（プラットフォームの改行変換を通さない）。一時ファイル + os.replace の原子的な置き換え
+            atomic_write_bytes(dst, text.encode("utf-8"), executable=executable)
             summary["created" if action == "create" else "updated"].append(
                 dst_rel if action == "create" else {"path": dst_rel, "reason": reason})
         if manifest_changed:
             current = MANIFEST_REL
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            manifest_path.write_bytes(new_manifest.encode("utf-8"))
+            atomic_write_bytes(manifest_path, new_manifest.encode("utf-8"))
             summary["manifest_written"] = True
             summary["manifest_recreated"] = manifest is None and mode == "update"
 
@@ -1168,11 +1172,13 @@ def main(argv: list[str] | None = None) -> int:
         if to_add:
             current = ".gitignore"
             prefix = "" if not gi_lines or gi_ends_nl else "\n"
-            with gi.open("ab") as fh:
-                fh.write((prefix + "\n# docs サイト（setup-github-pages）\n" + "\n".join(to_add) + "\n").encode("utf-8"))
+            atomic_write_bytes(gi, gi_raw + (prefix + "\n# docs サイト（setup-github-pages）\n" + "\n".join(to_add) + "\n").encode("utf-8"))
     except OSError as e:
-        return finish(2, f"エラー: {current} の書き込みに失敗した（{type(e).__name__}）。書けたものは JSON の created / updated に"
-                      "残っている。原因（権限・空き容量・競合する変更）を直して再実行する（再実行は冪等）")
+        leftover = getattr(e, "leftover_tmp", None)
+        return finish(2, f"エラー: {current} の書き込みに失敗した（{type(e).__name__}）。{current} は変更されていない"
+                      "（ファイル単位で原子的に書くため、未変更か完全な内容のどちらかになる）。それ以前に書けたものは JSON の created / updated に"
+                      "残っている。原因（権限・空き容量・競合する変更）を直して同じコマンドを再実行する（再実行は冪等）"
+                      + (f"。一時ファイル {sanitize(str(leftover), 120)} を消せなかった。内容を確認して手動で削除する" if leftover else ""))
     summary["gitignore_added"] = to_add
 
     # 配置後の検証（利用者編集ファイルを含む構成全体が build の前提を満たすか）
