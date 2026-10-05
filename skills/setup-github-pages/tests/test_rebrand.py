@@ -3362,7 +3362,14 @@ class UpdateSnapshotLineEndingTest(unittest.TestCase):
         self.assertIn(f"SKIP {self.TPL} すでに無い", r2.stdout)
 
     def test_filter_attribute_path_never_runs_conversion_hash(self):
-        """filter 属性つきのパスでは、変換つきハッシュ（clean フィルタを起動し得る）を呼ばない: 番兵が作られず TAINT になる。"""
+        """filter 属性つきのパスでは、変換つきハッシュ（clean フィルタを起動し得る）を呼ばない。
+
+        対象ファイルは**編集しない**: 未編集なら guard の判定は「前回の記録との比較（記録なし）」から「HEAD との比較
+        （file_state の norm 経路）」へ進み、そこで filter 属性の検査（attr_filter → FILTERED）が効く。編集してしまうと、
+        変換つきハッシュを呼んでも呼ばなくても TAINT になり、検査の有無を区別できない。
+        検査を外すと、変換つきハッシュ（git hash-object）が clean フィルタを起動して番兵が作られ、かつ（clean が内容を
+        そのまま通すため）HEAD と一致して「印:」も出なくなる。検査があれば、番兵は作られず「印:」が出る。
+        """
         sentinel = self.base / "CLEAN-RAN"
         glob = self.base / "gcfg"
         glob.write_text(f'[filter "evil"]\n\tclean = touch {sentinel}; cat\n')
@@ -3370,13 +3377,20 @@ class UpdateSnapshotLineEndingTest(unittest.TestCase):
         self.assertEqual(self.sc().returncode, 0)
         self.git("add", "-A")
         self.git("commit", "-qm", "baseline")
-        (self.t / ".gitattributes").write_text(f"{self.RB} filter=evil\\n".replace("\\\\n", "\\n"))
-        with (self.t / self.RB).open("a") as fh:
-            fh.write("# touched\n")
+        self.assertFalse(sentinel.exists(), "属性を付ける前に clean フィルタが走った（テストの前提）")
+        (self.t / ".gitattributes").write_text(f"{self.RB} filter=evil\n")   # 実際の改行（属性値は evil だけ）
+        # 前提: フィルタが本当にこのパスへ結び付いている（結び付いていないのに通る、という見逃しを防ぐ）
+        attr = self.git("check-attr", "filter", "--", self.RB).strip()
+        self.assertEqual(attr, f"{self.RB}: filter: evil")
+        # 前提: 変換つきハッシュ（git hash-object の既定）を呼べば、この設定では実際に clean フィルタが起動する
+        self.git("hash-object", "--", self.RB)
+        self.assertTrue(sentinel.exists(), "テストの前提が成立していない（変換つきハッシュで clean フィルタが起動しない）")
+        sentinel.unlink()
+        # 本体: 未編集のまま guard / status。変換つきハッシュを呼ばないので番兵は作られず、FILTERED 由来で TAINT になる
         g = self.sh("guard", self.snap)
         self.assertEqual(g.returncode, 0, g.stderr)
-        self.assertIn(f"印: {self.RB}", g.stdout)
-        self.assertFalse(sentinel.exists(), "clean フィルタが起動された")
+        self.assertFalse(sentinel.exists(), "clean フィルタが起動された（filter 属性つきのパスで変換つきハッシュを呼んだ）")
+        self.assertIn(f"印: {self.RB}（HEAD とも前回の記録とも違う（利用者が触った）", g.stdout)
         self.assertEqual(self.sh("status", self.snap).returncode, 0)
         self.assertFalse(sentinel.exists())
 
