@@ -138,10 +138,13 @@ test('pages.yml の cache は cargo install の出力先だけを対象とし、
 test('build-local.sh の install 省略判定は台帳と FF_REV を照合し、cargo install より前にある', () => {
   const code = read('scripts/build-local.sh').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
   const guard = code.indexOf('guard_install_tree || exit 2')
-  const judge = code.indexOf('git+${FF_URL}?rev=${FF_REV}#${FF_REV}')
+  const judge = code.indexOf('"(git+%s?rev=%s#%s)"')
   const install = code.indexOf('cargo install --git')
   assert.ok(guard >= 0 && judge > guard && install > judge, '省略判定の位置が不正')
-  assert.match(code.slice(judge - 200, judge + 120), /grep -Fq -- /)
+  // 台帳は対象パッケージのエントリ単位で照合する（grep -Fq の部分一致では別エントリの記載でも通る）
+  assert.doesNotMatch(code.slice(guard, install), /grep -Fq/)
+  assert.match(code.slice(guard, install), /tomllib/)
+  assert.match(code.slice(guard, install), /fandhe-frontend-docs-site/)
 })
 
 test('pages.yml の action は SHA 固定（Fandhe-AI/actions の reusable のみ @latest）', () => {

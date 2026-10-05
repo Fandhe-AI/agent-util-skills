@@ -345,7 +345,29 @@ guard_install_tree || exit 2
 # 固定 URL と FF_REV の組でのインストールを記録している。欠落・不一致・読み取り失敗は install を実行する側へ倒す。
 NEED_INSTALL=1
 if [[ "${NEED_LOCK_CHECK}" -eq 0 && -f "${INSTALL_ROOT}/.crates.toml" ]] \
-  && grep -Fq -- "git+${FF_URL}?rev=${FF_REV}#${FF_REV}" "${INSTALL_ROOT}/.crates.toml"; then
+  && python3 -I -B -c '
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(1)
+# .crates.toml の [v1] は "<pkg> <version> (<source>)" = ["<bin>", ...]。対象パッケージの
+# エントリ自体の source が固定 URL・FF_REV の組で、かつ bin/docs-site を提供していることだけを成功とする
+# （別パッケージのエントリやコメントに同じ文字列があっても一致させない）
+url, rev, path = sys.argv[1], sys.argv[2], sys.argv[3]
+want = "(git+%s?rev=%s#%s)" % (url, rev, rev)
+try:
+    with open(path, "rb") as f:
+        v1 = tomllib.load(f).get("v1", {})
+except Exception:
+    sys.exit(1)
+for key, bins in v1.items():
+    parts = key.split(" ", 2)
+    if len(parts) == 3 and parts[0] == "fandhe-frontend-docs-site" and parts[2] == want \
+        and isinstance(bins, list) and "docs-site" in bins:
+        sys.exit(0)
+sys.exit(1)
+' "${FF_URL}" "${FF_REV}" "${INSTALL_ROOT}/.crates.toml"; then
   NEED_INSTALL=0
 fi
 if [[ "${NEED_INSTALL}" -eq 1 ]]; then
