@@ -163,8 +163,17 @@ def _resolve_real(path: Path) -> Path:
 
 
 def _in_git_dir(root_real: Path, real: Path) -> bool:
-    git_dir = root_real / ".git"
-    return real == git_dir or git_dir in real.parents
+    """実体が root 直下の `.git` 配下（`.git` 自体を含む）か。
+
+    名前は大文字小文字を区別せず比べる。macOS（APFS 既定）・Windows は大文字小文字を区別しないため、
+    `.GIT` / `.Git` も同じディレクトリを指す（`ln -s .GIT site` で `.git/` へ書き込み・読み取りが通ってしまう）。
+    区別するファイルシステムでは `.GIT` は別名の通常ディレクトリだが、判定を環境で変えず常に拒否する（安全側）。
+    """
+    try:
+        parts = real.relative_to(root_real).parts
+    except ValueError:
+        return False
+    return bool(parts) and parts[0].lower() == ".git"
 
 
 def resolves_inside(root_real: Path, path: Path) -> bool:
@@ -198,6 +207,13 @@ def write_target_problem(root_real: Path, path: Path) -> str | None:
         return "対象の外へ解決される（親ディレクトリが symlink の可能性）"
     if os.path.lexists(path) and not path.is_file():
         return "通常ファイルではない"
+    # 未作成の宛先は、存在する最も近い祖先がディレクトリでなければ書けない（親が通常ファイルだと mkdir が
+    # FileExistsError / NotADirectoryError になり、書き込みの途中で落ちて部分書き込みが残る）。書く前にここで拒否する。
+    ancestor = path.parent
+    while not os.path.lexists(ancestor) and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if os.path.lexists(ancestor) and not ancestor.is_dir():
+        return "親パスの途中にディレクトリではないもの（通常ファイル等）がある"
     return None
 
 

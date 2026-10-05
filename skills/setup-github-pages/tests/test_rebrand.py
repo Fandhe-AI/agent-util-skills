@@ -2448,6 +2448,200 @@ class ScaffoldRound3Test(unittest.TestCase):
         import _common
         self.assertNotIn(chr(0x2800), _common.sanitize("a" + chr(0x2800) + "b"))
 
+class ScaffoldRound4Test(unittest.TestCase):
+    """4 巡目の監査（F1 生成器ディレクトリの symlink・F2 unrelated での旧版 pages.yml の書き換え・F3 `.git` の大文字小文字・
+    F4 親パスが通常ファイル）の回帰テスト。中止すべき場面では「ファイルの一覧と内容ハッシュが実行前後で一致」「終了コード」
+    「`--json` の `error` / `conflicts`」を確認する。"""
+
+    ARGS = ScaffoldHardeningTest.ARGS
+    PAGES = ScaffoldHardeningTest.PAGES
+    MANIFEST = ScaffoldHardeningTest.MANIFEST
+    setUp = ScaffoldHardeningTest.setUp
+    sc = ScaffoldHardeningTest.sc
+    init = ScaffoldHardeningTest.init
+    pages = ScaffoldHardeningTest.pages
+    legacy_pages = ScaffoldHardeningTest.legacy_pages
+
+    def snap(self):
+        """対象の全エントリ（`.git` も含む。ディレクトリ・symlink のリンク先・通常ファイルの sha256）。"""
+        import hashlib
+        res = {}
+        for dirpath, dirnames, filenames in os.walk(self.t):
+            for name in dirnames + filenames:
+                p = Path(dirpath) / name
+                rel = p.relative_to(self.t).as_posix()
+                if p.is_symlink():
+                    res[rel] = ("link", os.readlink(p))
+                elif p.is_dir():
+                    res[rel] = ("dir", None)
+                else:
+                    res[rel] = ("file", hashlib.sha256(p.read_bytes()).hexdigest())
+        return res
+
+    def assert_refused_without_writing(self, code, *extra, args=ARGS):
+        before = self.snap()
+        r = self.sc("--json", *extra, args=args)
+        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        j = json.loads(r.stdout)   # どの終了コードでも JSON が 1 つ出る
+        self.assertEqual(j["exit_code"], code)
+        self.assertEqual(self.snap(), before, "中止すべき場面で 1 バイトも書かない")
+        self.assertEqual(r.stdout.count("\n"), 1, "JSON は 1 つだけ")
+        return j
+
+    # ---- F1: tools/docs-site-gen・src が root 内を指すディレクトリ symlink
+
+    def test_generator_dir_symlink_inside_root_is_refused_even_with_update(self):
+        real = self.t / "real-gen"
+        real.mkdir()
+        (real / "evil.py").write_text("print(1)\n")
+        (self.t / "tools").mkdir()
+        (self.t / "tools/docs-site-gen").symlink_to("../real-gen")
+        det = json.loads(self.sc("--detect", "--json", args=()).stdout)
+        self.assertEqual((det["mode"], det["kind"]), ("foreign", "unrelated"))
+        self.assertIn("シンボリックリンク", " ".join(det["reasons"]))
+        for extra in ((), ("--update",)):
+            j = self.assert_refused_without_writing(3, *extra)
+            self.assertEqual([(c["path"], c["kind"]) for c in j["conflicts"]], [("tools/docs-site-gen", "symlink")])
+        self.assert_refused_without_writing(0, "--show-diff")
+        # 同内容の実ディレクトリなら foreign_dir（--update で進める）。symlink はそれより厳しい
+        (self.t / "tools/docs-site-gen").unlink()
+        shutil.move(str(real), str(self.t / "tools/docs-site-gen"))
+        j = self.assert_refused_without_writing(3)
+        self.assertEqual([c["kind"] for c in j["conflicts"]], ["foreign_dir"])
+
+    def test_empty_generator_dir_symlink_inside_root_is_refused(self):
+        (self.t / "real-gen").mkdir()
+        (self.t / "tools").mkdir()
+        (self.t / "tools/docs-site-gen").symlink_to("../real-gen")
+        for extra in ((), ("--update",)):
+            j = self.assert_refused_without_writing(3, *extra)
+            self.assertEqual([(c["path"], c["kind"]) for c in j["conflicts"]], [("tools/docs-site-gen", "symlink")])
+
+    def test_src_symlink_inside_root_is_refused_even_with_update(self):
+        (self.t / "tools/docs-site-gen").mkdir(parents=True)
+        (self.t / "real-src").mkdir()
+        (self.t / "tools/docs-site-gen/src").symlink_to("../../real-src")
+        det = json.loads(self.sc("--detect", "--json", args=()).stdout)
+        self.assertEqual((det["mode"], det["kind"]), ("foreign", "unrelated"))
+        for extra in ((), ("--update",)):
+            j = self.assert_refused_without_writing(3, *extra)
+            self.assertEqual([(c["path"], c["kind"]) for c in j["conflicts"]], [("tools/docs-site-gen/src", "symlink")])
+
+    def test_scaffolded_repo_whose_generator_dir_becomes_a_symlink_is_refused(self):
+        self.init()
+        gen = self.t / "tools/docs-site-gen"
+        shutil.move(str(gen), str(self.t / "moved-gen"))
+        gen.symlink_to("../moved-gen")
+        for extra in ((), ("--update",)):
+            j = self.assert_refused_without_writing(3, *extra)
+            self.assertIn(("tools/docs-site-gen", "symlink"), [(c["path"], c["kind"]) for c in j["conflicts"]])
+
+    # ---- F2: kind=unrelated では、旧版形式の pages.yml を --update なしで書き換えない
+
+    def test_unrelated_with_only_legacy_format_pages_yml_does_not_rewrite_it_without_update(self):
+        self.init()
+        for rel in ("tools/docs-site-gen", "site", "rust-toolchain.toml"):
+            p = self.t / rel
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+        (self.t / self.PAGES).write_text(self.legacy_pages(['      - "docs/**"']))
+        det = json.loads(self.sc("--detect", "--json", args=()).stdout)
+        self.assertEqual((det["mode"], det["kind"]), ("foreign", "unrelated"))
+        j = self.assert_refused_without_writing(3)
+        self.assertEqual([(c["path"], c["kind"]) for c in j["conflicts"]], [(self.PAGES, "no_manifest")])
+        r = self.sc("--update", "--json")   # 内容を確認した上での --update でだけ進む（追加 paths は利用者区間へ）
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('      - "docs/**"', self.pages().split("sgp:user-paths:begin")[1].split("sgp:user-paths:end")[0])
+
+    # ---- F3: 大文字小文字を区別しないファイルシステムでの .git 配下の除外
+
+    def test_git_dir_is_rejected_regardless_of_letter_case(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import _common
+        root = Path(os.path.realpath(self.t))
+        for name in (".git", ".GIT", ".Git", ".gIt"):
+            (self.t / name).mkdir(exist_ok=True)
+            self.assertFalse(_common.resolves_inside(root, root / name / "config"), name)
+            self.assertIsNotNone(_common.write_target_problem(root, root / name / "x"), name)
+        self.assertTrue(_common.resolves_inside(root, root / ".github" / "x"), ".github は .git ではない")
+        self.assertTrue(_common.resolves_inside(root, root / ".gitignore"), ".gitignore は .git ではない")
+        self.assertTrue(_common.resolves_inside(root, root / "a" / ".GIT" / "x"), "root 直下以外の .git という名前は対象外")
+
+    def test_symlink_to_upper_case_git_dir_is_refused_without_writing(self):
+        (self.t / ".GIT").mkdir()
+        (self.t / ".GIT/config").write_text("[core]\n")
+        (self.t / "site").symlink_to(".GIT")
+        j = self.assert_refused_without_writing(3)   # outside_root（.git 配下は書かない・読まない）
+        self.assertIn("outside_root", [c["kind"] for c in j["conflicts"]])
+        self.assertEqual(sorted(p.name for p in (self.t / ".GIT").iterdir()), ["config"])
+
+    def test_check_site_does_not_read_through_upper_case_git_dir(self):
+        self.init()
+        (self.t / ".GIT").mkdir()
+        (self.t / ".GIT/config").write_text("[core]\n")
+        nav = self.t / "site/nav.toml"
+        nav.write_text(nav.read_text() + '\n[[section]]\ntitle = "X"\n\n[[section.page]]\ntitle = "cfg"\n'
+                       'path = "/cfg/"\nsource = ".GIT/config"\n')
+        r = run("check_site.py", "--root", self.t)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    # ---- F4: 配置先の親パスが通常ファイル（書き込み前に検出し、トレースバックにしない）
+
+    def assert_parent_file_refused(self, rel, code=2):
+        parent = self.t / rel
+        parent.parent.mkdir(parents=True, exist_ok=True)
+        parent.write_text("not a directory\n")
+        before = self.snap()
+        r = self.sc("--json")
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(j["exit_code"], code)
+        self.assertEqual(self.snap(), before, f"{rel} が通常ファイル: 何も書かない")
+        return j
+
+    def test_site_being_a_regular_file_is_refused_without_writing(self):
+        det = None
+        (self.t / "site").write_text("x\n")
+        det = json.loads(self.sc("--detect", "--json", args=()).stdout)
+        self.assertEqual((det["mode"], det["kind"]), ("new", "none"))
+        (self.t / "site").unlink()
+        j = self.assert_parent_file_refused("site")
+        self.assertIn("site/nav.toml", j["error"])
+
+    def test_workflows_dir_being_a_regular_file_is_refused_without_writing(self):
+        j = self.assert_parent_file_refused(".github/workflows")
+        self.assertIn(self.PAGES, j["error"])
+
+    def test_tools_being_a_regular_file_is_refused_without_writing(self):
+        self.assert_parent_file_refused("tools")
+
+    def test_generator_dir_being_a_regular_file_is_refused_even_with_update(self):
+        self.assert_parent_file_refused("tools/docs-site-gen")   # 書き込み前の検査（exit 2）が foreign_dir（exit 3）より先
+        before = self.snap()
+        r = self.sc("--update", "--json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(self.snap(), before)
+
+    def test_src_being_a_regular_file_is_refused_without_writing(self):
+        self.assert_parent_file_refused("tools/docs-site-gen/src")
+
+    def test_os_error_while_writing_is_reported_as_json_not_traceback(self):
+        """分類後に書き込みが失敗しても（ここでは親ディレクトリの書き込み権限なし）、トレースバックにせず JSON を出す。"""
+        if os.name == "nt" or os.geteuid() == 0:
+            self.skipTest("権限による書き込み失敗を作れない環境")
+        d = self.t / "site"
+        d.mkdir()
+        os.chmod(d, 0o500)
+        self.addCleanup(os.chmod, d, 0o700)
+        r = self.sc("--json")
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(j["exit_code"], 2)
+        self.assertIn("書き込み", j["error"])
+
+
 class SectionReferenceTest(unittest.TestCase):
     """節名の参照（SKILL.md・references/<file> の見出しを名指しする形、および「…」節 の形）が実在の見出しに解決することの機械検査。
 
