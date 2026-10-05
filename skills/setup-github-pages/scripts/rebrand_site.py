@@ -8,7 +8,7 @@ docs-site-gen（fandhe-frontend の docs-site を呼ぶ wrapper）が出力し�
 バージョン badge・フッターのタグライン / crates.io リンク / 著作権・favicon・lang）を
 対象リポジトリの値へ差し替える。`build-local.sh`（ローカルと CI の共通入口）から呼ばれる。
 上流の `[site]` が `title` / `base_path` 以外のキーを受理するようになったら本スクリプトごと
-不要になる（SKILL.md「上流改修の追跡」節）。
+不要になる（setup-github-pages スキルの references/maintenance.md「上流改修の追跡」）。
 
 # 置換の方針（なぜ一括置換ではないか）
 
@@ -328,8 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     if problems:
         for p in problems:
             print(f"NG {p}", file=sys.stderr)
-        print("置換を中止した（dist は変更していない）。上流 rev の構造変更を疑い、"
-              "SKILL.md「FF_REV の更新手順」で置換対象を再確認すること。", file=sys.stderr)
+        print("置換を中止した（dist は変更していない）。上流のデザイン更新で HTML の構造が変わり、置換対象が合わなくなった"
+              "可能性が高い。スキル側の修正が必要（保守者は setup-github-pages スキルの references/maintenance.md"
+              "「FF_REV の更新手順」で置換対象を再確認する）。利用者は更新を取り消し、スキルの修正を待つ。", file=sys.stderr)
         return 1
 
     dist_real = Path(os.path.realpath(args.dist))

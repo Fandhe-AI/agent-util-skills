@@ -101,13 +101,13 @@ TOML が壊れる・注入される）ため、値は `scaffold.py` が検証・
 | `manifest_written` / `manifest_recreated` | マニフェストを書いたか／無くて再作成したか（旧版からの移行） |
 | `warnings` | 警告（マニフェストの無視・`--branch` の食い違い・想定外ファイル・引き継がなかった paths など） |
 | `check` | 配置後の検証（`ok` / `errors` / `warnings`） |
-| `diffs` | `--show-diff` のとき、競合ごとの差分 |
+| `diffs` | `--show-diff` のとき、競合したパスをキーにした辞書（`diffs.<path>` に `status`・`reason`・`conflict_kind`・`lines`） |
 | `error` / `exit_code` | エラーメッセージ（exit 2・4）／終了コード |
 
 ## --show-diff の安全性
 
 内容を読むのは、対象リポジトリ内に解決される通常ファイルだけ（256 KiB・200 行まで。`O_NOFOLLOW`）。symlink・特殊ファイル・
-対象の外・`.git` 配下・巨大・UTF-8 でないものは内容を読まず、理由だけ出す（`diffs[].status`: `symlink` / `outside` /
+対象の外・`.git` 配下・巨大・UTF-8 でないものは内容を読まず、理由だけ出す（`diffs.<path>.status`: `symlink` / `outside` /
 `not_regular` / `too_large` / `not_utf8`）。改行コードだけの差は `newline_only`。**競合の差分を `diff -u` などの外部
 コマンドで確認しない**（symlink を辿ってリンク先、例えば認証情報ファイルを端末とエージェントの文脈に出してしまう）。
 

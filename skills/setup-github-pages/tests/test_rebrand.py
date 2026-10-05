@@ -1652,7 +1652,7 @@ class ScaffoldHardeningTest(unittest.TestCase):
             (SKILL / "references" / "scaffold-reference.md").read_text(encoding="utf-8")
         r = subprocess.run([sys.executable, str(SCRIPTS / "scaffold.py"), "-h"], capture_output=True, text=True)
         known = set(re.findall(r"--[a-z][a-z-]*", r.stdout))
-        # scaffold.py を含む論理行（バックスラッシュ継続を結合）と、共通節「scaffold.py の分類と終了コード」
+        # scaffold.py を含む論理行（バックスラッシュ継続を結合）と、共通節「scaffold.py の概要と終了コード」
         joined = re.sub(r"\\\n\s*", " ", md)
         used = set()
         opt = r"(?<![\w-])--[a-z][a-z-]*"
@@ -2121,6 +2121,53 @@ class ScaffoldRound3Test(unittest.TestCase):
         sys.path.insert(0, str(SCRIPTS))
         import _common
         self.assertNotIn(chr(0x2800), _common.sanitize("a" + chr(0x2800) + "b"))
+
+class SectionReferenceTest(unittest.TestCase):
+    """節名の参照（SKILL.md・references/<file> の見出しを名指しする形、および「…」節 の形）が実在の見出しに解決することの機械検査。
+
+    SKILL.md を分割・改名したあとに、配置先（対象リポジトリの tools/docs-site-gen/）には存在しない節を
+    指し続ける stale 参照が残ると、利用者が見る実行時メッセージが空振りする。
+    """
+
+    def headings(self, path):
+        return [re.sub(r"\s+", " ", h).strip() for h in re.findall(r"^#{1,6} (.+)$", path.read_text(encoding="utf-8"), re.M)]
+
+    def resolves(self, name, heads):
+        return any(name in h for h in heads)
+
+    def test_section_name_references_resolve(self):
+        skill_heads = self.headings(SKILL / "SKILL.md")
+        ref_heads = {f"references/{p.name}": self.headings(p) for p in (SKILL / "references").glob("*.md")}
+        all_heads = skill_heads + [h for hs in ref_heads.values() for h in hs]
+        files = [SKILL / "SKILL.md", *sorted((SKILL / "references").glob("*.md")), *sorted((SKILL / "scripts").glob("*")),
+                 *sorted((SKILL / "templates").rglob("*")), *sorted((SKILL / "tests").glob("*.mjs"))]   # 本ファイルは検査式そのものを含むため対象外
+        checked = 0
+        for f in files:
+            if not f.is_file():
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            rel = f.relative_to(SKILL)
+            for name in re.findall(r"SKILL\.md「([^」]+)」", text):
+                checked += 1
+                self.assertTrue(self.resolves(name, skill_heads), f"{rel}: SKILL.md「{name}」が見出しに解決しない")
+            for fname, name in re.findall(r"(references/[a-z-]+\.md)「([^」]+)」", text):
+                checked += 1
+                self.assertIn(fname, ref_heads, f"{rel}: {fname} が存在しない")
+                self.assertTrue(self.resolves(name, ref_heads[fname]), f"{rel}: {fname}「{name}」が見出しに解決しない")
+            if f.suffix == ".md":
+                for name in re.findall(r"「([^」]{2,40})」節", text):
+                    checked += 1
+                    self.assertTrue(self.resolves(name, all_heads), f"{rel}: 「{name}」節が見出しに解決しない")
+        self.assertGreater(checked, 5, "節名参照が 5 件に満たない（検査の抽出が壊れている可能性）")
+
+    def test_shipped_scripts_do_not_point_at_skill_md_sections(self):
+        # 配置先に SKILL.md は無い。実行時メッセージ・コメントは、スキルのパス（references/…）で指す
+        for name in ("rebrand_site.py", "check_site.py", "_common.py", "build-local.sh"):
+            text = (SCRIPTS / name).read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"SKILL\.md「", name)
 
 
 class CheckSiteTest(unittest.TestCase):

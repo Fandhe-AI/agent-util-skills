@@ -5,7 +5,7 @@
 # docs サイトのファイル書式（nav.toml / redirects.toml / Markdown）
 
 生成器は fandhe-frontend の docs-site（`FF_REV` 固定）。ここに書く制約は**その rev の実装**に基づく。
-`FF_REV` を更新したら本ファイルの各節を再確認する（SKILL.md「FF_REV の更新手順」）。
+`FF_REV` を更新したら本ファイルの各節を再確認する（references/maintenance.md「FF_REV の更新手順」）。
 
 ## nav.toml
 
