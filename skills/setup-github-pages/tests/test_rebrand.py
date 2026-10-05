@@ -547,9 +547,28 @@ class ThirdPartyLicenseTest(unittest.TestCase):
 
     REV = "b3e31ef663a98b6080feb98c84ade238d1074a08"
     GOOD = (
-        "MIT License\n\nCopyright (c) 2026 Fandhe-AI / fandhe-frontend contributors\n\n"
-        "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
-        "of this software.\n"
+        "Copyright (c) 2026 Fandhe-AI / fandhe-frontend contributors\n\n"
+        "Permission is hereby granted, free of charge, to any\n"
+        "person obtaining a copy of this software and associated\n"
+        "documentation files (the \"Software\"), to deal in the\n"
+        "Software without restriction, including without\n"
+        "limitation the rights to use, copy, modify, merge,\n"
+        "publish, distribute, sublicense, and/or sell copies of\n"
+        "the Software, and to permit persons to whom the Software\n"
+        "is furnished to do so, subject to the following\n"
+        "conditions:\n\n"
+        "The above copyright notice and this permission notice\n"
+        "shall be included in all copies or substantial portions\n"
+        "of the Software.\n\n"
+        "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\n"
+        "ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\n"
+        "TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\n"
+        "PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\n"
+        "SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\n"
+        "CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\n"
+        "OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\n"
+        "IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\n"
+        "DEALINGS IN THE SOFTWARE.\n"
     ).encode()
 
     def setUp(self):
@@ -620,11 +639,17 @@ class ThirdPartyLicenseTest(unittest.TestCase):
                 self.assert_failed_untouched(self.run_func(), b"old\n")
 
     def test_missing_copyright_permission_or_empty_body(self):
+        def cls_good_without_disclaimer():
+            return self.GOOD.split(b"THE SOFTWARE IS PROVIDED")[0]
         cases = {
             "no-copyright": b"MIT License\n\nPermission is hereby granted, free of charge, to any person\n",
             "no-permission": b"Copyright (c) 2026 Fandhe-AI / fandhe-frontend contributors\n",
             "wrong-holder": b"Copyright (c) 2026 Someone Else\nPermission is hereby granted, free of charge, to any x\n",
             "empty": b"",
+            "truncated-after-permission-line": b"Copyright (c) 2026 Fandhe-AI / fandhe-frontend contributors\n\n"
+                b"Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software.\n",
+            "no-disclaimer": cls_good_without_disclaimer(),
+            "trailing-garbage": ThirdPartyLicenseTest.GOOD + b"extra line\n",
         }
         for name, body in cases.items():
             with self.subTest(name=name):

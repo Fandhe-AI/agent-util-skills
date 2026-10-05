@@ -167,7 +167,7 @@ fi
 # ---- THIRD-PARTY-LICENSES（固定 rev の LICENSE-MIT を取得して同梱する）
 # >>> third_party（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
 # 取得先は固定 URL（可変部分は検証済み FF_REV のみ）。リダイレクト非追従・https 限定・時間とサイズを制限し、
-# 本文が上流の著作権行と許諾文を含まなければ既存の THIRD-PARTY-LICENSES に触れず非 0 で停止する。
+# 本文が上流の著作権行・MIT の全条項（許諾・条件・免責）を含まなければ既存の THIRD-PARTY-LICENSES に触れず非 0 で停止する。
 # 前提: ROOT_REAL・FF_REV が検証済みで、宛先が symlink・ディレクトリでないこと（冒頭で確認済み）。
 write_third_party() {
   local license_url="https://raw.githubusercontent.com/Fandhe-AI/fandhe-frontend/${FF_REV}/LICENSE-MIT"
@@ -215,6 +215,28 @@ write_third_party() {
       return 1
     fi
   done
+  # 全文の完全性: 冒頭だけの切り詰め本文や条件・免責条項を欠く本文を弾く。MIT の条項ごとの固定句が
+  # 空白正規化後の本文にすべて含まれ、末尾が免責条項の最終文で終わることを要求する（改行位置の差は許容）。
+  local norm phrase
+  norm="$(LC_ALL=C tr -s '[:space:]' ' ' < "${dl_tmp}")" || { echo "エラー: LICENSE-MIT の正規化に失敗。THIRD-PARTY-LICENSES は変更しない" >&2; return 1; }
+  norm="${norm% }"
+  local -a phrases=(
+    'to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software'
+    'subject to the following conditions:'
+    'The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.'
+    'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED'
+    'IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY'
+  )
+  for phrase in "${phrases[@]}"; do
+    if [[ "${norm}" != *"${phrase}"* ]]; then
+      echo "エラー: 取得した LICENSE-MIT が MIT 本文として不完全（条件または免責条項が欠けている）。THIRD-PARTY-LICENSES は変更しない" >&2
+      return 1
+    fi
+  done
+  if [[ "${norm}" != *"OTHER DEALINGS IN THE SOFTWARE." ]]; then
+    echo "エラー: 取得した LICENSE-MIT の末尾が免責条項の最終文でない（切り詰めの疑い）。THIRD-PARTY-LICENSES は変更しない" >&2
+    return 1
+  fi
   # 呼び出し側が `|| exit 1` で受けるため、bash はこの関数内の set -e を無効にする。
   # 書き込み・chmod・mv は失敗を明示的に検査し、不完全なファイルで置き換えない。
   if ! {
