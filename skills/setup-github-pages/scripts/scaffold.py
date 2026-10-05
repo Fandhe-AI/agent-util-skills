@@ -64,8 +64,9 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 # append: 同じディレクトリに標準モジュール名のファイルがあっても、標準ライブラリを先に解決させる
 sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
-    BIDI_RE, COLOR_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, LANG_RE, LETTER_RE, MAX_TEXT_LEN, UPSTREAM_BRAND, Brand,
-    atomic_write_bytes, has_upstream_word, is_upstream_repo, resolves_inside, sanitize, write_target_problem, valid_owner, valid_repo_name,
+    BIDI_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, MAX_TEXT_LEN, SITE_BRAND_MAX, SITE_BADGE_MAX,
+    atomic_write_bytes, check_site_values, is_upstream_repo, pages_base_path, resolves_inside, sanitize,
+    title_problem, write_target_problem, valid_owner, valid_repo_name,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -217,27 +218,30 @@ def regular_inside(root_real: Path, path: Path) -> bool:
 
 
 def toml_escape(value: str) -> str:
+    """値を TOML サブセットの二重引用符文字列として安全に書ける形にする。
+
+    不変条件: 返す文字列に生の改行・制御文字を含めない。行ベースの構造が壊れて別のキーが注入されるため、
+    制御文字が 1 つでもあれば ValueError で止める（入力検証が先に拒否するので通常は到達しない多層防御）。
+    サブセットが表現できる制御文字は `\\n` `\\t` だけで、`[site]` の値としては上流と check_site が拒否するため、
+    エスケープして通す経路は作らない。
+    """
+    if CONTROL_RE.search(value):
+        raise ValueError("TOML へ書く値に制御文字を含められない")
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def validate_text(name: str, value: str, *, required: bool) -> str:
+def validate_text(name: str, value: str, *, required: bool, max_len: int = MAX_TEXT_LEN) -> str:
     if required and not value.strip():
         raise ValueError(f"--{name} は必須")
     if CONTROL_RE.search(value):
         raise ValueError(f"--{name} に制御文字を含められない")
-    if len(value) > MAX_TEXT_LEN:
-        raise ValueError(f"--{name} は {MAX_TEXT_LEN} 文字以内")
+    if len(value) > max_len:
+        raise ValueError(f"--{name} は {max_len} 文字以内")
     if BIDI_RE.search(value):
         raise ValueError(f"--{name} に双方向制御文字を含められない")
     if PLACEHOLDER_RE.search(value):
         # 置換結果が再置換されて意図しない値になる経路を入力段階で断つ
         raise ValueError(f"--{name} にプレースホルダー（__SGP_*__）を含められない")
-    if has_upstream_word(value):
-        raise ValueError(
-            f"--{name} に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
-            "（生成後の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可。"
-            "--copyright の既定値は owner を含むため、必要なら --copyright を明示する）"
-        )
     return value
 
 
@@ -711,11 +715,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--branch", default=None,
                     help="既定ブランチ名（gh repo view で解決した値）。新規構築で必須。更新では省略すると既存の pages.yml から読む")
     ap.add_argument("--title", default=None, help="サイトタイトル（nav.toml [site].title・トップ見出し）。新規構築で必須")
-    ap.add_argument("--brand", default=None, help="ヘッダーのブランド名（既定: --title）")
-    ap.add_argument("--tagline", default="")
+    ap.add_argument("--brand", default=None, help="ヘッダーのブランド名（nav.toml [site].brand。64 文字以内。既定: --title）")
+    ap.add_argument("--tagline", default=None,
+                    help="フッターのタグライン（nav.toml [site].tagline）。新規構築で必須（空にできない。既定値は補わない）")
     ap.add_argument("--copyright", dest="copyright_", default=None, help="既定: © <年> <owner>")
     ap.add_argument("--lang", default="ja")
-    ap.add_argument("--version-badge", default="")
+    ap.add_argument("--version-badge", default="", help="ブランド横の badge（nav.toml [site].version_badge。32 文字以内。空で非表示）")
     ap.add_argument("--favicon-letter", default=None, help="既定: ブランド名の先頭英数字")
     ap.add_argument("--favicon-color", default="#2b6cb0")
     ap.add_argument("--update", action="store_true",
@@ -781,8 +786,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if mode == "new" and not full and not args.show_diff:
             missing = [n for n, v in (("--owner", args.owner), ("--repo", args.repo),
-                                      ("--branch", args.branch), ("--title", args.title)) if v is None]
+                                      ("--branch", args.branch), ("--title", args.title),
+                                      ("--tagline", args.tagline)) if v is None]
             raise ValueError(f"新規構築には {', '.join(missing)} が必要（更新モードでは省略できる）")
+        if (full or args.tagline is not None) and (args.tagline is None or not args.tagline.strip()):
+            raise ValueError("--tagline は必須（[site].tagline は空にできない。未指定だと上流の既定文言が公開されるため、"
+                             "サイトの説明を 1 行指定する）")
         if args.owner is not None and not valid_owner(args.owner):
             raise ValueError("--owner が GitHub の owner 名として不正")
         if args.repo is not None and not valid_repo_name(args.repo):
@@ -806,19 +815,19 @@ def main(argv: list[str] | None = None) -> int:
         title = None
         if full:
             title = validate_text("title", args.title, required=True)
-            brand = validate_text("brand", args.brand if args.brand is not None else title, required=True)
-            tagline = validate_text("tagline", args.tagline, required=False)
-            badge = validate_text("version-badge", args.version_badge, required=False)
-            if not LANG_RE.fullmatch(args.lang):
-                raise ValueError("--lang は BCP 47 風（例: ja / en）")
-            if not COLOR_RE.fullmatch(args.favicon_color):
-                raise ValueError("--favicon-color は #RRGGBB 形式")
+            why = title_problem(title)
+            if why:
+                raise ValueError(f"--{why}")
+            if args.brand is None and len(title) > SITE_BRAND_MAX:
+                raise ValueError(f"--title が {SITE_BRAND_MAX} 文字を超える。ブランド名は {SITE_BRAND_MAX} 文字以内のため --brand を明示する")
+            brand = validate_text("brand", args.brand if args.brand is not None else title, required=True,
+                                  max_len=SITE_BRAND_MAX)
+            tagline = validate_text("tagline", args.tagline, required=True)
+            badge = validate_text("version-badge", args.version_badge, required=False, max_len=SITE_BADGE_MAX)
             letter = args.favicon_letter
             if letter is None:
                 m = re.search(r"[A-Za-z0-9]", brand)
                 letter = m.group(0).upper() if m else ""
-            if not LETTER_RE.fullmatch(letter):
-                raise ValueError("--favicon-letter は英数字 1 文字")
             if args.copyright_ is None:
                 import datetime
                 year = args.year or str(datetime.date.today().year)
@@ -829,19 +838,30 @@ def main(argv: list[str] | None = None) -> int:
                 copyright_ = args.copyright_
             copyright_ = validate_text("copyright", copyright_, required=True)
             repository = f"https://github.com/{args.owner}/{args.repo}"
-            probe = Brand(brand, repository, args.owner, args.repo, tagline, copyright_, args.lang,
-                          badge, letter, args.favicon_color)
+            # 書く前に check_site と同じ検証器を通す（scaffold は check_site が拒否する値を書かない）
+            flag = {"brand": "--brand", "repository_url": "--owner/--repo", "tagline": "--tagline",
+                    "copyright": "--copyright", "version_badge": "--version-badge", "lang": "--lang",
+                    "brand_mark": "--favicon-letter", "brand_color": "--favicon-color"}
+            problems = check_site_values({
+                "brand": brand, "repository_url": repository, "tagline": tagline, "copyright": copyright_,
+                "version_badge": badge, "lang": args.lang, "brand_mark": letter, "brand_color": args.favicon_color,
+            })
+            if problems:
+                text = "; ".join(problems)
+                for k, f in flag.items():
+                    text = text.replace(f"`{k}`", f"`{k}`（{f}）")
+                raise ValueError(text)
             subs = {
                 "__SGP_SITE_TITLE__": toml_escape(title),
-                "__SGP_BASE_PATH__": probe.base_path,
+                "__SGP_BASE_PATH__": toml_escape(pages_base_path(args.owner, args.repo)),
                 "__SGP_BRAND__": toml_escape(brand),
-                "__SGP_REPOSITORY__": repository,
+                "__SGP_REPOSITORY__": toml_escape(repository),
                 "__SGP_TAGLINE__": toml_escape(tagline),
                 "__SGP_COPYRIGHT__": toml_escape(copyright_),
-                "__SGP_LANG__": args.lang,
+                "__SGP_LANG__": toml_escape(args.lang),
                 "__SGP_VERSION_BADGE__": toml_escape(badge),
-                "__SGP_FAVICON_LETTER__": letter,
-                "__SGP_FAVICON_COLOR__": args.favicon_color,
+                "__SGP_FAVICON_LETTER__": toml_escape(letter),
+                "__SGP_FAVICON_COLOR__": toml_escape(args.favicon_color),
                 "__SGP_DEFAULT_BRANCH__": branch,
             }
         ff_rev = (SKILL_DIR / "templates/docs-site-gen/FF_REV").read_text().strip()
@@ -1183,9 +1203,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # 配置後の検証（利用者編集ファイルを含む構成全体が build の前提を満たすか）
     import check_site
-    brand_path = args.target / "tools" / "docs-site-gen" / "brand.toml"
     try:
-        errors, check_warnings = check_site.check(root_real, brand_path)
+        errors, check_warnings = check_site.check(root_real)
     except ValueError as e:
         errors, check_warnings = [str(e)], []
     summary["check"] = {"ok": not errors, "errors": [sanitize(e) for e in errors],
@@ -1216,7 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
                 state = "未編集" if d["edited"] is False else "配置後に編集あり" if d["edited"] else "編集の有無は不明"
                 out(f"  - {d['path']}（{state}）")
         if keep:
-            out("注: 保持したファイルの内容（brand.toml・nav.toml 等）は生成予定と一致する保証がない。"
+            out("注: 保持したファイルの内容（nav.toml 等）は生成予定と一致する保証がない。"
                 "下の check_site で検証する（失敗したら該当ファイルを直す）。")
         for w in check_warnings:
             out(f"警告 {w}")

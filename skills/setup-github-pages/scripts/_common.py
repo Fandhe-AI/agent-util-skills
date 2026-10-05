@@ -1,9 +1,10 @@
-"""setup-github-pages 共通部品: TOML サブセットのパーサと brand.toml の検証。
+"""setup-github-pages 共通部品: TOML サブセットのパーサと nav.toml `[site]` の検証。
 
 # 役割・境界
 
-`rebrand_site.py`（生成 dist の後処理）と `check_site.py`（生成前の事前検証）が
-同じ解釈で `nav.toml` / `brand.toml` を読み、同じ入力検証を通すための共有モジュール。
+`check_site.py`（生成前の事前検証）と `scaffold.py`（雛形の配置）が同じ解釈で
+`nav.toml` を読み、`[site]` のブランド値に同じ検証を通すための共有モジュール
+（`rebrand_site.py` も `brand.toml` の読み込みに使う。廃止は #51）。
 対象リポジトリの `tools/docs-site-gen/` へ 3 つの .py を一緒に配置する前提で、同じ
 ディレクトリからの `import _common` で読み込まれる。標準ライブラリのみに依存する。
 
@@ -266,6 +267,131 @@ def atomic_write_bytes(path: Path, data: bytes, *, executable: bool = False) -> 
         raise
 
 
+# ---------------------------------------------------------------- nav.toml [site]
+
+# 上流（fandhe-frontend docs-site の nav.rs）が受理する `[site]` の任意キーと上限。
+# scaffold.py（書く前）と check_site.py（ビルド前）が同じ規則で検証し、「scaffold が書いた値を
+# check_site が拒否する」「上流が拒否する値を check_site が通す」食い違いを作らない。
+SITE_BRAND_MAX = 64
+SITE_TEXT_MAX = 200
+SITE_BADGE_MAX = 32
+SITE_LANG_MAX = 35
+
+# 必須 6 キーと追記例。未指定だと上流の既定表示（上流のブランド名・リンク）が公開されるため、
+# 値の空かどうかではなくキーの存在で判定する（version_badge の空文字は「非表示」の正式な指定）。
+SITE_REQUIRED_KEYS: dict[str, str] = {
+    "brand": "<ヘッダーのブランド名>",
+    "repository_url": "https://github.com/<owner>/<repo>",
+    "tagline": "<サイトの説明を 1 行>",
+    "copyright": "© <年> <名義>",
+    "version_badge": "",
+    "brand_mark": "<英数字1文字>",
+}
+SITE_OPTIONAL_KEYS = ("lang", "brand_color")
+SITE_KNOWN_KEYS = frozenset({"title", "base_path", *SITE_REQUIRED_KEYS, *SITE_OPTIONAL_KEYS})
+
+_SITE_LANG_RE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")
+_SITE_MARK_RE = re.compile(r"[A-Za-z0-9]")
+_SITE_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def pages_base_path(owner: str, repo: str) -> str:
+    """GitHub Pages の公開パス。`<owner>.github.io`（User/Org サイト）はルート配信、それ以外は `/<repo>`。"""
+    if repo.lower() == f"{owner.lower()}.github.io":
+        return ""
+    return f"/{repo}"
+
+
+def parse_repository_url(url: str) -> tuple[str, str] | None:
+    """`https://github.com/<owner>/<repo>` を (owner, repo) へ。形式・命名規則に合わなければ None。"""
+    m = REPOSITORY_RE.fullmatch(url)
+    if not m or not valid_owner(m.group("owner")) or not valid_repo_name(m.group("repo")):
+        return None
+    return m.group("owner"), m.group("repo")
+
+
+def _text_problem(value: str, lo: int, hi: int) -> str | None:
+    if CONTROL_RE.search(value):
+        return "制御文字を含められない"
+    if BIDI_RE.search(value):
+        return "双方向制御文字を含められない"
+    if PLACEHOLDER_RE.search(value):
+        return "プレースホルダー（__SGP_*__）が残っている"
+    if not (lo <= len(value) <= hi):
+        return f"{lo}〜{hi} 文字にする"
+    if lo >= 1 and not value.strip():
+        return "空白のみにできない"
+    return None
+
+
+def site_value_problem(key: str, value: str) -> str | None:
+    """`[site]` の 1 キーの規則違反の理由を返す（問題なければ None）。
+
+    上流 nav.rs と同じ規則に、スキル独自の追加（repository_url を GitHub 形式に限る・上流自身を指さない・
+    制御文字/BIDI/プレースホルダーの拒否）を重ねる。理由に値は載せない（制御・不可視文字を出力へ流さない）。
+    `has_upstream_word` は呼ばない（ブランド値に上流名を含めてよい。上流名は帰属表記の中にしか現れない）。
+    """
+    if key == "brand":
+        return _text_problem(value, 1, SITE_BRAND_MAX)
+    if key in ("tagline", "copyright"):
+        return _text_problem(value, 1, SITE_TEXT_MAX)
+    if key == "version_badge":
+        if value == "":
+            return None
+        why = _text_problem(value, 1, SITE_BADGE_MAX)
+        return why.replace(f"1〜{SITE_BADGE_MAX} 文字にする", f"{SITE_BADGE_MAX} 文字以内にする（空文字は非表示）") if why else None
+    if key == "lang":
+        if len(value) > SITE_LANG_MAX or _SITE_LANG_RE.fullmatch(value) is None:
+            return "BCP 47 風（例: ja / en / zh-Hant-TW。35 文字以内）にする"
+        return None
+    if key == "brand_mark":
+        return None if _SITE_MARK_RE.fullmatch(value) else "ASCII 英数字 1 文字にする"
+    if key == "brand_color":
+        return None if _SITE_COLOR_RE.fullmatch(value) else "#RRGGBB 形式にする"
+    if key == "repository_url":
+        parsed = parse_repository_url(value)
+        if parsed is None:
+            return "https://github.com/<owner>/<repo> 形式のみ許可（末尾 / ・.git 終端は不可）"
+        if is_upstream_repo(*parsed):
+            return "上流リポジトリ（Fandhe-AI/fandhe-frontend）そのもの。自サイトのリポジトリ URL を指定する"
+        return None
+    return None
+
+
+def check_site_values(values: dict[str, str]) -> list[str]:
+    """`[site]` の値の辞書を検証し、問題の一覧を返す（値そのものは載せない）。"""
+    problems: list[str] = []
+    unknown = sorted(set(values) - SITE_KNOWN_KEYS)
+    if unknown:
+        problems.append("[site] に未知のキー: " + ", ".join(sanitize(k, 60) for k in unknown))
+    missing = [k for k in SITE_REQUIRED_KEYS if k not in values]
+    if missing:
+        example = ", ".join(f'{k} = "{SITE_REQUIRED_KEYS[k]}"' for k in missing)
+        problems.append(
+            f"[site] の必須キーが不足している: {', '.join(missing)}。未指定だと上流の既定表示が公開されるため"
+            f"nav.toml の [site] へ追記する。追記例: {example}"
+        )
+    for key in SITE_KNOWN_KEYS - {"title", "base_path"}:
+        if key in values:
+            why = site_value_problem(key, values[key])
+            if why:
+                problems.append(f"[site] の `{key}`: {why}")
+    return problems
+
+
+def title_problem(title: str) -> str | None:
+    """nav の title に上流名が独立した語として含まれる場合の理由（#52 で撤去予定の暫定規則）。
+
+    ブランド値の上流名拒否は #50 で撤去したが、title だけは check_site.py と scaffold の `--title` の
+    両方でこの関数を呼ぶ形で残す（片方だけ外すと scaffold が書いた直後に check_site が落ちる）。
+    #52 でこの関数と 2 つの呼び出しを同時に消す。
+    """
+    if has_upstream_word(title):
+        return (f"title に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
+                "（この制限は #52 で撤去予定。`fandhe-frontend-docs` のような別の語の一部は可）")
+    return None
+
+
 class SubsetError(ValueError):
     """TOML サブセットの構文違反。メッセージには行番号を含める。"""
 
@@ -393,9 +519,7 @@ class Brand:
     @property
     def base_path(self) -> str:
         """GitHub Pages の公開パス。`<owner>.github.io` リポジトリ（User/Org サイト）はルート配信。"""
-        if self.repo.lower() == f"{self.owner.lower()}.github.io":
-            return ""
-        return f"/{self.repo}"
+        return pages_base_path(self.owner, self.repo)
 
 
 class BrandError(ValueError):

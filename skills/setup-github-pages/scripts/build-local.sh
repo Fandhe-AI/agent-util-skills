@@ -6,7 +6,7 @@
 # このスクリプトの 2 階層上として解決する（呼び出し時のカレントディレクトリに依存しない）。
 #
 # 工程: FF_REV 検証 → [THIRD-PARTY-LICENSES 生成（固定 URL から取得）] → check_site
-#       → docs-site を cargo install（匿名・--locked） → 生成（--no-page-sections） → rebrand → 最小 verify・残存検査
+#       → docs-site を cargo install（匿名・--locked） → 生成（--no-page-sections） → 最小 verify・帰属表記の確認
 #
 # 上流（fandhe-frontend）の docs-site バイナリを、固定 rev（FF_REV）の匿名 `cargo install --git` で
 # スキル管理下の target/docs-site-install へ入れて実行する。以前の「_ff/ へ shallow fetch + path 依存の
@@ -67,7 +67,7 @@ esac
 # リポジトリ（信頼できない場合がある）の .py（argparse.py 等の標準モジュール名）が標準ライブラリより先に
 # import されないよう、すべての起動に `-I`（隔離モード: cwd・スクリプトのディレクトリ・PYTHONPATH・user site を
 # 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。check_site.py /
-# rebrand_site.py は自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
+# rebrand_site.py も自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
 canon() { python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 # 親ディレクトリだけを実体化し、末端の名前はそのまま残す。末端が symlink かの判定（-L）を
@@ -349,19 +349,69 @@ if [[ "${NEED_LOCK_CHECK}" -eq 1 ]]; then
   printf '%s\n' "${FF_REV}" > "${CHECKED_MARK}" || { echo "エラー: 検査済みの記録を書けない" >&2; exit 1; }
 fi
 
+# >>> verify_attribution（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
+# 生成物（dist）に上流の帰属表記が残っていることを確認する。上流（docs-site）は `[site]` の値で表示を
+# 組み立て、帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク 2 本）だけを必ず
+# 出力する。これは MIT / Apache-2.0 の通知義務を担う部分のため、上流の DOM が変わっても黙って
+# 消えないよう、文言とリンクが 1 つの連続した並びとして存在することを見る（FF_REV 更新時に実出力で再確認する）。
+# 読むだけで書かない。エラーには dist からの相対パスだけを出し、ファイルの内容は出さない。
+# 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
+verify_attribution() {
+  local dist="$1" up pat list links f rel rc n=0 has_chrome has_refresh
+  up='https://github\.com/Fandhe-AI/fandhe-frontend'
+  pat="Built with <a [^>]*href=\"${up}\"[^>]*>fandhe-frontend docs-site</a> \\(<a [^>]*href=\"${up}/blob/main/LICENSE-MIT\"[^>]*>MIT</a> OR <a [^>]*href=\"${up}/blob/main/LICENSE-APACHE\"[^>]*>Apache-2\\.0</a>\\)"
+
+  # 生成器は symlink を出さない。あれば検査対象の外を指し得るため失敗にする
+  links="$(find "${dist}" -type l)" || { echo "エラー: dist の走査（symlink 検査）に失敗した" >&2; return 1; }
+  if [[ -n "${links}" ]]; then
+    echo "エラー: dist に symlink が含まれる（生成器は出さない）" >&2
+    return 1
+  fi
+
+  for rel in index.html 404.html; do
+    [[ -f "${dist}/${rel}" ]] || { echo "エラー: ${rel} が通常ファイルとして存在しない" >&2; return 1; }
+  done
+
+  # assets/ は利用者の静的ファイルなので対象外
+  list="$(find "${dist}" -path "${dist}/assets" -prune -o -type f -name '*.html' -print)" \
+    || { echo "エラー: dist の走査（HTML 列挙）に失敗した" >&2; return 1; }
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    rel="${f#"${dist}"/}"
+    rc=0; grep -qF -- 'class="docs-header"' "${f}" || rc=$?
+    [[ "${rc}" -le 1 ]] || { echo "エラー: ${rel} の検査（grep）が失敗した（exit ${rc}）" >&2; return 1; }
+    has_chrome=$(( rc == 0 ? 1 : 0 ))
+    if [[ "${has_chrome}" -eq 0 ]]; then
+      case "${rel}" in
+        index.html|404.html) echo "エラー: ${rel} にサイトのヘッダー（class=\"docs-header\"）が無い" >&2; return 1 ;;
+      esac
+      rc=0; grep -qF -- 'http-equiv="refresh"' "${f}" || rc=$?
+      [[ "${rc}" -le 1 ]] || { echo "エラー: ${rel} の検査（grep）が失敗した（exit ${rc}）" >&2; return 1; }
+      has_refresh=$(( rc == 0 ? 1 : 0 ))
+      # リダイレクト案内はサイトのクロームを持たないため対象外。クロームも refresh も無い未知の構造は fail-closed
+      if [[ "${has_refresh}" -eq 1 ]]; then continue; fi
+    fi
+    rc=0; grep -qE -- "${pat}" "${f}" || rc=$?
+    if [[ "${rc}" -eq 1 ]]; then
+      echo "エラー: ${rel} に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）が無い" >&2
+      return 1
+    fi
+    [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査（grep）が失敗した（exit ${rc}）" >&2; return 1; }
+    n=$(( n + 1 ))
+  done <<< "${list}"
+  echo "verify ok: HTML ${n} 件に帰属表記あり" >&2
+}
+# <<< verify_attribution
+
 # ---- 生成（リンク検査は fail-closed。1 件でも壊れていれば何も書かず非 0）
 step "サイトを生成"
 "${INSTALL_ROOT}/bin/docs-site" --root "${ROOT}" --out "${OUT}" --no-page-sections
-
-# ---- rebrand
-step "rebrand"
-python3 -I -B "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml"
 
 # ---- 最小 verify（空サイト・アセット欠落を黙って公開しない。-s で 0 バイトも検出）
 step "verify"
 for f in index.html 404.html assets/site.css assets/site.js assets/search-index.json; do
   test -s "${OUT}/${f}" || { echo "エラー: ${f} が無い、または空" >&2; exit 1; }
 done
-python3 -I -B "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml" --verify-only
+verify_attribution "${OUT}" || exit 1
 
 step "完了: ${OUT}"
