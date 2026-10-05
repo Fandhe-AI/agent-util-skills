@@ -102,7 +102,7 @@ TOML が壊れる・注入される）ため、値は `scaffold.py` が検証・
 | `manifest_written` / `manifest_recreated` | マニフェストを書いたか／無くて再作成したか（旧版からの移行） |
 | `warnings` | 警告（マニフェストの無視・`--branch` の食い違い・想定外ファイル・引き継がなかった paths など） |
 | `check` | 配置後の検証（`ok` / `errors` / `warnings`） |
-| `same` / `kept` / `missing` | `--show-diff` でも出る（`same` は、スキルが書いたままの所有ファイル。更新の取り消しで「自動で戻してよいか」の判定に使う。[`update-recovery.md`](update-recovery.md)） |
+| `same` / `kept` / `missing` | `--show-diff` でも出る（`same` は「いま生成する内容と一致する」所有ファイル。「適用直後から変わっていない」ことの判定には使えない。更新の取り消しは [`update-recovery.md`](update-recovery.md)） |
 | `diffs` | `--show-diff` のとき、競合したパスをキーにした辞書（`diffs.<path>` に `status`・`reason`・`conflict_kind`・`lines`） |
 | `error` / `exit_code` | エラーメッセージ（exit 2・4）／終了コード |
 

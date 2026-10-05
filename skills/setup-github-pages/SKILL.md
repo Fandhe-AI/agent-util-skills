@@ -142,8 +142,8 @@ test -n "${START_BRANCH}" || { echo "detached HEAD。ブランチへ移ってか
 BASE="<Step 1 で解決した既定ブランチ>"
 test "${START_BRANCH}" = "${BASE}" || { echo "既定ブランチ（${BASE}）ではなく ${START_BRANCH} にいる。利用者に確認する。了承がなければ中止。了承が得られたら BASE=\"${START_BRANCH}\" として続ける"; exit 1; }
 # リモートを確認できないまま進まない。fetch・rev-list の失敗、数値でない結果は中止する
-git fetch origin "${BASE}" || { echo "fetch に失敗。リモートを確認できないため中止（ネットワーク・認証・origin を確認する）"; exit 1; }
-COUNTS="$(git rev-list --left-right --count "origin/${BASE}...${BASE}")" || { echo "rev-list に失敗。中止"; exit 1; }
+git -c core.fsmonitor=false fetch origin "${BASE}" || { echo "fetch に失敗。リモートを確認できないため中止（ネットワーク・認証・origin を確認する）"; exit 1; }
+COUNTS="$(git -c core.fsmonitor=false rev-list --left-right --count "origin/${BASE}...${BASE}")" || { echo "rev-list に失敗。中止"; exit 1; }
 read -r BEHIND AHEAD <<< "${COUNTS}"          # 「behind ahead」（origin より古い件数・未 push の件数）
 [[ "${BEHIND}" =~ ^[0-9]+$ && "${AHEAD}" =~ ^[0-9]+$ ]] || { echo "ahead/behind を数値で取れない（${COUNTS}）。中止"; exit 1; }
 if [ "${BEHIND}" -ne 0 ] || [ "${AHEAD}" -ne 0 ]; then
@@ -157,18 +157,23 @@ fi
 ```bash
 NAME="chore/docs-pages-update-$(date +%Y%m%d)"; n=1
 while git show-ref --verify --quiet "refs/heads/${NAME}"; do n=$((n+1)); NAME="chore/docs-pages-update-$(date +%Y%m%d)-${n}"; done   # 同名があれば連番
-git switch -c "${NAME}" "${BASE}"             # 起点を明示する。NAME も控える
+git -c core.fsmonitor=false -c core.hooksPath=/dev/null switch -c "${NAME}" "${BASE}"   # 起点を明示する。NAME も控える。対象リポジトリのフックを走らせない
 ```
 
 #### Step U1: 更新を適用する
 
 ```bash
-python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<Step 1 で解決した既定ブランチ>" --json
+SNAP="$(mktemp)"; RESULT="$(mktemp)"     # 作業ツリーの外のファイル。値を控える（別シェルでは渡し直す）
+bash "${SKILL_DIR}/scripts/update-snapshot.sh" guard "${SNAP}"   # scaffold の直前（HEAD を記録し、利用者が触ったパスに印を付ける。再実行の前にも毎回呼ぶ）
+python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<Step 1 で解決した既定ブランチ>" --json > "${RESULT}"; echo "exit=$?"
+cat "${RESULT}"
+# 書き込み直後の内容のハッシュを記録する（更新の取り消しで「書いたまま変わっていないか」を比べる基準。書き込みが無い実行は何も記録しない）
+bash "${SKILL_DIR}/scripts/update-snapshot.sh" record-json "${SNAP}" < "${RESULT}"
 ```
 
 **書き込みが起きた最初の実行の JSON（`ff_rev`・`updated`・`created`・`manifest_written`・`manifest_recreated`・`gitignore_added`）を、Step U3 の報告と Step U2 の復旧まで保持する。** 同じコマンドを再実行して結果を取り直さない（2 回目は変更済みのため `ff_rev.changed: false`・`updated: []` になり、「何も変わっていない」と誤報告し、失敗時に何も戻らなくなる）。
 
-- **exit 4 は、所有ファイルの書き込みが済んだ後の検証失敗**（実装の順序: 分類 → 書き込み → マニフェスト・`.gitignore` → 配置後の検証）。直して再実行した 2 回目の JSON は、書き込み系のキーが空になる。**再実行の JSON は、`check`・`warnings`・`missing` と、再実行で追加で作られた `created` を足すためだけに使い**、U3 の報告と U2 の復旧は 1 回目と再実行を合わせたものを使う
+- **exit 4 は、所有ファイルの書き込みが済んだ後の検証失敗**（実装の順序: 分類 → 書き込み → マニフェスト・`.gitignore` → 配置後の検証）。直して再実行した 2 回目の JSON は、書き込み系のキーが空になる。**再実行の JSON は、`check`・`warnings`・`missing` と、再実行で追加で作られた `created` を足すためだけに使い**（再実行の出力も同じ `record-json` で `${SNAP}` へ追記する）、U3 の報告と U2 の復旧は 1 回目と再実行を合わせたものを使う
 - exit 0 で `missing` があり引数を付けて再実行する経路も同じ（1 回目の JSON を保持し、再実行の `created`・`warnings`・`check` を足す）
 - exit 3 は 1 回目が**何も書かない**ので、`--update` 付きの再実行の JSON をそのまま使ってよい
 
@@ -193,11 +198,11 @@ python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<Step 1 で解�
 
 #### Step U2: ローカルでビルドして確認する
 
-「ローカルビルド（新規・更新共通）」節のコマンドを実行する（信頼できないリポジトリでは実行しない）。ネットワーク断や cargo の一時障害は、まず**再試行**する。
+「ローカルビルド（新規・更新共通）」節のコマンドを実行する（信頼できないリポジトリでは実行しない）。ネットワーク断や cargo の一時障害は、まず**再試行**する。ビルドの直前に `bash "${SKILL_DIR}/scripts/update-snapshot.sh" guard "${SNAP}"` を呼び、ビルドの**成否にかかわらず**直後に `THIRD-PARTY-LICENSES` を記録する: `bash "${SKILL_DIR}/scripts/update-snapshot.sh" record "${SNAP}" THIRD-PARTY-LICENSES`（`build-local.sh` は `--write-third-party` をビルドの前段で書くため、後段が失敗しても書き換わっている）。
 
 復旧するのは**決定的な失敗**（`rebrand_site.py` の「一致数が 0」、`verify` の失敗など。上流のデザイン更新で HTML 構造が変わり、後処理の置換対象が合わなくなったことの検知）に限る。対象リポジトリ側の後処理は書き換えず、**更新を取り消して**、スキル側の修正が必要であることを利用者に報告する。
 
-取り消しの前に、`git status --short` を利用者へ示して了承を取る。手順の詳細は [`references/update-recovery.md`](references/update-recovery.md)「復旧の手順」に従う。**自動で戻すのは、スキルが書いたままの（U1 の後に手が入っていない）ファイルだけ**で、U1 の後に手が入ったファイルや、利用者編集ファイルの `created` は、利用者に差分を示して個別に判断を仰ぐ（`git clean` や `git restore -- .` は使わない）。
+取り消しの前に、`restore --dry-run` の結果（戻す・消す・`ASK` の予定）と `git status --short` を利用者へ示して了承を取る。手順の詳細は [`references/update-recovery.md`](references/update-recovery.md)「復旧の手順」に従う。判定は、U1 の書き込み直後に記録した内容（`${SNAP}`）との**比較**で行い、`bash "${SKILL_DIR}/scripts/update-snapshot.sh" restore "${SNAP}"` が**記録と一致するファイルだけ**を戻す（HEAD にあれば復元、HEAD に無いと確定できれば削除）。一致しない・消えた・symlink に変わった・基準を信頼できない・判定不能のものは触らず `ASK` として出す（終了コード 4。**`ASK` が残っている間は `git switch`・`git branch -D` へ進まない**）。利用者に差分を示して個別に判断を仰ぐ。`${SNAP}` が無い・HEAD が動いた・リポジトリのローカル設定に filter 等があるときは、何も戻さず `ASK-ALL`（終了コード 3）で止まり、すべて利用者に確認する。利用者編集ファイルは記録も削除もしない。`git clean` や `git restore -- .` は使わない。
 
 #### Step U3: 変更内容を報告する
 

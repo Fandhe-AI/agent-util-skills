@@ -567,6 +567,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.wants_json = "--json" in (sys.argv[1:] if argv is None else argv)
     ap.add_argument("--target", required=True, type=Path, help="対象リポジトリのルート（既存ディレクトリ）")
     ap.add_argument("--detect", action="store_true", help="モード（new / update / foreign）と根拠を表示して終了する（書き込みなし）")
+    ap.add_argument("--list-paths", action="store_true",
+                    help="スキル所有ファイル・利用者編集ファイル・マニフェストの配置先を JSON で出して終了する（書き込みなし。"
+                         "update-snapshot.sh が触ってよい対象の許可リストの唯一の定義元として使う）")
     ap.add_argument("--json", action="store_true", help="結果を JSON 1 つで標準出力へ出す（SKILL.md の報告用）")
     ap.add_argument("--show-diff", action="store_true",
                     help="競合した所有ファイルとスキルの新版の差分を表示して終了する（書き込みなし。"
@@ -589,6 +592,13 @@ def main(argv: list[str] | None = None) -> int:
                          "利用者編集ファイル（nav.toml・index.md・brand.toml・rust-toolchain.toml）は触らない")
     ap.add_argument("--year", default=None, help="著作権表記の年（既定: 現在の年）")
     args = ap.parse_args(argv)
+
+    if args.list_paths:
+        print(json.dumps({"owned": [d for _, d, _, k in FILES if k == OWNED],
+                          "user": [d for _, d, _, k in FILES if k == USER],
+                          "manifest": MANIFEST_REL,
+                          "extra": [".gitignore", "THIRD-PARTY-LICENSES"]}, ensure_ascii=True))
+        return 0
 
     summary: dict = {
         "mode": None, "kind": None, "detect": [], "error": None,
@@ -858,7 +868,8 @@ def main(argv: list[str] | None = None) -> int:
             status, lines = build_diff(root_real, args.target / path, path, desired[path])
             diffs[path] = {"conflict_kind": kind, "reason": reason, "status": status, "lines": lines}
         summary["diffs"] = diffs
-        # 復旧手順（references/update-recovery.md）が「スキルが書いたままのファイル」を判定するのに使う
+        # 注意: same は「いま生成する内容と一致するか」であり、「適用直後から変わっていないか」ではない。更新の取り消しの
+        # 判定には使わない（scripts/update-snapshot.sh の書き込み直後のハッシュとの比較を使う。references/update-recovery.md）
         summary.update(same=same, kept=keep, missing=missing)
         summary["conflicts"] = [{"path": p, "kind": k, "reason": r} for p, k, r in conflicts]
         if not args.json:

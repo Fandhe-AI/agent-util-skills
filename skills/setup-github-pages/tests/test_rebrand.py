@@ -2294,6 +2294,491 @@ class ScaffoldCrlfAndOriginTest(unittest.TestCase):
         j = json.loads(self.sc("--detect", "--json", args=()).stdout)
         self.assertNotEqual(j["kind"], "upstream")
 
+class UpdateSnapshotTest(unittest.TestCase):
+    """更新の取り消し（scripts/update-snapshot.sh）の回帰テスト。
+
+    判定の原始は「U1 の書き込み直後の内容のハッシュ」との比較（scaffold.py --show-diff の same ではない。
+    same は「いま生成する内容と一致するか」で、U1 の後に利用者が pages.yml の利用者区間へ足した編集も same になる）。
+    実際の git リポジトリで、U1 適用 → 記録 → 利用者の編集 → 取り消し、をなぞる。
+    """
+
+    SH = SCRIPTS / "update-snapshot.sh"
+    ARGS = ScaffoldHardeningTest.ARGS
+    MAIN_RS = ScaffoldHardeningTest.MAIN_RS
+    PAGES = ScaffoldHardeningTest.PAGES
+    MANIFEST = ScaffoldHardeningTest.MANIFEST
+    BUILD_SH = ScaffoldHardeningTest.BUILD_SH
+    RB = "tools/docs-site-gen/rebrand_site.py"
+    TPL = "THIRD-PARTY-LICENSES"
+    skill_copy = ScaffoldHardeningTest.skill_copy
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.t = self.base / "repo"
+        self.t.mkdir()
+        self.snap = self.base / "snap.tsv"   # リポジトリの外（作業ツリーを汚さない）
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                        GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        self.git("init", "-q", "-b", "main")
+
+    def git(self, *a):
+        r = subprocess.run(["git", "-C", str(self.t), *a], capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def sc(self, *extra, args=ARGS, skill=None):
+        script = (skill or SKILL) / "scripts" / "scaffold.py"
+        return subprocess.run([sys.executable, str(script), "--target", str(self.t), *args, *extra],
+                              capture_output=True, text=True)
+
+    def sh(self, *a, stdin=None, cwd=None):
+        return subprocess.run(["bash", str(self.SH), *map(str, a)], capture_output=True, text=True,
+                              cwd=cwd or self.t, env=self.env, input=stdin)
+
+    def baseline_and_u1(self):
+        """旧版（現行スキル）で構築・コミットし、新版スキルで U1 を適用して記録する。戻り値は U1 の JSON。"""
+        self.assertEqual(self.sc().returncode, 0)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+        sk = self.skill_copy()
+        (sk / "templates/docs-site-gen/src/main.rs").write_text(
+            (sk / "templates/docs-site-gen/src/main.rs").read_text() + "// v9\n")
+        tpl = sk / "templates/pages.yml"
+        tpl.write_text(tpl.read_text().replace("timeout-minutes: 30", "timeout-minutes: 61", 1))
+        rb = sk / "scripts/rebrand_site.py"
+        rb.write_text(rb.read_text() + "\n# v9\n")
+        self.assertEqual(self.sh("guard", self.snap).returncode, 0)   # scaffold の直前（HEAD を記録）
+        r = self.sc("--json", args=("--branch", "main"), skill=sk)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(sorted(u["path"] for u in j["updated"]), sorted([self.MAIN_RS, self.PAGES, self.RB]))
+        rr = self.sh("record-json", self.snap, stdin=r.stdout)
+        self.assertEqual(rr.returncode, 0, rr.stderr)
+        return j
+
+    def restore(self):
+        r = self.sh("restore", self.snap)
+        return r, {ln.split()[1]: ln.split()[0] for ln in r.stdout.splitlines() if ln.split()[:1] in (["RESTORED"], ["DELETED"], ["ASK"])}
+
+    def test_region_edit_after_u1_is_not_restored_but_untouched_files_are(self):
+        """e2e 1: U1 の後に利用者が利用者区間へ監視パスを足した pages.yml は、自動で戻されず docs/** が残る。"""
+        self.baseline_and_u1()
+        text = self.t.joinpath(self.PAGES).read_text()
+        self.t.joinpath(self.PAGES).write_text(text.replace("# sgp:user-paths:begin", "# sgp:user-paths:begin", 1).replace(
+            "      # sgp:user-paths:end", '      - "docs/**"\n      # sgp:user-paths:end', 1))
+        # 対照: scaffold の same は、この編集の後でも pages.yml を「一致」と報告する（だから same は判定に使えない）
+        j = json.loads(self.sc("--show-diff", "--json", args=("--branch", "main"), skill=self.skill_copy()).stdout)
+        self.assertIn(self.PAGES, j["same"], "same は『いま生成する内容と一致』なので、区間の編集を検知できない")
+        r, res = self.restore()
+        self.assertEqual(r.returncode, 4, r.stderr)   # ASK が 1 件以上
+        self.assertEqual(res[self.PAGES], "ASK")
+        self.assertIn('      - "docs/**"', self.t.joinpath(self.PAGES).read_text())
+        self.assertEqual(res[self.RB], "RESTORED")
+        self.assertEqual(res[self.MAIN_RS], "RESTORED")
+        self.assertEqual(res[self.MANIFEST], "RESTORED")
+        self.assertNotIn("// v9", self.t.joinpath(self.MAIN_RS).read_text())
+        self.assertNotIn("# v9", self.t.joinpath(self.RB).read_text())
+        self.assertIn("timeout-minutes: 61", self.pages_text())   # 戻していない（ASK）
+
+    def pages_text(self):
+        return self.t.joinpath(self.PAGES).read_text()
+
+    def test_hand_edited_owned_file_is_asked_and_kept(self):
+        self.baseline_and_u1()
+        with self.t.joinpath(self.MAIN_RS).open("a") as fh:
+            fh.write("// my hand merge\n")
+        r, res = self.restore()
+        self.assertEqual(res[self.MAIN_RS], "ASK")
+        self.assertIn("// my hand merge", self.t.joinpath(self.MAIN_RS).read_text())
+        self.assertEqual(res[self.RB], "RESTORED")
+
+    def test_third_party_licenses_edit_is_kept_unedited_is_reverted(self):
+        """e2e 2: ビルドが作る THIRD-PARTY-LICENSES は、記録後に編集されていれば残り、編集されていなければ戻る。"""
+        # 未追跡（今回新規作成）: 編集あり → ASK で残る。編集なし → 削除される
+        self.baseline_and_u1()
+        tpl = self.t / self.TPL
+        tpl.write_text("generated by build\nline2\n")
+        self.assertEqual(self.sh("record", self.snap, self.TPL).returncode, 0)
+        tpl.write_text("generated by build\nline2\nmy edit\n")
+        r, res = self.restore()
+        self.assertEqual(res[self.TPL], "ASK")
+        self.assertIn("my edit", tpl.read_text())
+        tpl.write_text("generated by build\nline2\n")
+        r, res = self.restore()
+        self.assertEqual(res[self.TPL], "DELETED")
+        self.assertFalse(tpl.exists())
+
+    def test_third_party_licenses_tracked_file_is_restored_to_head(self):
+        self.assertEqual(self.sc().returncode, 0)
+        (self.t / self.TPL).write_text("head content\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+        (self.t / self.TPL).write_text("rebuilt content\n")   # ビルドが更新した
+        self.assertEqual(self.sh("record", self.snap, self.TPL).returncode, 0)
+        r, res = self.restore()
+        self.assertEqual(res[self.TPL], "RESTORED")
+        self.assertEqual((self.t / self.TPL).read_text(), "head content\n")
+        (self.t / self.TPL).write_text("rebuilt content\n")
+        self.assertEqual(self.sh("record", self.snap, self.TPL).returncode, 0)
+        (self.t / self.TPL).write_text("user replaced it\n")
+        r, res = self.restore()
+        self.assertEqual(res[self.TPL], "ASK")
+        self.assertEqual((self.t / self.TPL).read_text(), "user replaced it\n")
+
+    def test_without_snapshot_nothing_is_restored(self):
+        """e2e 3: スナップショットが無い（別セッション等）・空・不正なら、何も自動で戻さない。"""
+        self.baseline_and_u1()
+        before = {p: p.read_bytes() for p in self.t.rglob("*") if p.is_file() and ".git" not in p.parts}
+        self.snap.unlink()
+        for variant in ("missing", "empty", "garbage"):
+            if variant == "empty":
+                self.snap.write_text("")
+            elif variant == "garbage":
+                self.snap.write_text("not-a-hash\\t../../etc/passwd\n123\t/abs\nabc\n")
+            r = self.sh("restore", self.snap)
+            self.assertEqual(r.returncode, 3, variant)
+            self.assertIn("ASK-ALL", r.stderr)
+            self.assertEqual({p: p.read_bytes() for p in self.t.rglob("*") if p.is_file() and ".git" not in p.parts}, before, variant)
+
+    def test_symlink_missing_and_special_are_asked(self):
+        self.baseline_and_u1()
+        victim = self.base / "victim"
+        victim.write_text("keep\n")
+        (self.t / self.RB).unlink()
+        (self.t / self.RB).symlink_to(victim)
+        (self.t / self.MAIN_RS).unlink()
+        r, res = self.restore()
+        self.assertEqual(res[self.RB], "ASK")
+        self.assertIn("symlink", r.stdout)
+        self.assertEqual(res[self.MAIN_RS], "ASK")
+        self.assertIn("消えている", r.stdout)
+        self.assertEqual(victim.read_text(), "keep\n")
+        st = self.sh("status", self.snap).stdout
+        self.assertIn(f"symlink {self.RB}", st)
+        self.assertIn(f"missing {self.MAIN_RS}", st)
+
+    def test_record_json_excludes_user_files_and_unwritten_runs(self):
+        """利用者編集ファイル（created でも）は記録しない = 自動で削除しない。書き込みが無い実行は何も記録しない。"""
+        self.assertEqual(self.sc().returncode, 0)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+        (self.t / "site/index.md").unlink()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "user removed index.md")
+        r = self.sc("--json", args=self.ARGS)   # 全引数ありの再実行 → index.md を再作成（created）
+        j = json.loads(r.stdout)
+        self.assertEqual(j["created"], ["site/index.md"])
+        self.assertEqual(self.sh("record-json", self.snap, stdin=r.stdout).returncode, 0)
+        self.assertFalse(self.snap.exists() and "site/index.md" in self.snap.read_text())
+        r2 = self.sc("--json", args=("--branch", "main"))   # 書き込みなし
+        out = self.sh("record-json", self.snap, stdin=r2.stdout)
+        self.assertIn("記録するパスなし", out.stdout)
+
+    def test_path_validation_and_cwd(self):
+        self.assertEqual(self.sc().returncode, 0)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+        for bad in ("../x", "/etc/passwd", ".git/config", ".GIT/config", ".Git", "a/../b", "-rf", "a b", "a\tb", "x" * 300, ".",
+                    "tools/docs-site-gen/", "site/nav.toml", "tools/docs-site-gen/brand.toml", "README.md"):
+            r = self.sh("record", self.snap, bad)
+            self.assertEqual(r.returncode, 2, bad)
+        self.assertNotIn("REC", self.snap.read_text() if self.snap.exists() else "")
+        sub = self.t / "site"
+        r = self.sh("record", self.snap, "nav.toml", cwd=sub)
+        self.assertEqual(r.returncode, 2)   # ルート以外では実行しない
+        r = self.sh("bogus", self.snap)
+        self.assertEqual(r.returncode, 2)
+
+    def test_hash_ignores_repo_filter_settings(self):
+        """記録のハッシュは autocrlf 等のフィルタを通さない（リポジトリの設定で結果が変わらない）。"""
+        self.assertEqual(self.sc().returncode, 0)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+        self.sh("record", self.snap, self.BUILD_SH)
+        first = self.snap.read_text()
+        self.git("config", "core.autocrlf", "true")
+        self.t.joinpath(".gitattributes").write_text("* text eol=crlf\n")
+        self.snap.unlink()
+        self.sh("record", self.snap, self.BUILD_SH)
+        self.assertEqual(self.snap.read_text(), first)
+
+class UpdateSnapshotHardeningTest(unittest.TestCase):
+    """update-snapshot.sh の 2 巡目指摘（T1 HEAD 基準・T2 設定・T3 TAINT・T4 HEAD 移動・T5 ビルド・T6 許可リスト・T7 終了コード・T8）。"""
+
+    SH = UpdateSnapshotTest.SH
+    ARGS = UpdateSnapshotTest.ARGS
+    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    PAGES = UpdateSnapshotTest.PAGES
+    MANIFEST = UpdateSnapshotTest.MANIFEST
+    BUILD_SH = UpdateSnapshotTest.BUILD_SH
+    RB = UpdateSnapshotTest.RB
+    TPL = UpdateSnapshotTest.TPL
+    setUp = UpdateSnapshotTest.setUp
+    git = UpdateSnapshotTest.git
+    sc = UpdateSnapshotTest.sc
+    sh = UpdateSnapshotTest.sh
+    skill_copy = UpdateSnapshotTest.skill_copy
+    baseline_and_u1 = UpdateSnapshotTest.baseline_and_u1
+    restore = UpdateSnapshotTest.restore
+
+    def simple_baseline(self):
+        self.assertEqual(self.sc().returncode, 0)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+
+    def rec(self, *paths):
+        r = self.sh("record", self.snap, *paths)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # ---- T1: HEAD 基準の判定
+
+    def test_t1_four_cases_head_based(self):
+        self.simple_baseline()
+        # 4 通り: HEAD にあるファイル / git rm --cached したファイル / HEAD に無い新規ファイル / 祖先が symlink のパス
+        new = self.t / self.TPL
+        new.write_text("generated\n")                      # HEAD に無い（未追跡の新規）
+        self.rec(self.TPL, self.BUILD_SH, self.RB)
+        self.git("rm", "-q", "--cached", self.RB)           # index から外した（HEAD にはある）
+        (self.t / self.BUILD_SH).write_text((self.t / self.BUILD_SH).read_text())  # 変更なし（HEAD にある）
+        r = self.sh("restore", self.snap, "--dry-run")
+        out = r.stdout
+        self.assertIn(f"WOULD-DELETE {self.TPL}", out)
+        self.assertIn(f"WOULD-RESTORE {self.BUILD_SH}", out)
+        self.assertIn(f"WOULD-RESTORE {self.RB}", out, "git rm --cached でも HEAD にあるので rm してはいけない")
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(new.exists())
+        self.assertTrue((self.t / self.RB).exists(), "HEAD にあるファイルを rm してはいけない")
+        self.assertIn(f"RESTORED {self.RB}", r.stdout)
+
+    def test_t1_ancestor_symlink_is_ask_at_record_and_restore(self):
+        self.simple_baseline()
+        real = self.base / "elsewhere"
+        shutil.move(str(self.t / "tools"), str(real))
+        (self.t / "tools").symlink_to(real)
+        r = self.sh("record", self.snap, self.RB)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("祖先が symlink", r.stderr)
+        self.assertNotIn(self.RB, self.snap.read_text())
+        # 記録後に祖先が symlink になった場合（復旧時の判定）
+        (self.t / "tools").unlink()
+        shutil.move(str(real), str(self.t / "tools"))
+        self.rec(self.RB)
+        shutil.move(str(self.t / "tools"), str(real))
+        (self.t / "tools").symlink_to(real)
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn(f"ASK {self.RB}", r.stdout)
+        self.assertTrue((real / "docs-site-gen/rebrand_site.py").exists())
+
+    def test_t1_git_errors_are_ask_not_rm(self):
+        """HEAD の状態を判定できないとき（git のエラー）は rm せず ASK。fail-open にしない。"""
+        self.simple_baseline()
+        new = self.t / self.TPL
+        new.write_text("generated\n")
+        self.rec(self.TPL)
+        fake = self.base / "fakebin"
+        fake.mkdir()
+        real_git = shutil.which("git")
+        (fake / "git").write_text(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = "ls-tree" ] && exit 128; done\nexec {real_git} "$@"\n')
+        (fake / "git").chmod(0o755)
+        self.env = dict(self.env, PATH=f"{fake}:{self.env['PATH']}")
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn(f"ASK {self.TPL}", r.stdout)
+        self.assertTrue(new.exists(), "判定不能のファイルを rm してはいけない")
+
+    # ---- T2: 対象リポジトリの設定
+
+    def test_t2_local_filter_or_hook_config_stops_restore(self):
+        self.simple_baseline()
+        self.rec(self.BUILD_SH)
+        sentinel = self.base / "SMUDGE-RAN"
+        (self.t / ".gitattributes").write_text("* filter=x\n")
+        for key, val in (("filter.x.process", "git-lfs filter-process"), ("filter.x.clean", "cat"), ("core.fsmonitor", "true"),
+                         ("core.hooksPath", "/tmp/evil"), ("diff.y.textconv", "cat"), ("diff.y.command", "echo"),
+                         ("include.path", "../x"), ("includeif.gitdir:/x.path", "../y"), ("filter.x.smudge", f"touch {sentinel}; cat")):
+            self.git("config", key, val)
+            for mode in ((), ("--dry-run",)):
+                r = self.sh("restore", self.snap, *mode)
+                self.assertEqual(r.returncode, 3, f"{key}: {r.stdout}{r.stderr}")
+                self.assertIn("ASK-ALL", r.stderr)
+                self.assertIn(key.split(".")[0], r.stderr.lower())
+            self.assertFalse(sentinel.exists(), f"{key}: smudge フィルタが実行された")
+            self.git("config", "--unset-all", key)
+
+    def test_t2_record_guard_status_still_work_with_unsafe_config(self):
+        """record・guard・status は読み取りだけ（hash-object --no-filters・ls-tree）なので、設定があっても止めない。"""
+        self.simple_baseline()
+        sentinel = self.base / "SMUDGE-RAN"
+        (self.t / ".gitattributes").write_text("* filter=x\n")
+        self.git("config", "filter.x.smudge", f"touch {sentinel}; cat")
+        self.git("config", "filter.x.clean", f"touch {sentinel}; cat")
+        self.git("config", "core.fsmonitor", f"touch {sentinel}; false")
+        self.assertEqual(self.sh("guard", self.snap).returncode, 0)
+        self.rec(self.BUILD_SH)
+        self.assertEqual(self.sh("status", self.snap).returncode, 0)
+        self.assertFalse(sentinel.exists(), "読み取りコマンドでも外部コマンドが実行された")
+
+    # ---- T3: 再実行で基準が汚れる経路（TAINT）
+
+    def test_t3_edit_between_exit3_and_update_rerun_is_not_restored(self):
+        """exit 3 → 利用者が pages.yml の区間へ追記 → --update で再実行 → 追記込みの内容が基準にならない。"""
+        self.simple_baseline()
+        sk = self.skill_copy()
+        tpl = sk / "templates/pages.yml"
+        tpl.write_text(tpl.read_text().replace("timeout-minutes: 30", "timeout-minutes: 61", 1))
+        (self.t / self.MAIN_RS).write_text("// user edit\n")        # 競合を作る（exit 3）
+        self.assertEqual(self.sh("guard", self.snap).returncode, 0)
+        r = self.sc("--json", args=("--branch", "main"), skill=sk)
+        self.assertEqual(r.returncode, 3)
+        self.sh("record-json", self.snap, stdin=r.stdout)            # 何も書かれていないので記録なし
+        text = (self.t / self.PAGES).read_text()
+        (self.t / self.PAGES).write_text(text.replace("      # sgp:user-paths:end", '      - "docs/**"\n      # sgp:user-paths:end', 1))
+        g = self.sh("guard", self.snap)                              # 2 回目の scaffold の直前
+        self.assertIn(f"印: {self.PAGES}", g.stdout)
+        r = self.sc("--update", "--json", args=("--branch", "main"), skill=sk)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.sh("record-json", self.snap, stdin=r.stdout)
+        self.assertIn('      - "docs/**"', (self.t / self.PAGES).read_text())   # --update は区間を保持する
+        rr = self.sh("restore", self.snap)
+        self.assertEqual(rr.returncode, 4, rr.stdout)
+        self.assertIn(f"ASK {self.PAGES}", rr.stdout)
+        self.assertIn('      - "docs/**"', (self.t / self.PAGES).read_text(), "追記が確認なしで HEAD へ戻された")
+
+    def test_t3_clean_runs_do_not_taint(self):
+        self.baseline_and_u1()
+        self.assertEqual(self.sh("guard", self.snap).stdout.count("印:"), 0)   # 記録どおりの状態 → 印なし
+        r, res = self.restore()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(res[self.PAGES], "RESTORED")
+
+    # ---- T4: HEAD が動いた
+
+    def test_t4_head_moved_after_record_is_ask_all(self):
+        self.baseline_and_u1()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "user committed on the update branch")
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("ASK-ALL", r.stderr)
+        self.assertIn("HEAD が動いた", r.stderr)
+        self.assertNotIn("RESTORED", r.stdout)
+
+    # ---- T5: ビルド失敗後の THIRD-PARTY-LICENSES
+
+    def test_t5_build_local_writes_third_party_before_failing_stages(self):
+        sh = (SCRIPTS / "build-local.sh").read_text(encoding="utf-8")
+        tpl = sh.index("THIRD-PARTY-LICENSES を生成")
+        for later in ('step "check_site"', 'step "wrapper を build"', 'step "サイトを生成"', 'step "rebrand"', 'step "verify"'):
+            self.assertLess(tpl, sh.index(later), f"THIRD-PARTY-LICENSES は {later} より前に書かれる（後段が失敗しても書き換わる）")
+        md = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("成否にかかわらず", md)
+        self.assertIn('update-snapshot.sh" guard', md)
+
+    def test_t5_third_party_after_failed_build_is_still_recoverable(self):
+        self.baseline_and_u1()
+        self.assertEqual(self.sh("guard", self.snap).returncode, 0)
+        (self.t / self.TPL).write_text("written before the build failed\n")
+        self.rec(self.TPL)                                           # ビルドの成否にかかわらず記録する
+        r = self.sh("restore", self.snap)
+        self.assertIn(f"DELETED {self.TPL}", r.stdout)
+
+    # ---- T6: 許可リスト
+
+    def test_t6_allowlist_matches_scaffold_and_rejects_everything_else(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import scaffold
+        j = json.loads(subprocess.run([sys.executable, str(SCRIPTS / "scaffold.py"), "--target", ".", "--list-paths"],
+                                      capture_output=True, text=True).stdout)
+        self.assertEqual(j["owned"], [d for _, d, _, k in scaffold.FILES if k == scaffold.OWNED])
+        self.assertEqual(j["user"], [d for _, d, _, k in scaffold.FILES if k == scaffold.USER])
+        self.assertEqual(j["manifest"], scaffold.MANIFEST_REL)
+        self.assertEqual(sorted(j["extra"]), sorted([".gitignore", "THIRD-PARTY-LICENSES"]))
+        self.simple_baseline()
+        for p in j["owned"] + [j["manifest"]] + j["extra"]:
+            if (self.t / p).is_file():
+                self.rec(p)
+        for p in j["user"] + ["README.md", "site/other.md", "tools/docs-site-gen/helper.py"]:
+            (self.t / p).parent.mkdir(parents=True, exist_ok=True)
+            (self.t / p).write_text("x\n") if not (self.t / p).exists() else None
+            r = self.sh("record", self.snap, p)
+            self.assertEqual(r.returncode, 2, f"{p} は許可リスト外なので記録できない")
+        # SNAP を書き換えて許可リスト外のパスを入れても、restore は触らない
+        victim = self.t / "README.md"
+        victim.write_text("keep me\n")
+        h = subprocess.run(["git", "-C", str(self.t), "hash-object", "--no-filters", "--", "README.md"],
+                           capture_output=True, text=True, env=self.env).stdout.strip()
+        with self.snap.open("a") as fh:
+            fh.write(f"REC\t{h}\tREADME.md\n")
+        r = self.sh("restore", self.snap)
+        self.assertIn("ASK README.md", r.stdout)
+        self.assertEqual(victim.read_text(), "keep me\n")
+
+    # ---- T7: 終了コード・dry-run
+
+    def test_t7_dry_run_changes_nothing_and_exit_codes(self):
+        self.baseline_and_u1()
+        with (self.t / self.MAIN_RS).open("a") as fh:
+            fh.write("// hand\n")
+        snap_before = self.snap.read_text()
+        before = {p: p.read_bytes() for p in self.t.rglob("*") if p.is_file() and ".git" not in p.parts}
+        r = self.sh("restore", self.snap, "--dry-run")
+        self.assertEqual(r.returncode, 4)
+        self.assertIn(f"ASK {self.MAIN_RS}", r.stdout)
+        self.assertIn(f"WOULD-RESTORE {self.RB}", r.stdout)
+        self.assertNotIn("RESTORED ", r.stdout)
+        self.assertEqual({p: p.read_bytes() for p in self.t.rglob("*") if p.is_file() and ".git" not in p.parts}, before)
+        self.assertEqual(self.snap.read_text(), snap_before)
+        self.assertIn("git switch", r.stderr)   # ASK が残る間は進まない旨
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4)
+        self.assertEqual(self.sh("restore", self.snap, "--bogus").returncode, 2)
+
+    def test_t7_failed_operations_become_ask_not_abort(self):
+        self.baseline_and_u1()
+        (self.t / self.TPL).write_text("x\n")
+        self.rec(self.TPL)
+        fake = self.base / "fakebin"
+        fake.mkdir()
+        real_git = shutil.which("git")
+        (fake / "git").write_text(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = "restore" ] && exit 1; done\nexec {real_git} "$@"\n')
+        (fake / "git").chmod(0o755)
+        self.env = dict(self.env, PATH=f"{fake}:{self.env['PATH']}")
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("git restore に失敗した", r.stdout)
+        self.assertIn(f"DELETED {self.TPL}", r.stdout, "restore の失敗で途中終了せず、他のパスの処理を続ける")
+
+    # ---- T8: 細部
+
+    def test_t8_snapshot_location_and_root_checks(self):
+        self.simple_baseline()
+        inside = self.t / "snap.tsv"
+        r = self.sh("record", inside, self.BUILD_SH)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("対象リポジトリの中", r.stderr)
+        self.assertFalse(inside.exists())
+        victim = self.base / "victim"
+        victim.write_text("keep\n")
+        link = self.base / "snaplink"
+        link.symlink_to(victim)
+        r = self.sh("record", link, self.BUILD_SH)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(victim.read_text(), "keep\n")
+        link2 = self.base / "linkdir"
+        link2.symlink_to(self.t)
+        r = self.sh("record", link2 / "s.tsv", self.BUILD_SH)   # リポジトリを指す symlink 経由の置き場所
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse((self.t / "s.tsv").exists())
+
+    def test_t8_recovery_doc_uses_safe_diff_command(self):
+        doc = (SKILL / "references" / "update-recovery.md").read_text(encoding="utf-8")
+        self.assertIn("git diff --no-ext-diff --no-textconv --no-color HEAD --", doc)
+        self.assertIn("| head -200 | cat -v", doc)
+        self.assertNotIn("git diff HEAD --", doc)
+
 
 class CheckSiteTest(unittest.TestCase):
     NAV = """[site]

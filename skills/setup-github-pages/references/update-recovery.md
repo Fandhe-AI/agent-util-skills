@@ -1,4 +1,4 @@
-<!-- source: skills/setup-github-pages/SKILL.md の更新フロー Step U2（このスキル自身の手順。挙動の正は scripts/scaffold.py の --show-diff と tests/test_rebrand.py） -->
+<!-- source: skills/setup-github-pages/SKILL.md の更新フロー Step U1・U2（このスキル自身の手順。挙動の正は scripts/update-snapshot.sh と tests/test_rebrand.py の UpdateSnapshotTest・UpdateSnapshotHardeningTest） -->
 <!-- 最終確認日: 2026-10-05 -->
 <!-- 取得状況: ✅ 実際の git リポジトリで手順を実行して確認済み -->
 
@@ -10,63 +10,72 @@
 
 - 復旧するのは**決定的な失敗**だけ（`rebrand_site.py` の「一致数が 0」、`verify` の失敗など。上流のデザイン更新で HTML 構造が変わり、後処理の置換対象が合わなくなったことの検知）。対象リポジトリ側の後処理は書き換えず、スキル側の修正が必要であることを利用者に報告する
 - ネットワーク断や cargo の一時障害は復旧せず、まず**再試行**する
-- 実行前に `git status --short` を利用者へ示し、了承を取る
+
+## 仕組み: 書き込み直後のスナップショットとの比較
+
+「U1 の後に利用者が手を入れたか」は、**書き込み直後の内容のハッシュを記録しておき、取り消しの時点で現在のハッシュと比べる**ことで判定する。生成予定との比較では判定できない（理由は末尾）。
+
+| いつ | 何を | コマンド（`update-snapshot.sh`。`SKILL_DIR/scripts/` から起動し、カレントは対象リポジトリのルート） |
+|------|------|------|
+| scaffold の各実行の**直前**（再実行を含む）、ビルドの直前 | HEAD を記録し、「HEAD とも前回の記録とも違う」パスに TAINT の印を付ける | `guard "${SNAP}"` |
+| scaffold の各実行の直後 | その実行の JSON から、スキルが書いたパスのハッシュを記録する | `record-json "${SNAP}" < "${RESULT}"` |
+| ビルドの直後（**成否にかかわらず**） | `THIRD-PARTY-LICENSES` のハッシュを記録する | `record "${SNAP}" THIRD-PARTY-LICENSES` |
+| 取り消しの前 | 予定を見る（何も変更しない） | `restore "${SNAP}" --dry-run` |
+| 取り消し | 記録と一致するパスだけを戻す | `restore "${SNAP}"` |
+
+- `${SNAP}` は `mktemp` で作る**作業ツリーの外**のファイル（リポジトリの中・symlink は拒否される）。値は控える（別シェルでは渡し直す）
+- `THIRD-PARTY-LICENSES` は `build-local.sh --write-third-party` が**ビルドの前段**（`check_site`・wrapper のビルド・生成・rebrand より前）で書く。後段が決定的に失敗しても書き換わっているので、ビルドの成否にかかわらず直後に記録する
+- **TAINT（基準を信頼できない印）**: 同じパスに 2 回目の記録が来ると、その間に利用者が触った内容が基準へ取り込まれ得る（例: exit 3 → 利用者が `pages.yml` の区間へ追記 → `--update` で再実行 → 追記込みの内容が基準になる）。そこで scaffold・ビルドの直前に `guard` を呼び、現在の内容が HEAD とも前回の記録とも違うパスに印を付ける。印の付いたパスは、以後ずっと自動では戻さない（`ASK`）。記録の直前に作業ツリーの内容が HEAD か前回の記録と一致していれば、利用者が触っていないと判定できる
+- **許可リスト**: 記録・復元・削除してよいのは、所有ファイル・マニフェスト・`.gitignore`・`THIRD-PARTY-LICENSES` だけ。一覧は `scaffold.py --list-paths` が唯一の定義元（スクリプトはそれを呼ぶ）。利用者編集ファイル（`brand.toml`・`nav.toml`・`index.md`・`rust-toolchain.toml`）は `created`（`missing` の再作成）に含まれても記録しないので、自動では削除せず、利用者に確認する
+- **ハッシュ**: `git hash-object --no-filters`。選んだ理由: macOS と Linux で同じ結果になる（`sha256sum` と `shasum` の違いに依存しない）、`core.autocrlf`・属性のフィルタを通さないので設定で結果が変わらない、ファイルを書き込まない。symlink は辿らず（`-L` を先に判定）、通常ファイル以外はハッシュしない
+- **パス**: ルートからの相対パスに限り、`..`・絶対パス・末尾の `/`・`.git`（大文字小文字を区別しない）配下・先頭の `-` などを拒否する。祖先ディレクトリが symlink なら（記録時も復旧時も）触らない。すべてクォートして `--` の後に渡す
+- **HEAD での存在判定**: `git ls-tree HEAD -- <path>` の終了コードと出力で判定する。終了コード 0 で出力が空 = HEAD に無いと確定（削除してよい）、出力あり = HEAD に通常ファイルとして在る（復元する）、終了コード非 0・通常ファイル以外 = 判定不能（`ASK`）。`git ls-files --error-unmatch` は使わない（致命的エラー・index から外された場合も「未追跡」と誤判定し、HEAD にあるファイルを削除し得る）
+- **対象リポジトリの設定**: git は `-c core.fsmonitor=false -c core.hooksPath=/dev/null` を付けて実行する。さらに `restore`（`--dry-run` を含む）は、リポジトリのローカル設定に `filter.*.(smudge|clean|process)`・`core.fsmonitor`・`core.hooksPath`・`diff.*.(textconv|command)`・`include.path` / `includeIf.*.path` が 1 件でもあれば、何も戻さず `ASK-ALL` で止める（`git restore` は smudge フィルタを実行するため）。`record`・`guard`・`status` は `hash-object --no-filters` と `ls-tree` だけの読み取りなので止めない
 
 ## 保証する範囲
 
-**スキルが書いたままの（U1 の適用後に手が入っていない）ファイルだけを自動で戻す。** U1 の後に利用者が同じファイルへ加えた手動統合・修正は、自動では消さず、利用者に差分を示して個別に判断を仰ぐ。U0 以降に利用者が新しく作ったファイルや、スキルが触っていない変更は、そもそも対象にしない（`git clean` や `git restore -- .` は使わない）。
+**U1（と記録した直後のビルド）が書いたままの内容のファイルだけを自動で戻す。** 記録後に 1 バイトでも変わったファイル、記録の前に利用者が触った（TAINT）ファイル、消えた・symlink に変わったファイル、HEAD での状態を判定できないファイルは、自動では戻さず、利用者に差分を示して個別に判断を仰ぐ。U0 以降に利用者が新しく作ったファイルや、スキルが触っていないファイルは、そもそも対象にしない（`git clean` や `git restore -- .` は使わない）。
 
 ## 復旧の手順
 
-### 判定する（書き込みなし）
-
-U1 で保持した JSON（`updated`・`created`・`manifest_written`・`gitignore_added`。再実行があれば両方を合わせたもの）と、**現在の状態**を突き合わせる。現在の状態は、`--update` なしの `--show-diff` で調べる。
+### 1. 予定を見て、了承を取り、実行する
 
 ```bash
-python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "${BASE}" --show-diff --json
+bash "${SKILL_DIR}/scripts/update-snapshot.sh" status "${SNAP}"            # 各パスの状態（match / changed / missing / symlink / special / taint）
+bash "${SKILL_DIR}/scripts/update-snapshot.sh" restore "${SNAP}" --dry-run  # 何も変更せず、予定を出す
+git status --short                                                          # 利用者へ示す
+# 利用者の了承を得てから:
+bash "${SKILL_DIR}/scripts/update-snapshot.sh" restore "${SNAP}"            # 一致するものだけを戻す
 ```
 
-`--show-diff` は**分類だけして何も書かずに終了する**（再実行で欠けたファイルを作る経路を通らない）。出力の JSON の `same`（スキルの版と一致する所有ファイル）と `conflicts`（適用後に手が入った所有ファイル）を使う。
+出力の各行の意味と、終了コード:
 
-| 対象 | 判定 | 扱い |
+| 出力 | 意味 | 扱い |
 |------|------|------|
-| `updated[].path`（所有ファイル） | `same` にある（スキルが書いたまま） | **自動で戻す**（`git restore --source=HEAD --staged --worktree -- <path>`） |
-| | `conflicts` にある（U1 の後に手が入った） | 自動で戻さない。`--show-diff` の差分を利用者に示し、個別に判断（戻す・残す・手動で統合）を仰ぐ |
-| | どちらにもない（削除された、`pages.yml` の利用者区間だけ編集された、など） | 自動で戻さず、利用者に確認する |
-| `created[]`（所有ファイル） | `same` にある | **自動で削除する**（`rm -f -- <path>`） |
-| | それ以外 | 自動で削除せず、利用者に確認する |
-| `created[]`（利用者編集ファイル: `brand.toml`・`nav.toml`・`index.md`・`rust-toolchain.toml`。`missing` の再作成で作られたもの） | — | **自動で削除しない**。作成後に利用者が編集したかを判定できないため、利用者に確認する |
-| マニフェスト（`manifest_written` が true） | — | そのまま戻す（スキルしか書かない） |
-| `THIRD-PARTY-LICENSES`（`--write-third-party` を付けたビルド） | — | そのまま戻す（ビルドの生成物） |
-| `.gitignore`（`gitignore_added` が空でない） | `git diff --no-color HEAD -- .gitignore \| cat -v` の差分が、スキルが追記した行（`gitignore_added` と見出しのコメント行）だけ | 戻す |
-| | それ以外の差分がある（利用者が U0 以降に手で編集した） | 自動で戻さず、利用者に確認する |
+| `WOULD-RESTORE` / `WOULD-DELETE <path>`（`--dry-run`） | 戻す・消す予定 | 利用者に示す |
+| `RESTORED <path>` | 記録と一致し、HEAD に通常ファイルとして在ったので、HEAD へ復元した | 済み |
+| `DELETED <path>` | 記録と一致し、HEAD に無いと確定できたので、削除した | 済み |
+| `ASK <path> …` | 記録と一致しない・TAINT・消えた・symlink に変わった・祖先が symlink・HEAD での状態を判定できない・復元や削除に失敗した。**何もしていない** | 利用者に差分を示して個別に判断を仰ぐ（戻す・残す・手動で統合）。差分は下の `git diff`（外部 diff・textconv を使わず、行数と制御文字を絞る）や `scaffold.py --show-diff` で見せる。symlink・特殊ファイルは内容を読まない |
+| `ASK-ALL …`（stderr） | `${SNAP}` が無い・空・読めない、HEAD が動いた（更新用ブランチでコミットした等）、HEAD を解決できない、ローカル設定に外部コマンドを実行し得るキーがある。**何も戻していない** | すべて利用者に確認する |
 
-U1 の JSON の形に注意する: `updated` は `{"path": …, "reason": …}` のオブジェクトの配列（`path` の値を使う）、`created` は文字列（パス）の配列。転記するのは `path` の値だけ。
-
-### 実行する（自動で戻してよいと判定したものだけ）
+差分の見せ方（`ASK` のパスごと）:
 
 ```bash
-revert_path() {   # 追跡されていれば HEAD へ復元、未追跡（今回新規作成）なら削除する
-  if git ls-files --error-unmatch -- "$1" >/dev/null 2>&1; then
-    git restore --source=HEAD --staged --worktree -- "$1"
-  else
-    rm -f -- "$1"
-  fi
-}
-# 上の表で「自動で戻す」「自動で削除する」と判定したパスだけを列挙する（判定していないパスを入れない）
-git restore --source=HEAD --staged --worktree -- <自動で戻す updated[].path の各値>
-rm -f -- <自動で削除する created[] の各値>        # 該当がなければ実行しない
-revert_path tools/docs-site-gen/.scaffold-manifest.json   # manifest_written が true のときだけ
-revert_path THIRD-PARTY-LICENSES                          # --write-third-party を付けたビルドのときだけ（U0 の時点で追跡されていなければ今回新規作成）
-revert_path .gitignore                                    # 上の表で「戻す」と判定したときだけ
+git diff --no-ext-diff --no-textconv --no-color HEAD -- <path> | head -200 | cat -v
 ```
 
-### 元のブランチへ戻る
+終了コード: 0 = 完了（`ASK` なし）、2 = 使い方・入力の不正、3 = `ASK-ALL`（何も戻していない）、4 = `ASK` が 1 件以上。
 
-自動で戻さなかったファイル（利用者に確認して残したもの）がある場合は、それらの扱いが決まってから戻る。更新用ブランチにコミットが無いこと（`git log --oneline "${BASE}..${NAME}"` が空）を確かめてから削除する。コミットがあれば削除せず、利用者に確認する。
+### 2. 元のブランチへ戻る
+
+**`ASK` が 1 件でも残っている間は `git switch`・`git branch -D` へ進まない**（終了コード 4）。`ASK` で残したファイルの扱いが決まってから戻る。更新用ブランチにコミットが無いこと（`git log --oneline "${BASE}..${NAME}"` が空）を確かめてから削除する。コミットがあれば削除せず、利用者に確認する。
 
 ```bash
-git switch "${START_BRANCH}" && git branch -D "${NAME}"     # U0 で控えた値
+git -c core.fsmonitor=false -c core.hooksPath=/dev/null switch "${START_BRANCH}" && git branch -D "${NAME}"     # U0 で控えた値
 ```
 
-復旧後、利用者が U0 以降に手で行った変更（exit 3 の統合、exit 4 の `brand.toml` 追記、新規ファイル）と、自動で戻さず残したファイルは、作業ツリーに残り、元のブランチへ持ち越される。その旨を利用者に伝える。
+復旧後、利用者が U0 以降に手で行った変更（exit 3 の統合、exit 4 の `brand.toml` 追記、新規ファイル）と、`ASK` で残したファイルは、作業ツリーに残り、元のブランチへ持ち越される。その旨を利用者に伝える。
+
+## なぜ `scaffold.py --show-diff` の `same` を判定に使わないか
+
+`same` は「**いま scaffold が生成する内容と一致するか**」であって、「U1 の直後から変わっていないか」ではない。`pages.yml` は現在の利用者区間の内容を取り込んで生成予定を組み立てるため、U1 の後に利用者が区間へ監視パスを足しても `same` のままになり、`same` を根拠に `git restore` するとその編集が消える（`UpdateSnapshotTest` が、この状況で `same` が編集を検知できないこと・スナップショットとの比較なら検知できることを固定している）。`--show-diff` は、`ASK` になったパスの差分を利用者に見せる用途にだけ使う。

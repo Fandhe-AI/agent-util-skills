@@ -15,6 +15,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -175,6 +176,7 @@ test('SKILL.md は新規構築と更新の両方を案内し、更新の発火�
   assert.ok(maint.includes('## FF_REV の更新手順') && maint.includes('スキル保守者向け'))
   assert.ok(md.includes('references/maintenance.md') && md.includes('references/scaffold-reference.md'))
   assert.ok(md.includes('references/update-recovery.md'), 'U2 の復旧手順の詳細は references へ移した')
+  assert.ok(md.includes('update-snapshot.sh') && md.includes('record-json') && md.includes('restore'), 'U1 の記録と U2 の復旧は update-snapshot.sh を使う')
   assert.match(md, /rev-list --left-right --count/)
   assert.match(md, /fetch に失敗/)
   assert.match(md, /scaffold\.py" --target \. --detect --json/)
@@ -207,4 +209,13 @@ test('wrapper の Cargo.toml は build = false（対象リポジトリの build.
   for (const l of deps.split('\n').filter((x) => x.includes('='))) {
     assert.match(l, /path = "/, `path 依存以外が混入している: ${l}`)
   }
+})
+
+test('update-snapshot.sh は構文が正しく、対象リポジトリへは配置されない（scaffold.py の FILES に無い）', () => {
+  const r = spawnSync('bash', ['-n', join(SKILL_DIR, 'scripts', 'update-snapshot.sh')], { encoding: 'utf8' })
+  assert.equal(r.status, 0, r.stderr)
+  assert.doesNotMatch(read('scripts/scaffold.py'), /"scripts\/update-snapshot/)
+  const sh = read('scripts/update-snapshot.sh')
+  assert.match(sh, /git hash-object --no-filters/)
+  assert.doesNotMatch(sh, /\beval\b/)
 })
