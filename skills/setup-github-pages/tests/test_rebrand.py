@@ -3116,6 +3116,9 @@ class UpdateSnapshotEntrypointTest(unittest.TestCase):
         self.assertLess(fs.index("ancestors_ok"), fs.index("-L"))
         self.assertLess(fs.index("ancestors_ok"), fs.index("hash-object"))
         self.assertLess(fs.index("ancestors_ok"), fs.index("-e "))
+        # 改行変換つきハッシュ（既定の hash-object）は filter 属性の確認（attr_filter）の後にだけ呼ぶ（clean フィルタを起動しない）
+        self.assertLess(fs.index("attr_filter"), fs.index("hash-object"))
+        self.assertIn("--no-filters", fs)
         # パスの種別を見る test（-L / -e / -f）は file_state と ancestors_ok の中だけ
         for name, text in funcs.items():
             if name in ("file_state", "ancestors_ok", "check_snap_for_write", "main", "require_root", "ensure_head", "parse_snapshot"):
@@ -3267,6 +3270,115 @@ class UpdateSnapshotEntrypointTest(unittest.TestCase):
         r = self.sh("restore", self.snap)
         self.assertNotIn("DELETED", r.stdout)
         self.assertEqual(self.git("stash", "list"), stashes)
+
+class UpdateSnapshotLineEndingTest(unittest.TestCase):
+    """Z1: core.autocrlf・text/eol 属性が有効な環境でも、未編集の追跡ファイルが「HEAD と違う」と誤判定されない。
+    記録との比較は生バイト（--no-filters）、HEAD との比較は改行変換後の表現（filter 属性が無いパスだけ）。"""
+
+    SH = UpdateSnapshotTest.SH
+    ARGS = UpdateSnapshotTest.ARGS
+    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    BUILD_SH = UpdateSnapshotTest.BUILD_SH
+    RB = UpdateSnapshotTest.RB
+    TPL = UpdateSnapshotTest.TPL
+    setUp = UpdateSnapshotTest.setUp
+    git = UpdateSnapshotTest.git
+    sc = UpdateSnapshotTest.sc
+    sh = UpdateSnapshotTest.sh
+    rec = UpdateSnapshotHardeningTest.rec
+    restore = UpdateSnapshotTest.restore
+
+    def crlf_repo(self, variant):
+        self.assertEqual(self.sc().returncode, 0)
+        (self.t / self.TPL).write_text("third party\nline2\n")
+        if variant == "autocrlf":
+            self.git("config", "core.autocrlf", "true")
+        else:
+            (self.t / ".gitattributes").write_text("* text=auto eol=crlf\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+        # HEAD は LF、作業ツリーは CRLF（チェックアウトし直す）
+        for f in self.git("ls-files").split():
+            (self.t / f).unlink()
+        self.git("checkout", "--", ".")
+        self.assertIn(b"\r\n", (self.t / self.BUILD_SH).read_bytes(), "作業ツリーが CRLF になっていない（テストの前提）")
+        self.assertNotIn(b"\r", subprocess.run(["git", "-C", str(self.t), "show", f"HEAD:{self.BUILD_SH}"],
+                                               capture_output=True, env=self.env).stdout)
+
+    def test_unedited_crlf_files_are_not_tainted_and_edited_ones_are(self):
+        for variant in ("autocrlf", "attr"):
+            self.setUp()
+            self.crlf_repo(variant)
+            g = self.sh("guard", self.snap)
+            self.assertEqual(g.returncode, 0, g.stderr)
+            self.assertNotIn("印:", g.stdout, f"{variant}: 未編集の追跡ファイルが TAINT になった（生バイトと HEAD の blob の取り違え）")
+            # 1 文字編集したファイルは従来どおり TAINT
+            with (self.t / self.RB).open("ab") as fh:
+                fh.write(b"x\r\n")
+            g = self.sh("guard", self.snap)
+            self.assertIn(f"印: {self.RB}", g.stdout, variant)
+            self.assertEqual(g.stdout.count("印:"), 1, variant)
+
+    def test_apply_record_restore_works_with_crlf_checkout(self):
+        for variant in ("autocrlf", "attr"):
+            self.setUp()
+            self.crlf_repo(variant)
+            self.assertEqual(self.sh("guard", self.snap).stdout.count("印:"), 0)
+            (self.t / self.MAIN_RS).write_bytes((self.t / self.MAIN_RS).read_bytes().replace(b"\r\n", b"\n") + b"// v9\n")  # スキルが LF で書く
+            self.rec(self.MAIN_RS)
+            r, res = self.restore()
+            self.assertEqual(r.returncode, 0, f"{variant}: {r.stdout}{r.stderr}")
+            self.assertEqual(res[self.MAIN_RS], "RESTORED")
+            self.assertNotIn(b"// v9", (self.t / self.MAIN_RS).read_bytes())
+            self.assertIn(b"\r\n", (self.t / self.MAIN_RS).read_bytes(), "復元後は改行変換後（CRLF）になる")
+            # 復旧の 2 回目: 戻したファイルは記録（生バイト）と違うが、HEAD と同じなので ASK にせず SKIP
+            r2 = self.sh("restore", self.snap)
+            self.assertEqual(r2.returncode, 0, f"{variant}: {r2.stdout}{r2.stderr}")
+            self.assertIn(f"SKIP {self.MAIN_RS} すでに HEAD と同じ内容", r2.stdout)
+            self.assertNotIn("ASK", r2.stdout)
+
+    def test_edited_after_record_is_still_ask_and_second_run_after_delete_is_skip(self):
+        self.crlf_repo("autocrlf")
+        tpl = self.t / self.TPL
+        tpl.write_text("generated\n")            # HEAD にあるファイルをビルドが上書きした
+        self.rec(self.TPL)
+        with tpl.open("a") as fh:
+            fh.write("user edit\n")
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn(f"ASK {self.TPL} 書き込み後に内容が変わっている", r.stdout)
+        # HEAD に無い新規ファイル: 1 回目で削除、2 回目は「すでに無い」で SKIP
+        tpl.write_text("generated\n")
+        self.git("rm", "-q", "--cached", "--", self.TPL)
+        self.git("commit", "-qm", "drop")           # HEAD から消える（以後は新規ファイル扱い）
+        tpl.unlink()                                  # 実際の流れ: ビルドの前は存在せず、guard の後にビルドが作る
+        self.snap.unlink()
+        self.assertEqual(self.sh("guard", self.snap).returncode, 0)
+        tpl.write_text("generated\n")
+        self.rec(self.TPL)
+        self.assertIn(f"DELETED {self.TPL}", self.sh("restore", self.snap).stdout)
+        r2 = self.sh("restore", self.snap)
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertIn(f"SKIP {self.TPL} すでに無い", r2.stdout)
+
+    def test_filter_attribute_path_never_runs_conversion_hash(self):
+        """filter 属性つきのパスでは、変換つきハッシュ（clean フィルタを起動し得る）を呼ばない: 番兵が作られず TAINT になる。"""
+        sentinel = self.base / "CLEAN-RAN"
+        glob = self.base / "gcfg"
+        glob.write_text(f'[filter "evil"]\n\tclean = touch {sentinel}; cat\n')
+        self.env = dict(self.env, GIT_CONFIG_GLOBAL=str(glob))
+        self.assertEqual(self.sc().returncode, 0)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "baseline")
+        (self.t / ".gitattributes").write_text(f"{self.RB} filter=evil\\n".replace("\\\\n", "\\n"))
+        with (self.t / self.RB).open("a") as fh:
+            fh.write("# touched\n")
+        g = self.sh("guard", self.snap)
+        self.assertEqual(g.returncode, 0, g.stderr)
+        self.assertIn(f"印: {self.RB}", g.stdout)
+        self.assertFalse(sentinel.exists(), "clean フィルタが起動された")
+        self.assertEqual(self.sh("status", self.snap).returncode, 0)
+        self.assertFalse(sentinel.exists())
 
 
 class CheckSiteTest(unittest.TestCase):

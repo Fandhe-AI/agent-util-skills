@@ -21,8 +21,9 @@
 # THIRD-PARTY-LICENSES に限る。利用者編集ファイル（brand.toml 等）は記録も復元も削除もしない。
 #
 # # ハッシュと git
-# ハッシュは `git hash-object --no-filters`（macOS・Linux で同じ。autocrlf・属性のフィルタを通さないので設定で結果が
-# 変わらない）。symlink は辿らず、通常ファイル以外はハッシュしない。git は `-c core.fsmonitor=false
+# 記録と「前回の記録との比較」のハッシュは `git hash-object --no-filters`（macOS・Linux で同じ。autocrlf・属性のフィルタを
+# 通さないので設定で結果が変わらない生バイト）。「HEAD と同じか」の比較だけ、HEAD の blob（改行変換後の表現）と
+# そろえるため、filter 属性の無いパスに限り改行変換つきの `git hash-object`（既定）を使う。symlink は辿らず、通常ファイル以外はハッシュしない。git は `-c core.fsmonitor=false
 # -c core.hooksPath=/dev/null` を付けて実行する（対象リポジトリの設定で外部コマンドが走らないように）。さらに
 # `restore` は、リポジトリのローカル設定に filter（smudge/clean/process）・core.fsmonitor・core.hooksPath・
 # diff の textconv/command・include があれば、何も戻さず ASK-ALL で止める（git restore が smudge フィルタを実行するため）。
@@ -149,12 +150,23 @@ ancestors_ok() {
 
 # 現在の状態: ハッシュ（通常ファイル）/ MISSING / SYMLINK / SPECIAL / ANCESTOR（祖先が不適）。
 # パスの中身・種別を見る唯一の入口。最初に祖先を検証し、不適なら何も開かず stat もしない。
+#
+# 第 2 引数 `norm`: 「HEAD と同じか」を比べるための、改行変換を適用したハッシュ（`git hash-object` の既定。HEAD の blob は
+# 改行変換後の表現なので、生バイトの `--no-filters` では core.autocrlf・`text` / `eol` 属性が有効な環境で未編集のファイルも
+# 「違う」になる）。filter 属性が指定されている（または判定不能な）パスでは、clean フィルタという外部コマンドを起動しない
+# ために変換つきハッシュを呼ばず FILTERED を返す。既定（引数なし）は生バイト（`--no-filters`）で、記録・記録との比較に使う。
 file_state() {
-  local p="$1"
+  local p="$1" mode="${2:-raw}" opt="--no-filters"
   if ! ancestors_ok "${p}"; then echo ANCESTOR
   elif [[ -L "${p}" ]]; then echo SYMLINK
   elif [[ ! -e "${p}" ]]; then echo MISSING
-  elif [[ -f "${p}" ]]; then g hash-object --no-filters -- "${p}" 2>/dev/null || echo SPECIAL
+  elif [[ -f "${p}" ]]; then
+    if [[ "${mode}" == norm ]]; then
+      attr_filter "${p}" || { echo FILTERED; return 0; }
+      opt=""
+    fi
+    # shellcheck disable=SC2086   # opt は空か --no-filters の定数（意図した単語分割）
+    g hash-object ${opt} -- "${p}" 2>/dev/null || echo SPECIAL
   else echo SPECIAL
   fi
 }
@@ -315,8 +327,11 @@ cmd_guard() {
       reason="symlink・特殊ファイル"
     elif [[ "${st}" == MISSING ]]; then
       if [[ ${he} -ne 1 || -n "${last}" ]]; then reason="HEAD または前回の記録にあるのに消えている"; fi
-    elif [[ "${st}" != "${headsha}" && "${st}" != "${last}" ]]; then
-      reason="HEAD とも前回の記録とも違う（利用者が触った）"
+    elif [[ "${st}" != "${last}" ]]; then
+      # 前回の記録との比較は生バイト同士。HEAD との比較だけ、改行変換後の表現にそろえる（HEAD の blob は変換後）
+      if [[ "$(file_state "${p}" norm)" != "${headsha}" || -z "${headsha}" ]]; then
+        reason="HEAD とも前回の記録とも違う（利用者が触った）"
+      fi
     fi
     if [[ -z "${reason}" && "${st}" != ANCESTOR ]] && ! index_vs_head "${p}"; then
       reason="index に HEAD と違う内容がある、または index の状態を判定できない（利用者がステージした可能性）"
@@ -387,7 +402,7 @@ unsafe_local_config() {
 ask_all() { echo "ASK-ALL $1。何も戻していない。すべて利用者に確認する" >&2; exit 3; }
 
 cmd_restore() {
-  local snap="$1" dry="${2:-}" parsed kind h p t st he cur_head rec_head unsafe asks=0 act
+  local snap="$1" dry="${2:-}" parsed kind h p t st he cur_head rec_head unsafe asks=0 act skip
   [[ -z "${dry}" || "${dry}" == "--dry-run" ]] || die "未知のオプション: ${dry}"
   parsed="$(parse_snapshot "${snap}")" || ask_all "スナップショットが無い・読めない"
   printf '%s\n' "${parsed}" | grep -q $'^REC\t' || ask_all "スナップショットに記録が無い"
@@ -406,6 +421,21 @@ cmd_restore() {
     fi
     st="$(file_state "${p}")"    # 祖先の検証を最初に行う入口（不適なら ANCESTOR。ここより前にパスを stat・open しない）
     if [[ "${st}" != "${h}" ]]; then
+      # 記録（生バイト）と違う。ただし、すでに戻っている（復旧の 2 回目など）なら、現在の内容が HEAD と同じで index も
+      # HEAD と同じことを、HEAD と同じ表現（改行変換後）で確かめて、ASK にせず済ませる。
+      #   HEAD に通常ファイルとして在る: 変換後のハッシュ == HEAD の blob（filter 属性つきは比べない = ASK）
+      #   HEAD に無い: ファイルが無く、index にもエントリが無い（すでに削除済み）
+      skip=""
+      if [[ "${st}" == MISSING ]]; then
+        head_entry "${p}"; he=$?
+        if [[ ${he} -eq 1 ]] && index_vs_head "${p}"; then skip="すでに無い（HEAD にも index にも無い）"; fi
+      elif [[ "${st}" =~ ^[0-9a-f]{40,64}$ ]]; then
+        head_entry "${p}"; he=$?
+        if [[ ${he} -eq 0 && "$(file_state "${p}" norm)" == "${HEAD_SHA}" ]] && index_vs_head "${p}"; then
+          skip="すでに HEAD と同じ内容"
+        fi
+      fi
+      if [[ -n "${skip}" ]]; then echo "SKIP ${p} ${skip}"; continue; fi
       case "${st}" in
         ANCESTOR) echo "ASK ${p} 祖先ディレクトリが symlink 等（リンク先は読まない）" ;;
         MISSING) echo "ASK ${p} 消えている（利用者が削除した可能性）" ;;
