@@ -27,12 +27,18 @@ docs-site）に渡す前に「生成器は通すが公開物として壊れる /
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import PLACEHOLDER_RE, UPSTREAM_BRAND, BrandError, has_upstream_word, SubsetError, load_brand, parse_nav  # noqa: E402
+# `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。append にして、
+# 同じディレクトリに標準モジュール名のファイル（argparse.py 等）があっても標準ライブラリを先に解決させる。
+sys.path.append(str(Path(__file__).resolve().parent))
+from _common import (  # noqa: E402
+    PLACEHOLDER_RE, UPSTREAM_BRAND, BrandError, SubsetError, has_upstream_word, load_brand, parse_nav,
+    read_bounded_text, resolves_inside, sanitize,
+)
 
 # 上流のショーケース生成パス。nav の path がここから始まると部品ページ等が混入する。
 RESERVED_PATH_PREFIXES = ("/themes/", "/primitives/", "/blocks/", "/wireframes/")
@@ -47,10 +53,42 @@ RESERVED_ASSET_NAMES = {
 }
 RESERVED_ASSET_DIRS = {"search-index"}
 
-_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-_ABS_LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\((/[^)\s]*)\)")
-_FENCE_RE = re.compile(r"^```.*?^```", re.S | re.M)
-_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+# 入力（nav.toml・Markdown・brand.toml）は信頼しない。`[^\]]*` のような上限なしの繰り返しは、細工した入力で
+# 最悪 O(n²) になるため長さを制限する。ファイル自体も読み取りサイズに上限を付ける。
+_IMAGE_RE = re.compile(r"!\[[^\]\n]{0,300}\]\([^)\n]{0,500}\)")
+_ABS_LINK_RE = re.compile(r"(?<!!)\[[^\]\n]{0,300}\]\((/[^)\s]{0,500})\)")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]{0,300}`")
+NAV_MAX_BYTES = 1024 * 1024
+BRAND_MAX_BYTES = 64 * 1024
+MD_MAX_BYTES = 1024 * 1024
+WORKFLOW_MAX_BYTES = 256 * 1024
+
+
+def _strip_fences(text: str) -> str:
+    """フェンスコードブロックを除く（行単位の単一走査。未閉じのフェンスは末尾まで除く）。"""
+    out, fenced = [], False
+    for line in text.split("\n"):
+        if line.startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _read_in_root(root_real: Path, path: Path, cap: int) -> str:
+    """root 内に解決されるファイルだけを、上限付きで読む。root 外（`.git` 配下を含む）へ解決されるものは読まない。"""
+    rel = path.relative_to(root_real) if path.is_relative_to(root_real) else path
+    if path.is_symlink():
+        # root 内を指す symlink（`site/nav.toml -> ../.env` など）も辿らない。リンク先の内容の断片が
+        # パースエラーとして出力に出るのを防ぐ。
+        raise ValueError(f"{rel} がシンボリックリンクのため読まない（通常ファイルにする）")
+    if not resolves_inside(root_real, path):
+        raise ValueError(f"{rel} が対象リポジトリの外（または .git 配下）へ解決される。読まない")
+    try:
+        return read_bounded_text(path, cap)
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        raise ValueError(f"{rel} を読めない: {e if isinstance(e, ValueError) and not isinstance(e, UnicodeDecodeError) else type(e).__name__}") from e
 
 
 def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
@@ -59,10 +97,13 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
 
     nav_path = root / "site" / "nav.toml"
     try:
-        nav_text = nav_path.read_text(encoding="utf-8")
-        tables = parse_nav(nav_text)
-    except (OSError, SubsetError, UnicodeDecodeError) as e:
+        tables = parse_nav(_read_in_root(root, nav_path, NAV_MAX_BYTES))
+    except (SubsetError, ValueError) as e:
         raise ValueError(f"site/nav.toml を読めない: {e}") from e
+    if brand_path.is_symlink():
+        raise ValueError("brand.toml がシンボリックリンクのため読まない（通常ファイルにする）")
+    if not resolves_inside(root, brand_path):
+        raise ValueError("brand.toml が対象リポジトリの外（または .git 配下）へ解決される。読まない")
     try:
         brand = load_brand(brand_path)
     except BrandError as e:
@@ -101,7 +142,7 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
 
     # 3. 予約アセット名
     assets = root / "site" / "assets"
-    if assets.is_dir():
+    if resolves_inside(root, assets) and assets.is_dir():   # 実体の検証が先（is_dir は親 symlink を辿って外を見る）
         for child in sorted(assets.iterdir()):
             if child.is_dir() and child.name in RESERVED_ASSET_DIRS:
                 errors.append(f"site/assets/{child.name}/ は予約ディレクトリ（生成物と衝突）")
@@ -112,11 +153,13 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
     scan = [nav_path, brand_path, root / ".github" / "workflows" / "pages.yml"]
     scan += [root / s for s in sources if not Path(s).is_absolute() and ".." not in Path(s).parts]
     for f in scan:
-        if not f.is_file():
+        # 実体の検証が先。root 外へ解決されるものは（存在の有無にかかわらず）読まずにエラーにする
+        if resolves_inside(root, f) and not os.path.lexists(f):
             continue
         try:
-            body = f.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+            body = _read_in_root(root, f, WORKFLOW_MAX_BYTES if f.suffix == ".yml" else MD_MAX_BYTES)
+        except ValueError as e:
+            errors.append(str(e))   # root 外へ解決される・大きすぎる・読めない: 読まずにエラー
             continue
         found = sorted(set(PLACEHOLDER_RE.findall(body)))
         if found:
@@ -125,16 +168,20 @@ def check(root: Path, brand_path: Path) -> tuple[list[str], list[str]]:
     # 警告: Markdown（コードフェンス内は除外）
     for s in sources:
         f = root / s
-        if Path(s).is_absolute() or ".." in Path(s).parts or not f.is_file():
-            continue  # 生成器が拒否・報告する
-        body = _INLINE_CODE_RE.sub("", _FENCE_RE.sub("", f.read_text(encoding="utf-8", errors="replace")))
+        if Path(s).is_absolute() or ".." in Path(s).parts or not resolves_inside(root, f) or not os.path.lexists(f):
+            continue  # 生成器が拒否・報告する（root 外へ解決されるものは、上のプレースホルダー検査でエラーにしている）
+        try:
+            body = _INLINE_CODE_RE.sub("", _strip_fences(_read_in_root(root, f, MD_MAX_BYTES)))
+        except ValueError:
+            continue  # root 外へ解決される・大きすぎる・読めない: 上のプレースホルダー検査で既にエラーにしている
         if _IMAGE_RE.search(body):
             warnings.append(f"{s}: 画像記法 ![](…) は上流が非対応（`!` + リンクとして描画される）")
         for link in _ABS_LINK_RE.findall(body):
             if base and not (link == base or link.startswith(base + "/")):
                 warnings.append(f"{s}: 絶対パスリンク `{link}` が base_path `{base}` を含まない（リンク検査で失敗する）")
 
-    if not (root / "THIRD-PARTY-LICENSES").is_file():
+    tpl = root / "THIRD-PARTY-LICENSES"
+    if not (resolves_inside(root, tpl) and tpl.is_file()):
         warnings.append("THIRD-PARTY-LICENSES が無い（build-local.sh --write-third-party で生成する）")
     return errors, warnings
 
@@ -150,12 +197,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         errors, warnings = check(root, brand_path)
     except ValueError as e:
-        print(f"エラー: {e}", file=sys.stderr)
+        print(f"エラー: {sanitize(e, 500)}", file=sys.stderr)
         return 2
     for w in warnings:
-        print(f"警告 {w}", file=sys.stderr)
+        print(f"警告 {sanitize(w, 500)}", file=sys.stderr)
     for e in errors:
-        print(f"NG {e}", file=sys.stderr)
+        print(f"NG {sanitize(e, 500)}", file=sys.stderr)
     if errors:
         return 1
     print("check_site ok")

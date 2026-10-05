@@ -62,12 +62,17 @@ esac
 #
 # macOS 標準の realpath には -m が無いため、移植性のある python3 の os.path.realpath（存在しない
 # パスも許容する非 strict 動作）で正規化する。
-canon() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+# python3 は、`-c` なら cwd、スクリプト起動ならそのスクリプトのディレクトリが sys.path の先頭に入る。対象
+# リポジトリ（信頼できない場合がある）の .py（argparse.py 等の標準モジュール名）が標準ライブラリより先に
+# import されないよう、すべての起動に `-I`（隔離モード: cwd・スクリプトのディレクトリ・PYTHONPATH・user site を
+# 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。check_site.py /
+# rebrand_site.py は自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
+canon() { python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 # 親ディレクトリだけを実体化し、末端の名前はそのまま残す。末端が symlink かの判定（-L）を
 # 正規化後のパスに対して正しく行うため（`sub/../x` のように途中が未作成でも `-L` が誤って偽にならない）。
 canon_leaf() {
-  python3 -c '
+  python3 -I -B -c '
 import os, sys
 p = sys.argv[1].rstrip("/") or "/"
 b = os.path.basename(p)
@@ -234,7 +239,7 @@ fi
 
 # ---- 事前検証
 step "check_site"
-python3 "${SCRIPT_DIR}/check_site.py" --root "${ROOT}"
+python3 -I -B "${SCRIPT_DIR}/check_site.py" --root "${ROOT}"
 
 # ---- 依存検査: wrapper と上流の依存はすべて path 依存（source が null）であること。
 # crates.io 等の registry 依存が混入すると、匿名・隔離ビルドの前提と供給網の固定方針が崩れる。
@@ -242,7 +247,7 @@ python3 "${SCRIPT_DIR}/check_site.py" --root "${ROOT}"
 step "registry 依存が 0 件であることを検査"
 # cargo metadata の失敗を set -e で拾うため、プロセス置換ではなくコマンド置換で受ける。
 META="$(cd "${SCRIPT_DIR}" && cargo metadata --format-version 1 --offline --manifest-path "${SCRIPT_DIR}/Cargo.toml")"
-printf '%s' "${META}" | python3 -c '
+printf '%s' "${META}" | python3 -I -B -c '
 import json, sys
 meta = json.load(sys.stdin)
 ext = sorted("%s %s" % (p["name"], p["version"]) for p in meta["packages"] if p.get("source") is not None)
@@ -263,13 +268,13 @@ step "サイトを生成"
 
 # ---- rebrand
 step "rebrand"
-python3 "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml"
+python3 -I -B "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml"
 
 # ---- 最小 verify（空サイト・アセット欠落を黙って公開しない。-s で 0 バイトも検出）
 step "verify"
 for f in index.html 404.html assets/site.css assets/site.js assets/search-index.json; do
   test -s "${OUT}/${f}" || { echo "エラー: ${f} が無い、または空" >&2; exit 1; }
 done
-python3 "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml" --verify-only
+python3 -I -B "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml" --verify-only
 
 step "完了: ${OUT}"

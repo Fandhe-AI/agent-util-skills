@@ -5,7 +5,7 @@
 # docs サイトのファイル書式（nav.toml / redirects.toml / Markdown）
 
 生成器は fandhe-frontend の docs-site（`FF_REV` 固定）。ここに書く制約は**その rev の実装**に基づく。
-`FF_REV` を更新したら本ファイルの各節を再確認する（SKILL.md「FF_REV の更新手順」）。
+`FF_REV` を更新したら本ファイルの各節を再確認する（references/maintenance.md「FF_REV の更新手順」）。
 
 ## nav.toml
 
@@ -36,7 +36,7 @@
 
 `path` は `/` 始まり・`/` 終わりで、セグメントは英数字・`-`・`_` のみ。サイト全体で一意。
 `source` は相対パスで、`..`・絶対パス・`\` は禁止、ファイルが実在すること。リポジトリ内のどこにあってもよい
-（`docs/guide/x.md` や `README.md` も指定できる。ただし pages.yml の `paths` にも追加する）。
+（`docs/guide/x.md` や `README.md` も指定できる。ただし `pages.yml` の利用者区間（`sgp:user-paths:begin` と `end` の間）に `      - "docs/**"` の形で監視パスも追加する。区間の外を編集すると、スキルの更新が競合する）。
 
 ### 予約パス（全面禁止）
 

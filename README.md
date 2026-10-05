@@ -1,6 +1,6 @@
 # Agent Util Skills
 
-Claude Code 向けのユーティリティスキル集。`create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを、開発ワークフロースキル集 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から本リポジトリへ移設して独立管理する。加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築）を本リポジトリで新規開発し、合わせて 5 スキルを上流ソースとして管理する。
+Claude Code 向けのユーティリティスキル集。`create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを、開発ワークフロースキル集 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から本リポジトリへ移設して独立管理する。加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）を本リポジトリで新規開発し、合わせて 5 スキルを上流ソースとして管理する。
 
 インストールには [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
 
@@ -65,10 +65,11 @@ UX/UI デザイナーの専門家として、アイデア・要件文書から U
 
 ### setup-github-pages
 
-fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub Pages ドキュメントサイトを構築する。任意のリポジトリ（新規・既存）へ Rust 製 SSG・Markdown 管理・Actions 自動デプロイ・ブランド置換までを一括で構築できる。「GitHub Pages で公開したい」「docs サイト作って」「fandhe-frontend と同じデザイン」などで使用する。
+fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub Pages ドキュメントサイトを構築・更新する。任意のリポジトリ（新規・既存）へ Rust 製 SSG・Markdown 管理・Actions 自動デプロイ・ブランド置換までを一括で構築、または構築済みサイトのデザインとビルドの仕組みをスキルの最新版へ更新できる。「GitHub Pages で公開したい」「docs サイト作って」「Pages サイトを更新して」「デザインを最新にして」などで使用する。
 
 - [fandhe-frontend の公式サイト](https://fandhe-ai.github.io/fandhe-frontend/)のデザイン・構成・機能（テーマ切替・検索・アクセシビリティ）をそのまま再利用
-- Rust 製 SSG（fandhe-frontend の `crates/docs-site`）をラッパーで呼ぶため、ビルド・生成・デプロイすべてをローカル・CI の同じ入口で実行
+- 新規構築: Rust 製 SSG（fandhe-frontend の `crates/docs-site`）をラッパーで呼ぶため、ビルド・生成・デプロイすべてをローカル・CI の同じ入口で実行
+- 構築済みサイトの更新: 構築済みのリポジトリでスキルを再実行すると、スキルの最新構成（生成器の固定 commit `FF_REV`・wrapper・スクリプト・`pages.yml`）へ更新する。利用者のファイル（`site/`・`brand.toml`・`pages.yml` の追加 `paths`）は保持し、配置後に手を加えたスキル所有ファイルは上書きせず競合として止まる。Pages の設定は変更しない
 - ブランド名・GitHub リンク・著作権・favicon などを `brand.toml` と後処理（`rebrand_site.py`）で置き換え
 - `Fandhe-AI/actions` の共通 reusable workflow で GitHub Pages へ自動デプロイ
 - 詳細は [skills/setup-github-pages/SKILL.md](skills/setup-github-pages/SKILL.md) を参照

@@ -15,7 +15,7 @@
 | `setup-firebase-hosting` | 一部要 | `scripts/bootstrap-firebase.sh`（GCP/Firebase 認証・API 呼び出し・`gh secret set` 等）はネットワーク必須。`firebase.json` の作成やローカル検証（Step 3〜4 相当）はネットワーク不要 |
 | `create-pitch-deck` | 一部要 | 生成（`scripts/build_slides.py`）は標準ライブラリのみでネットワーク不要。検証（`scripts/validate_slides.py`）は Playwright（Chromium）を起動するローカル処理でページロード時の外部通信は行わない。初回の venv セットアップ（`pip install playwright` と `playwright install chromium` のブラウザ本体ダウンロード）のみネットワークを要する |
 | `create-design-doc` | 一部要 | 生成・検証（`scripts/capture_screenshot.py` / `scripts/check_overflow.py`）は Playwright（Chromium）を起動するローカル処理でページロード時の外部通信は行わない。初回の venv セットアップ（`pip install playwright` と `playwright install chromium` のブラウザ本体ダウンロード、100MB超）のみネットワークを要する |
-| `setup-github-pages` | 要 | `git fetch`（fandhe-frontend の shallow fetch）・`gh api`（Pages 有効化）・`cargo build`（wrapper + 上流 docs-site）・GitHub Actions デプロイのすべてがネットワーク必須。ビルド自体は fetch 後オフライン可能だが、初期セットアップに github.com へのアクセスを要する |
+| `setup-github-pages` | 要 | `gh repo view`（既定ブランチ解決）・`git fetch`（fandhe-frontend の shallow fetch）・`gh api`（Pages 設定の確認。新規構築では有効化も行う）・`cargo build`（wrapper + 上流 docs-site）・GitHub Actions デプロイのすべてがネットワーク必須。ビルド自体は fetch 後オフライン可能だが、初期セットアップと FF_REV 更新時に github.com へのアクセスを要する |
 
 ## 判定値の意味
 
@@ -57,9 +57,9 @@
 
 ### setup-github-pages
 
-- `git fetch`（fandhe-frontend の匿名 shallow fetch）・`gh api`（Pages 有効化確認・設定変更）・`cargo build`（wrapper crate + 上流 docs-site）のすべてで github.com へのネットワークアクセスが必須
+- `gh repo view`（既定ブランチ解決）・`git fetch`（fandhe-frontend の匿名 shallow fetch）・`gh api`（Pages 設定の確認。新規構築では有効化も行う）・`cargo build`（wrapper crate + 上流 docs-site）のすべてで github.com へのネットワークアクセスが必須
 - `scripts/build-local.sh` と `scripts/rebrand_site.py`・`scripts/check_site.py` はビルド・検証・置換処理でネットワーク不要。ただし前提となる fetch が必須なため「ネットワーク不要」とはいえず「要」と判定
-- 初回セットアップ時に `_ff/` ディレクトリへ fandhe-frontend を shallow fetch する。以降のビルドはそのコピーを使うため、代替成果物が手元にあればオフラインビルド可能
+- 初回セットアップ時および `FF_REV` が更新された場合に `_ff/` ディレクトリへ fandhe-frontend を shallow fetch する。`FF_REV` が変わらない場合のビルドはそのコピーを使うため、代替成果物が手元にあればオフラインビルド可能
 - GitHub Actions（`pages.yml`）による自動デプロイもネットワーク越しの push 検知と権限検証を要する
 - SKILL.md 側の詳細は [../skills/setup-github-pages/SKILL.md](../skills/setup-github-pages/SKILL.md) の前提条件・ネットワーク要件を参照
 
