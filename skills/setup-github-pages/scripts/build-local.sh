@@ -271,7 +271,11 @@ fi
 step "check_site"
 python3 -I -B "${SCRIPT_DIR}/check_site.py" --root "${ROOT}"
 
-# ---- docs-site をインストール（匿名・FF_REV 固定・--locked。同一 rev なら cargo が再インストールを省略する）
+# ---- docs-site をインストール（匿名・FF_REV 固定・--locked）
+# 同一 FF_REV でインストール・検査済みなら cargo install 自体を省く（cargo の「最新か」判定は上流の git DB の
+# clone を先に要求し、CI の cache ヒット時でも約 185 MB を取得するため）。この省略はスクリプト側の判定であり、
+# install の引数や検査を変えるときはローカルの既存インストールが再利用され得る。CI は pages.yml の cache キーへ
+# build-local.sh を含めて無効化している。強制的に入れ直すには INSTALL_ROOT を削除する。
 step "docs-site をインストール"
 #
 # 依存検査（インストール前）: 固定 rev の Cargo.lock を固定 URL から取得し、docs-site から辿れる依存の
@@ -337,7 +341,40 @@ guard_install_tree() {
   guard_path "${INSTALL_ROOT}/.crates2.json" "cargo install の台帳 .crates2.json" || return 1
 }
 guard_install_tree || exit 2
-GIT_TERMINAL_PROMPT=0 cargo install --git "${FF_URL}" --rev "${FF_REV}" --locked --root "${INSTALL_ROOT}" fandhe-frontend-docs-site
+# 省略条件（すべて成立したときだけ）: 検査済み記録と bin/docs-site が揃う（NEED_LOCK_CHECK=0）、かつ cargo の台帳が
+# 固定 URL と FF_REV の組でのインストールを記録している。欠落・不一致・読み取り失敗は install を実行する側へ倒す。
+NEED_INSTALL=1
+if [[ "${NEED_LOCK_CHECK}" -eq 0 && -f "${INSTALL_ROOT}/.crates.toml" ]] \
+  && python3 -I -B -c '
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(1)
+# .crates.toml の [v1] は "<pkg> <version> (<source>)" = ["<bin>", ...]。対象パッケージの
+# エントリ自体の source が固定 URL・FF_REV の組で、かつ bin/docs-site を提供していることだけを成功とする
+# （別パッケージのエントリやコメントに同じ文字列があっても一致させない）
+url, rev, path = sys.argv[1], sys.argv[2], sys.argv[3]
+want = "(git+%s?rev=%s#%s)" % (url, rev, rev)
+try:
+    with open(path, "rb") as f:
+        v1 = tomllib.load(f).get("v1", {})
+except Exception:
+    sys.exit(1)
+for key, bins in v1.items():
+    parts = key.split(" ", 2)
+    if len(parts) == 3 and parts[0] == "fandhe-frontend-docs-site" and parts[2] == want \
+        and isinstance(bins, list) and "docs-site" in bins:
+        sys.exit(0)
+sys.exit(1)
+' "${FF_URL}" "${FF_REV}" "${INSTALL_ROOT}/.crates.toml"; then
+  NEED_INSTALL=0
+fi
+if [[ "${NEED_INSTALL}" -eq 1 ]]; then
+  GIT_TERMINAL_PROMPT=0 cargo install --git "${FF_URL}" --rev "${FF_REV}" --locked --root "${INSTALL_ROOT}" fandhe-frontend-docs-site
+else
+  step "docs-site のインストールは省略（同一 FF_REV でインストール・検査済み）"
+fi
 # インストール後・実行前にも再確認し、実行ファイルが通常ファイルであることを要求する
 guard_install_tree || exit 2
 if [[ ! -f "${INSTALL_ROOT}/bin/docs-site" || ! -x "${INSTALL_ROOT}/bin/docs-site" ]]; then

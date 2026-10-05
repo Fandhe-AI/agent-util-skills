@@ -777,6 +777,91 @@ class UpstreamLikeRepoNameTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("残っている", r.stderr)
 
+class InstallSkipTest(unittest.TestCase):
+    """同一 FF_REV でインストール・検査済みなら cargo install を省く判定の回帰テスト（ネットワーク不要）。
+
+    cargo / curl を PATH 先頭のスタブへ差し替え、呼び出しの有無と終了コードで経路を判別する。
+    省略は「検査済み記録・台帳・実行ファイル」がすべて揃うときだけで、1 つでも欠ければ install（または検査）へ倒れる。
+    """
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        r = run("scaffold.py", "--target", self.repo, "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.rev = (self.repo / "tools/docs-site-gen/FF_REV").read_text().strip()
+        self.other = "0" * 40  # 40 桁 hex を別 rev としてテストに直書きしない（rev-pin.test.mjs の一致検査）
+        self.log = self.base / "calls.log"
+        bindir = self.base / "stubs"
+        bindir.mkdir()
+        for name, code in (("cargo", 97), ("curl", 22)):
+            stub = bindir / name
+            stub.write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.log}"\nexit {code}\n')
+            stub.chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+        self.root = self.repo / "tools/docs-site-gen/target/docs-site-install"
+        (self.root / "bin").mkdir(parents=True)
+
+    def prepare(self, mark, ledger, executable=True):
+        exe = self.root / "bin/docs-site"
+        exe.write_text("#!/bin/sh\nexit 96\n")
+        exe.chmod(0o755 if executable else 0o644)
+        if mark is not None:
+            (self.root / ".registry-checked").write_text(mark + "\n")
+        if ledger is not None:
+            url = "https://github.com/Fandhe-AI/fandhe-frontend"
+            (self.root / ".crates.toml").write_text(
+                f'[v1]\n"fandhe-frontend-docs-site 0.1.0 (git+{url}?rev={ledger}#{ledger})" = ["docs-site"]\n')
+
+    def build(self):
+        r = subprocess.run(["bash", str(self.repo / "tools/docs-site-gen/build-local.sh"), "--out", str(self.base / "out")],
+                           capture_output=True, text=True, cwd=self.repo, env=self.env)
+        calls = self.log.read_text() if self.log.exists() else ""
+        return r, calls
+
+    def test_skip_when_marker_and_ledger_match(self):
+        self.prepare(self.rev, self.rev)
+        r, calls = self.build()
+        self.assertEqual(r.returncode, 96, r.stderr)
+        self.assertEqual(calls, "")
+        self.assertIn("インストールは省略", r.stderr)
+
+    def test_install_when_ledger_rev_differs_or_missing(self):
+        for ledger in (self.other, None):
+            with self.subTest(ledger=ledger):
+                self.log.unlink(missing_ok=True)
+                self.prepare(self.rev, ledger)
+                if ledger is None:
+                    (self.root / ".crates.toml").unlink(missing_ok=True)
+                r, calls = self.build()
+                self.assertEqual(r.returncode, 97, r.stderr)
+                self.assertNotIn("curl", calls)
+                self.assertIn(f"cargo install --git https://github.com/Fandhe-AI/fandhe-frontend --rev {self.rev} --locked", calls)
+
+    def test_recheck_when_marker_missing_or_stale_or_not_executable(self):
+        cases = ((self.other, self.rev, True), (None, self.rev, True), (self.rev, self.rev, False))
+        for mark, ledger, exe in cases:
+            with self.subTest(mark=mark, exe=exe):
+                self.log.unlink(missing_ok=True)
+                (self.root / ".registry-checked").unlink(missing_ok=True)
+                self.prepare(mark, ledger, exe)
+                r, calls = self.build()
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("curl", calls)
+                self.assertNotIn("cargo", calls)
+
+    def test_ledger_symlink_aborts_before_any_call(self):
+        self.prepare(self.rev, None)
+        real = self.base / "real.toml"
+        real.write_text("x\n")
+        (self.root / ".crates.toml").symlink_to(real)
+        r, calls = self.build()
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(calls, "")
+
+
 class WriteBoundaryTest(unittest.TestCase):
     """書き込み・削除先が対象リポジトリの外へ出ないことの回帰テスト（symlink 経由の脱出）。
 
