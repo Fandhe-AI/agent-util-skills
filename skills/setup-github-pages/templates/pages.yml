@@ -62,23 +62,24 @@ jobs:
           toolchain: stable
 
       - name: Resolve rustc commit-hash
-        # cache キーへ rustc の実体を含める（stable の更新で古い target を再利用しない）
+        # cache キーへ rustc の実体を含める（stable の更新で古い toolchain のバイナリを使い続けない）
         id: rustc
         run: |
           echo "hash=$(rustc -vV | sed -n 's/^commit-hash: //p')" >> "$GITHUB_OUTPUT"
 
       - name: Cache docs-site install
-        # 鍵: OS + rustc + FF_REV のハッシュ。インストール先は target/docs-site-install。
-        # FF_REV を変えるとキーが変わり、古い上流のビルド成果物を使い回さない。
+        # 対象は cargo install の出力先のみ（bin/docs-site・cargo の台帳・依存検査の記録）。
+        # 鍵: OS + rustc + FF_REV・build-local.sh のハッシュ。前方一致の復元は使わず、完全一致でのみ復元する
+        # （別の FF_REV のインストールを復元しない）。ヒット時は build-local.sh が記録と台帳の rev を
+        # FF_REV と照合し、一致すれば cargo install を省く。
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: tools/docs-site-gen/target
+          path: tools/docs-site-gen/target/docs-site-install
           # yamllint disable-line rule:line-length
-          key: docs-site-gen-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-${{ hashFiles('tools/docs-site-gen/FF_REV') }}
+          key: docs-site-gen-${{ runner.os }}-${{ steps.rustc.outputs.hash }}-${{ hashFiles('tools/docs-site-gen/FF_REV', 'tools/docs-site-gen/build-local.sh') }}
 
-      - name: "build: install → generate → rebrand → verify"
-        # ローカルと同一の入口。FF_REV の検証（40 桁 hex）・
-        # check_site・docs-site の匿名 cargo install（--locked）・生成（リンク検査は fail-closed）・rebrand・最小 verify・残存検査をすべて含む。
+      - name: "build: install → generate → verify"
+        # ローカルと同一の入口。工程の正は build-local.sh 冒頭の工程コメント。
         # 出力先は ${RUNNER_TEMP} 配下（リポジトリ直下を汚さない）。
         run: bash tools/docs-site-gen/build-local.sh --out "${RUNNER_TEMP}/docs-site-dist"
 

@@ -9,7 +9,7 @@
 //   2. スキル内のドキュメント・スクリプト・テンプレートに現れる 40 桁 hex（`uses:` 行の
 //      action SHA を除く）がすべて FF_REV と一致すること（更新漏れの検出）
 //   3. build-local.sh が FF_REV ファイルを読み、使用前に ^[0-9a-f]{40}$ で検証し、固定 URL・固定 rev でだけ取得すること
-//   4. pages.yml が FF_REV を直書きせず、cache キーが FF_REV ファイルのハッシュのみであること
+//   4. pages.yml が FF_REV を直書きせず、cache キーが FF_REV・build-local.sh のハッシュと rustc の commit-hash で構成されること
 //   5. pages.yml の action が SHA 固定（Fandhe-AI/actions@latest のみ例外）、run: に ${{ }} が無いこと、
 //      deploy 呼び出しの必須設定（runner-label 等）が揃っていること
 import { test } from 'node:test'
@@ -102,14 +102,49 @@ test('build-local.sh のライセンス取得は固定 URL・https 限定・リ�
   assert.doesNotMatch(curl, /\s-[a-zA-Z]*L|--location/, 'curl がリダイレクトを追従する')
 })
 
-test('pages.yml は FF_REV を直書きせず、cache キーに FF_REV ファイルのハッシュを含む', () => {
+test('pages.yml は FF_REV を直書きせず、cache キーに FF_REV・build-local.sh のハッシュを含む', () => {
   const y = read('templates/pages.yml')
   assert.doesNotMatch(y, /FF_REV\s*[:=]/, 'workflow に FF_REV の定義が重複している')
-  assert.match(y, /hashFiles\('tools\/docs-site-gen\/FF_REV'\)/)
+  const hf = y.match(/hashFiles\(([^)]*)\)/)
+  assert.ok(hf, 'hashFiles が無い')
+  const args = [...hf[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+  assert.deepEqual(args, ['tools/docs-site-gen/FF_REV', 'tools/docs-site-gen/build-local.sh'])
   const key = y.match(/key: .*/)[0]
   assert.doesNotMatch(key, /Cargo\.toml|main\.rs/, 'ビルドに使わないファイルが cache キーに入っている')
   assert.match(y, /steps\.rustc\.outputs\.hash/)
   assert.match(y, /rustc -vV \| sed -n 's\/\^commit-hash: \/\/p'/)
+})
+
+test('pages.yml の cache は cargo install の出力先だけを対象とし、完全一致でのみ復元する', () => {
+  const y = read('templates/pages.yml')
+  const sh = read('scripts/build-local.sh')
+  const root = sh.match(/^INSTALL_ROOT="\$\{SCRIPT_DIR\}\/([^"]+)"/m)
+  assert.ok(root, 'build-local.sh に INSTALL_ROOT の定義が無い')
+  assert.equal(y.match(/^\s*path: (tools\/docs-site-gen\/\S+)$/m)[1], `tools/docs-site-gen/${root[1]}`)
+  // 存在しないパスを hashFiles に渡すと黙って空文字になり、FF_REV を変えてもキーが変わらなくなる
+  const scaffold = read('scripts/scaffold.py')
+  const dests = [...scaffold.matchAll(/^\s*\("[^"]+", "([^"]+)"/gm)].map((m) => m[1])
+  const hf = y.match(/hashFiles\(([^)]*)\)/)[1]
+  for (const m of hf.matchAll(/'([^']+)'/g)) assert.ok(dests.includes(m[1]), `hashFiles の ${m[1]} が scaffold の配置先に無い`)
+  assert.doesNotMatch(y, /restore-keys/, 'restore-keys は別の FF_REV の復元を許す')
+  assert.doesNotMatch(y, /cache-hit/, '省略判定は build-local.sh に置く')
+  const build = y.slice(y.indexOf('name: "build: install'))
+  assert.doesNotMatch(build.split('- name: Upload')[0], /^\s*if:/m, 'build ステップに if: がある')
+  const order = ['id: rustc', 'actions/cache@', 'build-local.sh --out'].map((k) => y.indexOf(k))
+  assert.ok(order.every((n) => n >= 0) && order[0] < order[1] && order[1] < order[2], 'rustc → cache → build の順でない')
+  for (const m of y.matchAll(/^\s*- name: (.*)$/gm)) assert.doesNotMatch(m[1], /rebrand|wrapper|fetch/i, `旧工程名: ${m[1]}`)
+})
+
+test('build-local.sh の install 省略判定は台帳と FF_REV を照合し、cargo install より前にある', () => {
+  const code = read('scripts/build-local.sh').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  const guard = code.indexOf('guard_install_tree || exit 2')
+  const judge = code.indexOf('"(git+%s?rev=%s#%s)"')
+  const install = code.indexOf('cargo install --git')
+  assert.ok(guard >= 0 && judge > guard && install > judge, '省略判定の位置が不正')
+  // 台帳は対象パッケージのエントリ単位で照合する（grep -Fq の部分一致では別エントリの記載でも通る）
+  assert.doesNotMatch(code.slice(guard, install), /grep -Fq/)
+  assert.match(code.slice(guard, install), /tomllib/)
+  assert.match(code.slice(guard, install), /fandhe-frontend-docs-site/)
 })
 
 test('pages.yml の action は SHA 固定（Fandhe-AI/actions の reusable のみ @latest）', () => {
