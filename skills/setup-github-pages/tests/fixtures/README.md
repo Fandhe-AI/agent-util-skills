@@ -20,3 +20,6 @@ FF_REV を更新したら再生成し、`rebrand.test.mjs` が通ることを確
 再生成: 空の一時ディレクトリへ `python3 scripts/scaffold.py --target <dir> --owner acme --repo mini-repo --branch main --title Mini --tagline "Tiny site" --year 2026`
 を実行し、`<dir>` で（使い捨ての `CARGO_HOME` を付けて）`bash tools/docs-site-gen/build-local.sh --clean --write-third-party` を実行する。
 後処理は無い。`_site/index.html` と `_site/404.html` をそのままコピーする。最終再生成: FF_REV `b3e31ef663a98b6080feb98c84ade238d1074a08`。
+
+`raw/` と `site-keys/` は生成器の出力をバイト一致で保持するため、`.editorconfig` で final newline 等の検査を免除している
+（新しい fixture ディレクトリを足したら同じ免除を `.editorconfig` に追加する）。

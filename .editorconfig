@@ -28,7 +28,7 @@ indent_size = unset
 # バイト一致で保持する（生成器の実出力でなければ上流の DOM 構造ずれを検知できない）。
 # 生成器は末尾改行を出力しないため、final newline を要求すると fixture を改変することになる。
 # 改行コード（LF）と文字コードの検査は維持する
-[skills/setup-github-pages/tests/fixtures/raw/**]
+[skills/setup-github-pages/tests/fixtures/{raw,site-keys}/**]
 insert_final_newline = unset
 trim_trailing_whitespace = unset
 indent_size = unset
