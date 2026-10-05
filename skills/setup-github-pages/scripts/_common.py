@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import os
 import re
+import stat
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -85,6 +87,58 @@ RESIDUAL_RE = re.compile(
 )
 
 
+# 人間には見えず LLM には読める文字は、指示文を仕込む経路になる（Unicode タグ文字・ゼロ幅文字など）。
+# 一般カテゴリ Cc（制御）・Cf（書式: ゼロ幅・bidi・タグ文字・U+00AD・U+2060〜2064 など）・Cs・Co・Cn・
+# Zl・Zp に加え、カテゴリは Mn / Lo だが不可視な変異セレクタ・結合用の文字・フィラーを明示的に含める。
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+_INVISIBLE_EXTRA = frozenset(
+    [0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0, 0xFEFF]
+    + list(range(0x180B, 0x180F)) + list(range(0xFE00, 0xFE10)) + list(range(0xE0100, 0xE01F0))
+)
+
+
+def _is_hidden(ch: str) -> bool:
+    return unicodedata.category(ch) in _INVISIBLE_CATEGORIES or ord(ch) in _INVISIBLE_EXTRA
+
+
+def sanitize(value: object, limit: int = 300) -> str:
+    """対象リポジトリ由来の文字列を、端末・ログ・エージェントの文脈へ出す前に無害化する（1 行にする）。
+
+    制御文字（ESC・改行・タブ・NEL 等）と、人間に見えない文字（双方向制御・ゼロ幅・Unicode タグ・変異セレクタ等）は
+    `\\uXXXX`（BMP 外は `\\UXXXXXXXX`）へ置換し、長さを制限する。nav.toml の title・差分の行・パース失敗の
+    断片・git の origin など、攻撃者が内容を決められる文字列は、出力先がターミナルでも、読み手が AI エージェント
+    でも、指示文や偽の行として働かないようにする（出力は常に「データ」であり、指示として扱わない）。
+    """
+    out = []
+    for ch in str(value):
+        if _is_hidden(ch):
+            out.append(f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
+        else:
+            out.append(ch)
+    res = "".join(out)
+    return res if len(res) <= limit else res[:limit] + "…"
+
+
+def read_bounded_text(path: Path, cap: int) -> str:
+    """通常ファイルを上限付きで UTF-8 として読む。上限超過・通常ファイルでない・UTF-8 でないは ValueError / OSError。
+
+    呼び出し側が事前に `resolves_inside` で読み取り先を確かめる（symlink を辿るかどうかは呼び出し側の方針）。
+    """
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("通常ファイルではない")
+        with os.fdopen(fd, "rb") as fh:
+            fd = -1
+            data = fh.read(cap + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(data) > cap:
+        raise ValueError(f"{cap} バイトを超える")
+    return data.decode("utf-8")
+
+
 def has_upstream_word(text: str) -> bool:
     """表示文字列に上流名が独立した語として含まれるか（入力検証用）。"""
     return _WORD_TEXT_RE.search(text) is not None
@@ -98,20 +152,32 @@ def is_upstream_repo(owner: str, repo: str) -> bool:
     return owner.lower() == "fandhe-ai" and r == UPSTREAM_BRAND
 
 
-def resolves_inside(root_real: Path, path: Path) -> bool:
-    """`path`（未作成でもよい）を symlink 解決した実体が root_real の配下に収まるか。
-
-    書き込み先を限定する不変条件の Python 側の唯一の実装（bash 側は build-local.sh の guard_path）。
-    未作成の末端は、存在する最も近い祖先を realpath してから残りの名前を連結して求める。
-    祖先の途中が root の外を指す symlink だと、mkdir や write が root の外へ到達するため、
-    書き込みの前にここで検証する。
-    """
+def _resolve_real(path: Path) -> Path:
+    """`path`（未作成でもよい）の symlink 解決後の実体。未作成の末端は、存在する最も近い祖先の realpath に連結する。"""
     probe = path
     rest: list[str] = []
     while not os.path.lexists(probe):
         rest.append(probe.name)
         probe = probe.parent
-    real = Path(os.path.realpath(probe)).joinpath(*reversed(rest))
+    return Path(os.path.realpath(probe)).joinpath(*reversed(rest))
+
+
+def _in_git_dir(root_real: Path, real: Path) -> bool:
+    git_dir = root_real / ".git"
+    return real == git_dir or git_dir in real.parents
+
+
+def resolves_inside(root_real: Path, path: Path) -> bool:
+    """`path`（未作成でもよい）を symlink 解決した実体が root_real の配下（`.git` 配下を除く）に収まるか。
+
+    書き込み先・読み取り先を限定する不変条件の Python 側の唯一の実装（bash 側は build-local.sh の guard_path）。
+    祖先の途中が root の外を指す symlink だと、mkdir・write・read が root の外へ到達するため、
+    操作の前にここで検証する。`.git` 配下（設定・フック・オブジェクト）はスキルの読み書き対象ではないため
+    拒否する（`.gitignore -> .git/config` のようなリンクや、親ディレクトリ経由の到達を防ぐ）。
+    """
+    real = _resolve_real(path)
+    if _in_git_dir(root_real, real):
+        return False
     return real == root_real or root_real in real.parents
 
 
@@ -125,7 +191,10 @@ def write_target_problem(root_real: Path, path: Path) -> str | None:
     """
     if path.is_symlink():
         return "シンボリックリンク"
-    if not resolves_inside(root_real, path):
+    real = _resolve_real(path)
+    if _in_git_dir(root_real, real):
+        return "`.git` 配下は書き込み対象にできない"
+    if not (real == root_real or root_real in real.parents):
         return "対象の外へ解決される（親ディレクトリが symlink の可能性）"
     if os.path.lexists(path) and not path.is_file():
         return "通常ファイルではない"
@@ -291,11 +360,24 @@ def _text(values: dict[str, str], key: str, *, required: bool) -> str:
     return v
 
 
+# brand.toml の必須キーと追記例の既定値。スキルのテンプレートに新しい必須キーが増えたとき、
+# 既存の brand.toml（利用者編集のため scaffold は上書きしない）に不足があれば、汎用の検証エラーではなく
+# 「不足キーと追記例」を案内する。キーを増やすときはここへ追加する（tests が不足の案内を検査する）。
+BRAND_REQUIRED_KEYS: dict[str, str] = {
+    "brand": "<ヘッダーのブランド名>",
+    "repository": "https://github.com/<owner>/<repo>",
+    "copyright": "© <年> <名義>",
+    "lang": "ja",
+    "favicon_letter": "<英数字1文字>",
+    "favicon_color": "#2b6cb0",
+}
+
+
 def load_brand(path: Path) -> Brand:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = read_bounded_text(path, 64 * 1024)
         tables = parse_subset(text, {"brand"})
-    except (OSError, SubsetError, UnicodeDecodeError) as e:
+    except (OSError, ValueError, SubsetError) as e:
         raise BrandError(f"brand.toml を読めない: {e}") from e
     if len(tables) != 1:
         raise BrandError("brand.toml: [brand] テーブルがちょうど 1 つ必要")
@@ -307,6 +389,14 @@ def load_brand(path: Path) -> Brand:
     unknown = set(v) - allowed
     if unknown:
         raise BrandError(f"brand.toml: 未知のキー {sorted(unknown)}")
+
+    missing = [k for k in BRAND_REQUIRED_KEYS if k not in v]
+    if missing:
+        example = ", ".join(f'{k} = "{BRAND_REQUIRED_KEYS[k]}"' for k in missing)
+        raise BrandError(
+            f"brand.toml: 必須キーが不足している: {', '.join(missing)}。[brand] テーブルへ追記する"
+            f"（スキルのテンプレートに新しいキーが増えた場合は templates/brand.toml を参照）。追記例: {example}"
+        )
 
     brand = _text(v, "brand", required=True)
     tagline = _text(v, "tagline", required=False)

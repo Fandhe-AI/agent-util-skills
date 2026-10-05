@@ -44,7 +44,9 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。append にして、
+# 同じディレクトリに標準モジュール名のファイル（argparse.py 等）があっても標準ライブラリを先に解決させる。
+sys.path.append(str(Path(__file__).resolve().parent))
 from _common import RESIDUAL_RE, write_target_problem, UPSTREAM_BRAND, Brand, BrandError, load_brand  # noqa: E402
 
 UPSTREAM_REPO_URL = "https://github.com/Fandhe-AI/fandhe-frontend"

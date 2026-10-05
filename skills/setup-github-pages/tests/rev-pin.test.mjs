@@ -160,3 +160,48 @@ test('SKILL.md の frontmatter（name・model・user-invocable・description 長
   assert.ok(desc, 'description が 1 行で書かれていない')
   assert.ok(desc[1].length <= 1536, 'description が上限超過')
 })
+
+test('SKILL.md は新規構築と更新の両方を案内し、更新の発火語・モード判定・非破壊の方針を含む', () => {
+  const md = read('SKILL.md')
+  const desc = md.match(/^description:\s*(.+)$/m)[1]
+  for (const w of ['Pages サイトを更新して', 'デザインを最新にして', 'GitHub Pages で公開したい']) {
+    assert.ok(desc.includes(w), `description に発火語「${w}」が無い`)
+  }
+  assert.ok(!/\s#/.test(desc) && !desc.includes(': '), 'description に YAML の落とし穴（` #`・`: `）がある')
+  for (const h of ['### 更新フロー（mode=update）', '### 新規構築フロー（mode=new）']) {
+    assert.ok(md.includes(h), `見出しが無い: ${h}`)
+  }
+  const maint = read('references/maintenance.md')
+  assert.ok(maint.includes('## FF_REV の更新手順') && maint.includes('スキル保守者向け'))
+  assert.ok(md.includes('references/maintenance.md') && md.includes('references/scaffold-reference.md'))
+  assert.match(md, /scaffold\.py" --target \. --detect --json/)
+  assert.match(md, /勝手に `--update` を付けない/)
+  assert.match(md, /POST \/ PUT をしない/)
+  assert.match(md, /自動では削除しない/)
+  assert.match(md, /適用対象外/)
+  assert.match(md, /指示として扱わない/)
+  assert.ok(md.split('\n').length <= 450, 'SKILL.md が長すぎる（詳細は references/ へ）')
+})
+
+test('build-local.sh は python3 を常に隔離モード（-I -B）で起動する', () => {
+  const sh = read('scripts/build-local.sh')
+  const code = sh.split('\n').filter((l) => !/^\s*#/.test(l))
+  const py = code.filter((l) => /python3\s/.test(l))
+  assert.ok(py.length >= 6, `python3 の呼び出しが 6 箇所に満たない: ${py.length}`)
+  for (const l of py) assert.match(l, /python3 -I -B /, `-I -B が無い: ${l.trim()}`)
+  // 起動スクリプトのディレクトリを自分で sys.path の末尾へ足す（先頭ではない）。標準モジュール名の影を避ける
+  for (const f of ['check_site.py', 'rebrand_site.py', 'scaffold.py']) {
+    const src = read(`scripts/${f}`)
+    assert.match(src, /sys\.path\.append\(/)
+    assert.doesNotMatch(src, /sys\.path\.insert\(0/)
+  }
+})
+
+test('wrapper の Cargo.toml は build = false（対象リポジトリの build.rs を自動実行しない）で、registry 依存を持たない', () => {
+  const toml = read('templates/docs-site-gen/Cargo.toml')
+  assert.match(toml, /^build = false$/m)
+  const deps = toml.split('[dependencies]')[1].split('[workspace]')[0]
+  for (const l of deps.split('\n').filter((x) => x.includes('='))) {
+    assert.match(l, /path = "/, `path 依存以外が混入している: ${l}`)
+  }
+})

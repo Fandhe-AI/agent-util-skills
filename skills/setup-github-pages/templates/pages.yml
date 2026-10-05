@@ -6,7 +6,7 @@ name: pages
 # （artifact 受け渡し方式の設計判断は同リポジトリの pages-deploy/README.md を参照）。
 #
 # 前提（手動操作）: Settings → Pages → Source が "GitHub Actions" であること。
-# 未設定だと build は成功し deploy だけが失敗する。有効化手順は setup-github-pages スキルの Step 5。
+# 未設定だと build は成功し deploy だけが失敗する。有効化手順は setup-github-pages スキルの Step N4。
 #
 # サードパーティ action はすべて commit SHA 固定（コメントに tag を併記）。例外は
 # Fandhe-AI/actions の reusable workflow で、組織の運用方針により @latest を使う。
@@ -14,8 +14,11 @@ name: pages
 # rust-toolchain.toml はビルド（wrapper の cargo build）の入力のため paths に含める。cache key へは
 # 含めない（toolchain が変われば rustc の commit-hash がキーに入るため、それで十分）。
 #
-# nav.toml の source に site/ 以外（docs/ や README.md 等）を指定する場合は、
-# 下の paths にその場所も追加する（追加しないとその更新で再デプロイされない）。
+# nav.toml の source に site/ 以外（docs/ や README.md 等）を指定する場合は、下の paths の
+# `sgp:user-paths` 区間（begin と end の間）へ `      - "docs/**"` の形で 1 行ずつ追加する
+# （追加しないとその更新で再デプロイされない）。このファイルはスキルが管理するため、区間の外を
+# 編集するとスキルの更新（scaffold.py）が競合として止まる。区間の中身だけは更新しても保持される。
+# 区間の行は `      - "<glob>"`（glob は英数字と . _ * / - のみ・`..` 不可・20 件まで）に限る。
 
 on:
   push:
@@ -25,6 +28,8 @@ on:
       - "tools/docs-site-gen/**"
       - "rust-toolchain.toml"
       - ".github/workflows/pages.yml"
+      # sgp:user-paths:begin（この区間は更新しても保持される）
+      # sgp:user-paths:end
   workflow_dispatch:
 
 permissions:

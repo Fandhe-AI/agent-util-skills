@@ -4,7 +4,7 @@ This file provides guidance to Claude Code（claude.ai/code）when working with 
 
 ## Overview
 
-Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築）を新規開発して、合わせて 5 スキルを本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
+Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）を新規開発して、合わせて 5 スキルを本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
 
 ## Repository Structure
 
@@ -28,10 +28,10 @@ skills/                               -- 本リポジトリが上流ソースと
     templates/                        -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
     scripts/                          -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
   setup-github-pages/
-    references/                       -- site-format.md（nav.toml スキーマ・予約パス・Markdown 対応範囲）
+    references/                       -- site-format.md（nav.toml スキーマ・予約パス・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）
     templates/                        -- wrapper Cargo.toml・pages.yml・nav.toml・brand.toml・rust-toolchain.toml 雛形
-    scripts/                          -- build-local.sh（fandhe-frontend fetch → wrapper build → rebrand 入口）、rebrand_site.py（置換）、check_site.py（検証）、scaffold.py（テンプレート展開・プレースホルダ置換）
-    tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、rebrand.test.mjs（Node.js ブリッジ）、test_rebrand.py（回帰テスト）、fixtures/
+    scripts/                          -- build-local.sh（fandhe-frontend fetch → wrapper build → rebrand 入口）、check_repo.sh（owner/repo 検証）、rebrand_site.py（置換）、check_site.py（検証）、scaffold.py（モード判定・配置・更新・競合差分）、_common.py（検証・無害化）
+    tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、rebrand.test.mjs（Node.js ブリッジ）、test_rebrand.py（rebrand/check_site/scaffold 回帰テスト）、fixtures/
 .agents/skills/                       -- vendored スキル（消費専用。npx skills update で同期・直接編集しない）
   comment-code/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/
   implement-issue/ implement-issue-tree/ implement-review/ implement-review-pr/ init-claude/

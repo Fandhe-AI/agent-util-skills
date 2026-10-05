@@ -10,6 +10,9 @@ name = "docs-site-gen"
 version = "0.0.0"
 edition = "2021"
 publish = false
+# 対象リポジトリの tools/docs-site-gen/build.rs が自動検出されてビルド時に実行されるのを防ぐ
+# （この wrapper はビルドスクリプトを持たない）。
+build = false
 
 [dependencies]
 fandhe-frontend-docs-site = { path = "../../_ff/crates/docs-site" }
