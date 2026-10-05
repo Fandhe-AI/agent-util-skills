@@ -25,8 +25,8 @@
    取り込む（`scaffold.py` を通さず対象リポジトリの `FF_REV` だけ手で書き換えると、次回の更新は「利用者が編集した」競合として止まる）
 3. 模擬の対象リポジトリ（`scaffold.py` で配置したもの。更新の確認は旧版を配置してから新版で `scaffold.py --target .`
    を再実行する）で `bash tools/docs-site-gen/build-local.sh --clean --write-third-party` を実行する。匿名・隔離環境（`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` と使い捨ての `CARGO_HOME`）で `cargo install --git ... --locked` が通ることを実測する。
-   registry 依存 0 件の自動検査は #49 で無くなったため、新しい rev の上流 `Cargo.lock` に crates.io 由来の依存（`source = "registry+..."`）が増えていないかを
-   手で確認し、増えていれば供給網の固定方針を見直すまで更新しない。`docs-site` の CLI 引数（`--root`・`--out`・`--no-page-sections`）の変更は生成の失敗として現れる
+   `build-local.sh` は install 前に新しい rev の上流 `Cargo.lock` を取得し、docs-site から辿れる依存に source 付き（registry 等）が増えていれば停止する。
+   停止したら供給網の固定方針を見直すまで更新しない（検査済みの記録は `docs-site-install/.registry-checked` に rev で残り、同一 rev では再取得しない）。`docs-site` の CLI 引数（`--root`・`--out`・`--no-page-sections`）の変更は生成の失敗として現れる
 4. `rebrand_site.py` が「一致数が 0」で失敗したら、上流 DOM の変更を意味する。生成された HTML を読み、ヘッダー・フッターの
    該当要素を特定して `rebrand_site.py` のルールを直す。`brand.toml` に無い新しいハードコード表示が増えていないかも、
    `grep -o fandhe-frontend` と `Fandhe-AI` で確認する

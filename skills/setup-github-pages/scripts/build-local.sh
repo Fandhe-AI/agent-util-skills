@@ -255,6 +255,17 @@ step "docs-site をインストール"
 # 依存検査（インストール前）: 固定 rev の Cargo.lock を固定 URL から取得し、docs-site から辿れる依存の
 # すべてが path 依存（lock 上で source なし）であることを機械的に確認する。crates.io 等の registry・git
 # 依存が FF_REV 更新で混入すると、匿名・隔離ビルドの前提と供給網の固定方針が崩れるため、fail-closed で停止する。
+#
+# 検査済み rev の記録（INSTALL_ROOT は Actions のキャッシュ対象）。同じ FF_REV で検査済みなら Cargo.lock を
+# 再取得しない（キャッシュ済みの CI・オフライン再ビルドを、検査のためだけに壊さない）。記録は通常ファイルのみ信用する。
+CHECKED_MARK="${INSTALL_ROOT}/.registry-checked"
+guard_path "${CHECKED_MARK}" "registry 依存検査の記録" || exit 2
+NEED_LOCK_CHECK=1
+if [[ -f "${CHECKED_MARK}" && -x "${INSTALL_ROOT}/bin/docs-site" && "$(cat -- "${CHECKED_MARK}" 2>/dev/null || true)" == "${FF_REV}" ]]; then
+  NEED_LOCK_CHECK=0
+  step "registry 依存の検査は同一 FF_REV で検査済みの記録があるため省略"
+fi
+if [[ "${NEED_LOCK_CHECK}" -eq 1 ]]; then
 step "registry 依存が 0 件であることを検査"
 LOCK_URL="https://raw.githubusercontent.com/Fandhe-AI/fandhe-frontend/${FF_REV}/Cargo.lock"
 LOCK_BODY="$(curl --fail --silent --show-error \
@@ -293,6 +304,7 @@ if ext:
     sys.exit(1)
 print("registry 依存 0 件（docs-site から辿れる packages=%d・すべて path 依存）" % len(seen), file=sys.stderr)
 '
+fi
 
 # インストール先の各階層（bin・実行ファイル・cargo の台帳ファイルを含む）が symlink でなく、対象リポジトリ内に
 # 収まることを、cargo install が書く前に確認する（--root はリンク先へ書き込み得るため）。
@@ -309,6 +321,10 @@ guard_install_tree || exit 2
 if [[ ! -f "${INSTALL_ROOT}/bin/docs-site" || ! -x "${INSTALL_ROOT}/bin/docs-site" ]]; then
   echo "エラー: ${INSTALL_ROOT}/bin/docs-site が生成されていない、または実行可能な通常ファイルではない" >&2
   exit 1
+fi
+# 検査と install が両方通った rev だけを記録する（次回以降は Cargo.lock を再取得しない）
+if [[ "${NEED_LOCK_CHECK}" -eq 1 ]]; then
+  printf '%s\n' "${FF_REV}" > "${CHECKED_MARK}" || { echo "エラー: 検査済みの記録を書けない" >&2; exit 1; }
 fi
 
 # ---- 生成（リンク検査は fail-closed。1 件でも壊れていれば何も書かず非 0）
