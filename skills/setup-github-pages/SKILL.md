@@ -34,7 +34,7 @@ user-invocable: true
 
 | 項目 | 内容 |
 |------|------|
-| ツール | `git`、`cargo` / `rustup`（stable）、`gh`（認証済み）、`python3`（標準ライブラリのみ使用。3.12 で実測）。テスト実行には Node.js |
+| ツール | `git`、`cargo` / `rustup`（stable）、`gh`（認証済み）、`curl`（`build-local.sh --write-third-party` の `LICENSE-MIT` 取得と依存検査で使用）、`python3`（標準ライブラリのみ使用。3.12 で実測）。テスト実行には Node.js |
 | 権限 | 対象リポジトリの管理者権限（Pages の有効化に必要。`viewerPermission` が `ADMIN`） |
 | ネットワーク | **必須**。`cargo install --git`（github.com の fandhe-frontend の匿名取得）・`curl`（raw.githubusercontent.com の `LICENSE-MIT`）・`gh api`・Actions 実行・Pages 配信のすべてでネットワークを使う |
 | 対象リポジトリ | GitHub 上に存在すること。Pages のサイトは private リポジトリでも原則として**公開 URL で誰でも閲覧できる**（Enterprise Cloud のアクセス制御を除く） |
