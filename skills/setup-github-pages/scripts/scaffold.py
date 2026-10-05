@@ -401,14 +401,16 @@ def detect(target: Path, root_real: Path) -> dict:
     if outside:
         reasons.append("次の配置先は対象の外（または .git 配下）へ解決されるため読まない（親ディレクトリが symlink 等）: "
                        + ", ".join(outside[:6]) + (f" ほか {len(outside) - 6} 件" if len(outside) > 6 else ""))
+    # 同名の所有ファイルの有無に関わらず調べる（同名ファイルが生成予定と同じ内容なら競合にならないため、
+    # 先に return すると別用途のファイルを見落として配置へ進んでしまう）。
+    stray = unknown_generator_entries(target, root_real)
     if present:
         reasons.append("スキル所有の配置先に既存ファイルがあるが、スキルの配置とは認められない: " + ", ".join(present))
-        return {"mode": "foreign", "kind": "unrelated", "reasons": reasons}
-    stray = unknown_generator_entries(target, root_real)
     if stray:
         reasons.append("tools/docs-site-gen/ にスキルが配置しないファイルがある（別用途のディレクトリの可能性）: "
                        + ", ".join(sanitize(s, 80) for s in stray[:6])
                        + (f" ほか {len(stray) - 6} 件" if len(stray) > 6 else ""))
+    if present or stray:
         return {"mode": "foreign", "kind": "unrelated", "reasons": reasons, "stray": stray}
     reasons.append("スキルの配置痕跡なし")
     return {"mode": "new", "kind": "none", "reasons": reasons}
