@@ -391,12 +391,22 @@ verify_attribution() {
       # リダイレクト案内はサイトのクロームを持たないため対象外。クロームも refresh も無い未知の構造は fail-closed
       if [[ "${has_refresh}" -eq 1 ]]; then continue; fi
     fi
-    rc=0; grep -qE -- "${pat}" "${f}" || rc=$?
+    # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
+    # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
+    rc=0
+    SGP_PAT="${pat}" python3 -I -B -c '
+import os, re, sys
+t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+foots = re.findall(r"<footer class=\"docs-footer\">.*?</footer>", t, re.S)
+if len(foots) != 1:
+    sys.exit(1)
+sys.exit(0 if len(re.findall(os.environ["SGP_PAT"], foots[0])) == 1 else 1)
+' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
-      echo "エラー: ${rel} に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）が無い" >&2
+      echo "エラー: ${rel} のフッター（docs-footer）に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）がちょうど 1 件ない" >&2
       return 1
     fi
-    [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査（grep）が失敗した（exit ${rc}）" >&2; return 1; }
+    [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査が失敗した（exit ${rc}）" >&2; return 1; }
     n=$(( n + 1 ))
   done <<< "${list}"
   echo "verify ok: HTML ${n} 件に帰属表記あり" >&2

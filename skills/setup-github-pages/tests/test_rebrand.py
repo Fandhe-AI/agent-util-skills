@@ -1427,6 +1427,29 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.assertIn('brand_mark = "', r.stderr)   # 追記例
         self.assertEqual(nav.read_text(), before, "利用者ファイルを書き換えてはいけない")
 
+    def test_legacy_brand_toml_gives_site_migration_proposal(self):
+        self.init()
+        nav = self.t / "site/nav.toml"
+        nav.write_text("".join(l + "\n" for l in nav.read_text().splitlines() if not l.startswith("brand_mark")))
+        (self.t / "tools/docs-site-gen/brand.toml").write_text(
+            '[brand]\nbrand = "Legacy"\nrepository = "https://github.com/acme/r"\ntagline = "Old tag"\n'
+            'copyright = "(c) 2024 acme"\nlang = "ja"\nfavicon_letter = "L"\nfavicon_color = "#2b6cb0"\n')
+        before = nav.read_text()
+        r = self.sc(args=())
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertIn("移行案", r.stderr)
+        self.assertIn('repository_url = "https://github.com/acme/r"', r.stderr)
+        self.assertIn('brand_mark = "L"', r.stderr)
+        self.assertEqual(nav.read_text(), before, "nav.toml を書き換えてはいけない")
+        self.assertTrue((self.t / "tools/docs-site-gen/brand.toml").exists())
+
+    def test_tagline_and_copyright_accept_site_text_limit(self):
+        long = "あ" * 200
+        r = subprocess.run([sys.executable, str(SCRIPTS / "scaffold.py"), "--target", str(self.t),
+                            "--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T",
+                            "--tagline", long, "--copyright", long], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 class ScaffoldHardeningTest(unittest.TestCase):
     """差分表示の安全性・出力の無害化・pages.yml 利用者区間・更新モードの境界（レビュー指摘 A1〜B5 の回帰）。"""
@@ -4509,6 +4532,22 @@ class VerifyAttributionTest(unittest.TestCase):
     def test_body_link_to_upstream_does_not_satisfy_the_check(self):
         self.mutate("404.html", lambda t: t.replace("Built with ", "Made with ", 1).replace(
             "</body>", f'<a href="{self.UP}">x</a></body>', 1))
+        self.assertEqual(self.verify().returncode, 1)
+
+    def test_attribution_outside_footer_does_not_satisfy_the_check(self):
+        def move(t):
+            m = re.search(r"Built with.*?Apache-2\.0</a>\)", t, re.S)
+            return t.replace(m.group(0), "", 1).replace("</body>", f"<p>{m.group(0)}</p></body>", 1)
+        self.mutate("index.html", move)
+        r = self.verify()
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("index.html", r.stderr)
+
+    def test_duplicate_attribution_in_footer_fails(self):
+        def dup(t):
+            m = re.search(r"Built with.*?Apache-2\.0</a>\)", t, re.S)
+            return t.replace(m.group(0), m.group(0) + m.group(0), 1)
+        self.mutate("index.html", dup)
         self.assertEqual(self.verify().returncode, 1)
 
     def test_missing_404_and_symlinks_fail(self):

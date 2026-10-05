@@ -64,9 +64,9 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 # append: 同じディレクトリに標準モジュール名のファイルがあっても、標準ライブラリを先に解決させる
 sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
-    BIDI_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, MAX_TEXT_LEN, SITE_BRAND_MAX, SITE_BADGE_MAX,
+    BIDI_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, MAX_TEXT_LEN, SITE_BRAND_MAX, SITE_BADGE_MAX, SITE_TEXT_MAX,
     atomic_write_bytes, check_site_values, is_upstream_repo, pages_base_path, resolves_inside, sanitize,
-    title_problem, write_target_problem, valid_owner, valid_repo_name,
+    title_problem, write_target_problem, valid_owner, valid_repo_name, parse_subset, read_bounded_text,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -228,6 +228,42 @@ def toml_escape(value: str) -> str:
     if CONTROL_RE.search(value):
         raise ValueError("TOML へ書く値に制御文字を含められない")
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# 旧 brand.toml のキー → nav.toml `[site]` のキー
+_LEGACY_BRAND_MAP = {"brand": "brand", "repository": "repository_url", "tagline": "tagline", "copyright": "copyright",
+                     "lang": "lang", "version_badge": "version_badge", "favicon_letter": "brand_mark",
+                     "favicon_color": "brand_color"}
+
+
+def legacy_brand_site_proposal(root_real: Path) -> dict | None:
+    """旧 `tools/docs-site-gen/brand.toml` から nav.toml `[site]` への移行案を作る（読むだけ。何も書かない・消さない）。
+
+    brand.toml が通常ファイルとして無い・読めない・形式が違うときは None。案は check_site と同じ検証器を通し、
+    通らないキーは名前だけ `problems` に出す（値は載せない）。通ったときだけ `block` に追記用の文面を入れる。
+    """
+    path = root_real / "tools" / "docs-site-gen" / "brand.toml"
+    try:
+        if path.is_symlink() or not path.is_file() or not resolves_inside(root_real, path):
+            return None
+        tables = parse_subset(read_bounded_text(path, 64 * 1024), {"brand"})
+    except (OSError, ValueError):
+        return None
+    if len(tables) != 1:
+        return None
+    old = tables[0].values
+    site = {_LEGACY_BRAND_MAP[k]: v for k, v in old.items() if k in _LEGACY_BRAND_MAP}
+    site.setdefault("version_badge", "")
+    unknown = sorted(set(old) - set(_LEGACY_BRAND_MAP))
+    if "tagline" not in site or not site["tagline"].strip():
+        site.pop("tagline", None)
+        return {"block": None, "problems": ["tagline: 旧 brand.toml に説明文が無い（サイトの説明を 1 行決めて追記する）"]
+                + [f"未知のキー {sanitize(k, 60)}" for k in unknown]}
+    problems = check_site_values(site)
+    if problems or unknown:
+        return {"block": None, "problems": [sanitize(x) for x in problems] + [f"未知のキー {sanitize(k, 60)}" for k in unknown]}
+    lines = ["[site]"] + [f'{k} = "{toml_escape(v)}"' for k, v in site.items()]
+    return {"block": "\n".join(lines), "problems": []}
 
 
 def validate_text(name: str, value: str, *, required: bool, max_len: int = MAX_TEXT_LEN) -> str:
@@ -822,7 +858,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"--title が {SITE_BRAND_MAX} 文字を超える。ブランド名は {SITE_BRAND_MAX} 文字以内のため --brand を明示する")
             brand = validate_text("brand", args.brand if args.brand is not None else title, required=True,
                                   max_len=SITE_BRAND_MAX)
-            tagline = validate_text("tagline", args.tagline, required=True)
+            tagline = validate_text("tagline", args.tagline, required=True, max_len=SITE_TEXT_MAX)
             badge = validate_text("version-badge", args.version_badge, required=False, max_len=SITE_BADGE_MAX)
             letter = args.favicon_letter
             if letter is None:
@@ -836,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
                 copyright_ = f"© {year} {args.owner}"
             else:
                 copyright_ = args.copyright_
-            copyright_ = validate_text("copyright", copyright_, required=True)
+            copyright_ = validate_text("copyright", copyright_, required=True, max_len=SITE_TEXT_MAX)
             repository = f"https://github.com/{args.owner}/{args.repo}"
             # 書く前に check_site と同じ検証器を通す（scaffold は check_site が拒否する値を書かない）
             flag = {"brand": "--brand", "repository_url": "--owner/--repo", "tagline": "--tagline",
@@ -1242,6 +1278,16 @@ def main(argv: list[str] | None = None) -> int:
     for e in errors:
         out(f"NG {e}", err=True)
     if errors:
+        # 旧 brand.toml からの移行案（案を出すだけ。nav.toml・brand.toml は書き換えない・削除しない）
+        proposal = legacy_brand_site_proposal(root_real) if any("[site]" in e for e in errors) else None
+        if proposal is not None:
+            summary["site_migration"] = proposal
+            if not args.json:
+                if proposal["block"]:
+                    out("旧 brand.toml からの [site] 移行案（nav.toml の既存 [site] を確認のうえ置き換える。自動では書き換えない）:", err=True)
+                    out(proposal["block"], err=True)
+                else:
+                    out("旧 brand.toml から [site] を作れない項目: " + "; ".join(proposal["problems"]), err=True)
         return finish(EXIT_CHECK_FAILED, "エラー: 配置後の検証（check_site）に失敗した。上の項目を直してから再実行する")
     if not args.json:
         out("check_site ok")
