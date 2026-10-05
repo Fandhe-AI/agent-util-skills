@@ -289,11 +289,15 @@ def parse_origin(url: str) -> tuple[str, str] | None:
 
 def _origin_owner_repo(target: Path) -> tuple[str, str] | None:
     try:
+        # バイト列で受けて復号する（text=True だと、細工した .git/config の不正な UTF-8 で UnicodeDecodeError になり、
+        # --detect --json が約束した JSON を出さずに落ちる）。復号できない部分は置換し、origin は不明として扱う。
         r = subprocess.run(["git", "-C", str(target), "config", "--get", "remote.origin.url"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return parse_origin(r.stdout) if r.returncode == 0 else None
+    if r.returncode != 0:
+        return None
+    return parse_origin(r.stdout.decode("utf-8", errors="replace"))
 
 
 def detect(target: Path, root_real: Path) -> dict:
@@ -415,6 +419,9 @@ def analyze_pages(cur: str, rendered: str) -> dict:
     """
     r_lines, rb, re_ = _template_markers(rendered)
     begin_line, end_line = r_lines[rb], r_lines[re_]
+    # `cur` は呼び出し側（main）が `\r\n` → `\n` に正規化済みの文字列（core.autocrlf で CRLF になった pages.yml でも、
+    # 区間・追加 paths が LF のファイルと同じ結果になる）。正規化は 1 回だけ行う（ここでも行うと `\r\r\n` の
+    # ような単独の `\r` まで消えてしまう）。行の途中・行末に残った単独の `\r` は、従来どおり不正として扱う。
     lines = cur.split("\n")
     hits = [i for i, l in enumerate(lines) if f"{USER_PATHS_TAG}:" in l]
     if not hits:
@@ -777,7 +784,10 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             if dst_rel == PAGES_REL:
                 try:
-                    cur = read_text_capped(dst)
+                    # pages.yml だけは改行を LF とみなして比較する（解析対象の構造化テキストで、利用者区間を持つため）。
+                    # CRLF へ変換されただけのファイルは一致として扱い、書き換えない。他の所有ファイルは byte 一致のまま
+                    # （改行だけの差は newline_only の競合）。
+                    cur = read_text_capped(dst).replace("\r\n", "\n")
                 except (OSError, OverflowError, UnicodeDecodeError):
                     conflicts.append((dst_rel, "unreadable", "読み取れない（大きすぎる・UTF-8 でない・特殊ファイル）。手動で解消する（--update では上書きされない）"))
                     continue

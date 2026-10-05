@@ -2169,6 +2169,112 @@ class SectionReferenceTest(unittest.TestCase):
             text = (SCRIPTS / name).read_text(encoding="utf-8")
             self.assertNotRegex(text, r"SKILL\.md「", name)
 
+class ScaffoldCrlfAndOriginTest(unittest.TestCase):
+    """R2（pages.yml の CRLF）・R3（origin の不正な UTF-8）の回帰テスト。"""
+
+    ARGS = ScaffoldHardeningTest.ARGS
+    PAGES = ScaffoldHardeningTest.PAGES
+    MANIFEST = ScaffoldHardeningTest.MANIFEST
+    BEGIN = ScaffoldHardeningTest.BEGIN
+    setUp = ScaffoldHardeningTest.setUp
+    sc = ScaffoldHardeningTest.sc
+    init = ScaffoldHardeningTest.init
+    pages = ScaffoldHardeningTest.pages
+    set_region = ScaffoldHardeningTest.set_region
+    legacy_pages = ScaffoldHardeningTest.legacy_pages
+
+    def to_crlf(self, path):
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+    def test_crlf_pages_with_region_is_valid_and_not_rewritten(self):
+        self.init()
+        self.set_region(['      - "docs/**"', '      - "README.md"'])
+        p = self.t / self.PAGES
+        self.to_crlf(p)
+        before = p.read_bytes()
+        r = self.sc("--json", args=())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(j["conflicts"], [])
+        self.assertIn(self.PAGES, j["same"])   # CRLF へ変換されただけの pages.yml は一致として扱う
+        self.assertEqual(p.read_bytes(), before, "CRLF の pages.yml を書き換えてはいけない")
+
+    def test_crlf_pages_keeps_paths_on_update_flag_and_auto_update(self):
+        self.init()
+        self.set_region(['      - "docs/**"', '      - "README.md"'])
+        p = self.t / self.PAGES
+        self.to_crlf(p)
+        # 改行だけでなく本文も編集された CRLF ファイル → 競合。--update でも区間の paths は残る
+        p.write_bytes(p.read_bytes().replace(b"timeout-minutes: 30", b"timeout-minutes: 99"))
+        self.assertEqual(self.sc(args=()).returncode, 3)
+        r = self.sc("--update", args=())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self.pages()
+        self.assertIn('      - "docs/**"', text)
+        self.assertIn('      - "README.md"', text)
+        self.assertIn("timeout-minutes: 30", text)
+        self.assertNotIn(b"\r", p.read_bytes(), "書き込みは常に LF")
+        # スキルの新版が pages.yml を変えたとき、CRLF の（利用者区間だけ編集した）ファイルは未編集として自動更新され、paths が残る
+        self.to_crlf(p)
+        sk = self.skill_copy()
+        tpl = sk / "templates/pages.yml"
+        tpl.write_text(tpl.read_text().replace("timeout-minutes: 30", "timeout-minutes: 45", 1))
+        r = self.sc(args=(), skill=sk)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("timeout-minutes: 45", self.pages())
+        self.assertIn('      - "docs/**"', self.pages())
+
+    skill_copy = ScaffoldHardeningTest.skill_copy
+
+    def test_crlf_legacy_pages_migrates_paths_into_region(self):
+        self.init()
+        (self.t / self.MANIFEST).unlink()
+        p = self.t / self.PAGES
+        p.write_text(self.legacy_pages(['      - "docs/**"', '      - "README.md"']))
+        self.to_crlf(p)
+        r = self.sc("--update", "--json", args=())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self.pages()
+        region = text.split("sgp:user-paths:begin")[-1].split("sgp:user-paths:end")[0]
+        self.assertIn('      - "docs/**"', region)
+        self.assertIn('      - "README.md"', region)
+        self.assertNotIn("\r", text)
+
+    def test_lone_cr_inside_a_line_stays_invalid(self):
+        self.init()
+        self.set_region(['      - "docs/**"'])
+        p = self.t / self.PAGES
+        p.write_bytes(p.read_bytes().replace(b'      - "docs/**"', b'      - "docs/**"\r\r'))   # 行末が \r\r（単独の \r が残る）
+        snap = p.read_bytes()
+        r = self.sc("--json", args=())
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(json.loads(r.stdout)["conflicts"][0]["kind"], "pages_region_invalid")
+        self.assertEqual(p.read_bytes(), snap)
+        p.write_bytes(snap.replace(b'      - "docs/**"\r\r', b'      - "do\rcs/**"'))   # 行の途中の \r
+        self.assertEqual(json.loads(self.sc("--json", args=()).stdout)["conflicts"][0]["kind"], "pages_region_invalid")
+
+    def test_invalid_utf8_origin_does_not_break_detect_or_run(self):
+        self.init()
+        git = ["git", "-C", str(self.t)]
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        subprocess.run(git + ["init", "-q"], check=True, env=env)
+        cfg = self.t / ".git" / "config"
+        cfg.write_bytes(b'[remote "origin"]\n\turl = https://github.com/acme/\xff\xfe\x80repo\n')
+        r = self.sc("--detect", "--json", args=())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        j = json.loads(r.stdout)   # 約束どおり JSON が出る
+        self.assertEqual(j["exit_code"], 0)
+        self.assertIn(j["mode"], ("new", "update"))
+        self.assertNotIn("Traceback", r.stderr)
+        r = self.sc("--json", args=())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(json.loads(r.stdout)["exit_code"], 0)
+        # 不正なバイト列を含む origin は、上流判定にもならない（上流の URL に見える断片があっても）
+        cfg.write_bytes(b'[remote "origin"]\n\turl = https://github.com/Fandhe-AI/fandhe-frontend\xff\n')
+        j = json.loads(self.sc("--detect", "--json", args=()).stdout)
+        self.assertNotEqual(j["kind"], "upstream")
+
 
 class CheckSiteTest(unittest.TestCase):
     NAV = """[site]
