@@ -1,6 +1,6 @@
 <!-- source: skills/setup-github-pages（このスキル自身の保守手順。上流は https://github.com/Fandhe-AI/fandhe-frontend） -->
 <!-- 最終確認日: 2026-10-05 -->
-<!-- 取得状況: ✅ 実装とテストで確認済み（FF_REV cf5edb9b8f1bf2a63d51dcf50a8d2806e2d8f9f9 で匿名ビルド・生成・rebrand を実測） -->
+<!-- 取得状況: ✅ 実装とテストで確認済み（FF_REV b3e31ef663a98b6080feb98c84ade238d1074a08 で匿名ビルド・生成・rebrand を実測） -->
 
 # スキル保守者向けの手順（FF_REV の更新・上流改修の追跡）
 
@@ -10,7 +10,7 @@
 
 ## FF_REV の更新手順
 
-現在の固定値: `cf5edb9b8f1bf2a63d51dcf50a8d2806e2d8f9f9`（2026-10-04 時点で匿名ビルド・生成・rebrand を実測済み）。
+現在の固定値: `b3e31ef663a98b6080feb98c84ade238d1074a08`（2026-10-05 時点で匿名ビルド・生成・rebrand を実測済み）。
 
 唯一の定義元は `tools/docs-site-gen/FF_REV`（スキル側は `templates/docs-site-gen/FF_REV`）。`pages.yml` と
 `build-local.sh` は値を直書きせずこのファイルを読み、使用前に `^[0-9a-f]{40}$` で検証する。cache キーも同ファイルの
