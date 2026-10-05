@@ -1,5 +1,5 @@
 <!-- source: skills/setup-github-pages（このスキル自身の保守手順。上流は https://github.com/Fandhe-AI/fandhe-frontend） -->
-<!-- 最終確認日: 2026-10-06 -->
+<!-- 最終確認日: 2026-10-05 -->
 <!-- 取得状況: ✅ 実装とテストで確認済み（FF_REV cf5edb9b8f1bf2a63d51dcf50a8d2806e2d8f9f9 で匿名ビルド・生成・rebrand を実測） -->
 
 # スキル保守者向けの手順（FF_REV の更新・上流改修の追跡）
@@ -50,13 +50,13 @@
 | `cargo install --git` が submodule で失敗する | [#3718](https://github.com/Fandhe-AI/fandhe-frontend/issues/3718) → PR #3730（submodule 非依存化。匿名の `cargo install --git` が通る） | shallow fetch と path 依存の廃止（#49） |
 | 外部利用の契約・手順 | #3724 → PR #3735（契約テスト）、#3725 → PR #3737（CI 経路）、#3726 → PR #3736（利用ガイド）、#3715 → PR #3729（設計文書） | 参照のみ（#56 で文書をリンク化） |
 
-追跡 Issue: [https://github.com/Fandhe-AI/fandhe-frontend/issues/3713](https://github.com/Fandhe-AI/fandhe-frontend/issues/3713)（トラッキング。2026-10-06 時点で open）
+追跡 Issue: [https://github.com/Fandhe-AI/fandhe-frontend/issues/3713](https://github.com/Fandhe-AI/fandhe-frontend/issues/3713)（トラッキング。2026-10-05 時点で open）
 
 - 未完了: [#3723](https://github.com/Fandhe-AI/fandhe-frontend/issues/3723) と [#3727](https://github.com/Fandhe-AI/fandhe-frontend/issues/3727)（試行用リポジトリでの CI デプロイ確認。スキル側 #57・#58 に対応）
 - 未取り込み: [#3739](https://github.com/Fandhe-AI/fandhe-frontend/issues/3739)（lang 別クローム文言・リポジトリリンク表示・`--help`）は main に未取り込み。#48 の FF_REV 更新時に取り込み済みか確認する
 - 各 Issue の状態は `gh issue view <n> -R Fandhe-AI/fandhe-frontend` で再確認する。FF_REV 更新時は上流の `crates/docs-site/src/` の変更も見比べる
 
-## 簡素化の設計判断（決定記録・2026-10-06）
+## 簡素化の設計判断（決定記録・2026-10-05）
 
 上流の外部利用対応を受けて回避策を削除するにあたり、上流のキー表だけでは決まらない 5 点を決めた。後続イシュー #49〜#54 の前提である。
 上流の仕様の正は Fandhe-AI/fandhe-frontend の `docs/design/docs-site-external-use.md`（§4 キー表・§5 フラグ・§6 帰属表記）と
@@ -76,27 +76,29 @@
 
 - **決定**: MIT ライセンス本文を `build-local.sh` に heredoc（`<<'EOF'`、変数展開なし）で同梱する。ヘッダーの commit SHA だけ `FF_REV` ファイルから埋める
   - 実行時の追加ネットワーク取得はしない。新しい配置物は増えず、`scaffold.py` の `FILES` は変えない
-  - ドリフト対策として、FF_REV 更新時に `gh api "repos/Fandhe-AI/fandhe-frontend/contents/LICENSE-MIT?ref=<新 FF_REV>"` の本文と同梱本文の差分を確認する。同梱本文が上流の著作権行と許諾文の先頭を含むことは `rev-pin.test.mjs` が検査する（#49）
+  - ドリフト対策として、`rev-pin.test.mjs` が FF_REV に対応する上流 `LICENSE-MIT` の本文**全体**と、同梱本文（`THIRD-PARTY-LICENSES` に出力される MIT 全文）の一致を検査する（#49）。著作権行と許諾文の先頭だけの検査にしない（後半の欠落・改変を通さないため）
+  - テストはネットワークに依存しない。FF_REV に対応する上流 `LICENSE-MIT` を `tests/fixtures/` へ保存して比較し、FF_REV 更新時に `gh api "repos/Fandhe-AI/fandhe-frontend/contents/LICENSE-MIT?ref=<新 FF_REV>"` で保存分を作り直す（保存分が FF_REV の取得物であることもテストで確かめる）
 - **理由**: `_ff/` を廃止するのでローカルに上流 checkout が残らない。`cargo install --git` の checkout は CARGO_HOME 配下の不安定なパスにある。raw URL 取得は新たなネットワーク依存・整合性リスク・SSRF 面を足す。同梱なら再現性があり、オフラインでも動く
 - **非採用**: 固定 rev の raw URL 取得。`templates/` への別ファイル同梱（scaffold の所有ファイルが増え、得るものが無い）
 - **影響**: #49 の生成元を具体化する。`update-recovery.md` の復旧対象は変わらない
 
 ### 決定 3: 生成後の検査
 
-- **決定**: `rebrand_site.py` の置換・残存検査は削除し、帰属表記の存在だけを見る薄い verify を残す
-  - フッターを持つ全 HTML（`docs-footer-bottom` を含むもの。最低 `index.html` と `404.html`）に `Built with fandhe-frontend docs-site` の帰属表記がある
-  - `LICENSE-MIT` と `LICENSE-APACHE` へのリンクがそれぞれちょうど 1 本ある
-  - 検査を担う場所（`check_site.py` の `--verify-dist` か短い専用スクリプトか）は #51 に委ねる。symlink を読まない・サイズ上限付きで読む・エラーに内容の断片を載せない方針は `rebrand_site.py` から小さく移す
-- **残存検査（`fandhe-frontend` が帰属表記の外に無いこと）は残さない**: 上流 CI が固定 fixture に対して契約を固定している。利用者サイトでは `brand`・`repository_url`・`copyright`・`version_badge` の 4 キーを `check_site.py` が事前に必須化する。本文に `fandhe-frontend` を正当に書くサイトで偽陽性になる。上流 DOM の正規表現解析は壊れやすい。FF_REV 更新時の手動 grep（手順 5）は残す
-- **理由**: 帰属表記の保持は MIT / Apache-2.0 の通知義務に直結するため最小限の自動検証が要る。それ以上は上流の契約テストと重複する
-- **非採用**: 検査をすべて上流に任せて消す案。FF_REV 更新で上流がフッターを変えても、スキル側で気付けなくなる
-- **影響**: #51
+- **決定**: `rebrand_site.py` の置換は削除するが、残存検査（`residual_hits`）は**廃止せず維持**する。帰属表記の検査を加えた「検査のみの verify」にする
+  - 帰属表記の検査対象は、フッターの有無に依存しない条件で選ぶ。ビルド成果物（`_site/`）の全 HTML（最低 `index.html` と `404.html`）を対象とし、`docs-footer-bottom` を含むものだけに絞らない。上流でフッターが欠落したページは検査を通過させず、**フッターの欠落も帰属表記の欠落もエラー**にする
+  - 各対象 HTML に `Built with fandhe-frontend docs-site` の帰属表記があること
+  - `LICENSE-MIT` と `LICENSE-APACHE` へのリンクがそれぞれちょうど 1 本あること
+  - 残存検査は現行方式を維持する。ヘッダー・フッターなど上流由来の表示領域に `fandhe-frontend` と `Fandhe-AI` が帰属表記の外に残っていればエラーにする。利用者の本文領域（Markdown 由来）は対象から除く（本文で `fandhe-frontend` を正当に書くサイトを許容する）。誤検出がある箇所だけ判定を調整し、検査自体は削らない
+  - 検査を担う場所（`check_site.py` の `--verify-dist` か `rebrand_site.py` の検査部か）は #51 に委ねる。symlink を読まない・サイズ上限付きで読む・エラーに内容の断片を載せない方針を引き継ぐ
+- **理由**: 帰属表記の保持は MIT / Apache-2.0 の通知義務に直結する。上流が新しい表示箇所（ヘッダー・フッター等）を足したときに、ブランドキーの事前必須化だけでは `fandhe-frontend` の残存を捕捉できない。残存検査の廃止は既存防御の弱体化になる。事前必須化（`brand`・`repository_url`・`copyright`・`version_badge` 等）は残存検査の代替ではなく、前段の防御として併用する
+- **非採用**: 残存検査の全面廃止（上流の新表示箇所の取りこぼし）。帰属表記を `docs-footer-bottom` の有無で検査対象にする案（フッター欠落ページを素通りさせる）。検査をすべて上流に任せて消す案
+- **影響**: #51。FF_REV 更新時の手動 grep（手順 5）も引き続き残す
 
 ### 決定 4: `title` の上流名拒否
 
-- **決定**: `check_site.py` の「`title` に `fandhe-frontend` を独立した語として含めない」規則（`has_upstream_word`）を削除する。`scaffold.py` の入力検証（`validate_text`）の同種の拒否も削除する。`is_upstream_repo`（`repository` が上流リポジトリ自身を指す拒否）は別の保護なので残す
-- **理由**: この規則は `rebrand_site.py` の残存検査との衝突（ビルド最終段の原因不明の失敗）を防ぐためだった。決定 3 で残存検査を廃止すると理由が消え、`fandhe-frontend` を扱う正当なドキュメントまで拒否する副作用だけが残る。上流の `[site].brand` も任意の文字列を許す
-- **影響**: #52 は「`title` の規則を削除」と確定する。#50 は scaffold の入力検証で `has_upstream_word` を使わない。`tests/test_rebrand.py` の関連テストは受理側へ反転する
+- **決定**: 決定 3 で残存検査を維持するため、`check_site.py` の「`title` に `fandhe-frontend` を独立した語として含めない」規則（`has_upstream_word`）と、`scaffold.py` の入力検証（`validate_text`）の同種の拒否は**現状維持**とする。`is_upstream_repo`（`repository` が上流リポジトリ自身を指す拒否）も残す
+- **理由**: この規則は残存検査との衝突（ビルド最終段の原因不明の失敗）を防ぐためで、`title` は `<title>` などの表示領域に出るため、残存検査を維持する限り衝突は残る。削除は、残存検査が `title` の出現箇所を誤検出しないよう調整できた場合に限り再評価する
+- **影響**: #52 は `title` の規則を削除しない。`tests/test_rebrand.py` の関連テストも反転しない。#50 の scaffold の入力検証は `has_upstream_word` を使い続ける
 
 ### 決定 5: `brand.toml` から `[site]` への移行
 
@@ -115,3 +117,4 @@
 
 - 上流が `tagline` の「空で非表示」を入れた場合は、決定 1 を再評価する
 - 上流が帰属表記の DOM に識別用の `data-*` 属性を足した場合は、決定 3 の verify を精緻化できる
+- 残存検査が `title` の出現箇所を誤検出しないよう調整できた場合は、決定 4 の削除を再評価する
