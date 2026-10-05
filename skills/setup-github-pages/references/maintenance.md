@@ -24,10 +24,9 @@
    （`tests/rev-pin.test.mjs` が不一致を検出する）。対象リポジトリ側への反映は保守者の作業ではなく、利用者が更新フローで
    取り込む（`scaffold.py` を通さず対象リポジトリの `FF_REV` だけ手で書き換えると、次回の更新は「利用者が編集した」競合として止まる）
 3. 模擬の対象リポジトリ（`scaffold.py` で配置したもの。更新の確認は旧版を配置してから新版で `scaffold.py --target .`
-   を再実行する）で `bash tools/docs-site-gen/build-local.sh --clean --write-third-party` を実行する。「registry 依存が 0 件であることを
-   検査」の工程（`cargo metadata` で `source` が null 以外のパッケージを数える）が失敗したら、上流が外部 crate を導入した合図なので、
-   匿名・隔離ビルドの前提と供給網の固定方針を見直すまで更新しない。wrapper のコンパイルエラーは上流 API
-   （`build_site_with` / `EMPTY_REGISTRY`）の変更を示す
+   を再実行する）で `bash tools/docs-site-gen/build-local.sh --clean --write-third-party` を実行する。匿名・隔離環境（`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` と使い捨ての `CARGO_HOME`）で `cargo install --git ... --locked` が通ることを実測する。
+   registry 依存 0 件の自動検査は #49 で無くなったため、新しい rev の上流 `Cargo.lock` に crates.io 由来の依存（`source = "registry+..."`）が増えていないかを
+   手で確認し、増えていれば供給網の固定方針を見直すまで更新しない。`docs-site` の CLI 引数（`--root`・`--out`・`--no-page-sections`）の変更は生成の失敗として現れる
 4. `rebrand_site.py` が「一致数が 0」で失敗したら、上流 DOM の変更を意味する。生成された HTML を読み、ヘッダー・フッターの
    該当要素を特定して `rebrand_site.py` のルールを直す。`brand.toml` に無い新しいハードコード表示が増えていないかも、
    `grep -o fandhe-frontend` と `Fandhe-AI` で確認する
@@ -40,14 +39,14 @@
 ## 上流改修の追跡
 
 本スキルの wrapper と後処理は、上流 fandhe-frontend の次の制約を回避するための**暫定措置**である。上流は外部利用に対応済み
-（PR #3728〜#3737 がマージ済み）で、スキル側の回避策は #49〜#53 で削除する。表の「上流の対応」は上流側の状態を指し、
-スキル側の回避策は**まだ残っている**。
+（PR #3728〜#3737 がマージ済み）で、スキル側の回避策は #49〜#53 で削除する（#49 は反映済み）。表の「上流の対応」は上流側の状態を指し、
+スキル側の回避策は行ごとの記載のとおり。
 
 | 回避している制約 | 上流の対応（Issue → PR） | スキル側の削除（イシュー） |
 |------------------|--------------------------|----------------------------|
-| stock の `docs-site` が page section registry を強制し、ショーケースを注入する | [#3716](https://github.com/Fandhe-AI/fandhe-frontend/issues/3716) → PR #3728（`--no-page-sections`）、[#3717](https://github.com/Fandhe-AI/fandhe-frontend/issues/3717) → PR #3731（ショーケース注入の停止） | wrapper の廃止と予約パス禁止の撤去（#49・#52） |
+| stock の `docs-site` が page section registry を強制し、ショーケースを注入する | [#3716](https://github.com/Fandhe-AI/fandhe-frontend/issues/3716) → PR #3728（`--no-page-sections`）、[#3717](https://github.com/Fandhe-AI/fandhe-frontend/issues/3717) → PR #3731（ショーケース注入の停止） | `--no-page-sections` の利用は #49 で反映済み。wrapper の削除は #53、予約パス禁止の撤去は #52 |
 | ブランド表示がハードコード | [#3720](https://github.com/Fandhe-AI/fandhe-frontend/issues/3720) → PR #3732（`brand`・`repository_url`）、[#3721](https://github.com/Fandhe-AI/fandhe-frontend/issues/3721) → PR #3733（`tagline`・`copyright`・`version_badge`・`lang`）、[#3722](https://github.com/Fandhe-AI/fandhe-frontend/issues/3722) → PR #3734（`brand_mark`・`brand_color`） | `rebrand_site.py` と `brand.toml` の廃止（#50・#51・#53） |
-| `cargo install --git` が submodule で失敗する | [#3718](https://github.com/Fandhe-AI/fandhe-frontend/issues/3718) → PR #3730（submodule 非依存化。匿名の `cargo install --git` が通る） | shallow fetch と path 依存の廃止（#49） |
+| `cargo install --git` が submodule で失敗する | [#3718](https://github.com/Fandhe-AI/fandhe-frontend/issues/3718) → PR #3730（submodule 非依存化。匿名の `cargo install --git` が通る） | #49 で反映済み（匿名 `cargo install --git`。`_ff/` と path 依存のビルドは廃止。wrapper テンプレートの削除は #53） |
 | 外部利用の契約・手順 | #3724 → PR #3735（契約テスト）、#3725 → PR #3737（CI 経路）、#3726 → PR #3736（利用ガイド）、#3715 → PR #3729（設計文書） | 参照のみ（#56 で文書をリンク化） |
 
 追跡 Issue: [https://github.com/Fandhe-AI/fandhe-frontend/issues/3713](https://github.com/Fandhe-AI/fandhe-frontend/issues/3713)（トラッキング。2026-10-05 時点で open）
@@ -74,12 +73,12 @@
 
 ### 決定 2: `THIRD-PARTY-LICENSES` の生成元
 
-- **決定**: MIT ライセンス本文を `build-local.sh` に heredoc（`<<'EOF'`、変数展開なし）で同梱する。ヘッダーの commit SHA だけ `FF_REV` ファイルから埋める
-  - 実行時の追加ネットワーク取得はしない。新しい配置物は増えず、`scaffold.py` の `FILES` は変えない
-  - ドリフト対策として、`rev-pin.test.mjs` が FF_REV に対応する上流 `LICENSE-MIT` の本文**全体**と、同梱本文（`THIRD-PARTY-LICENSES` に出力される MIT 全文）の一致を検査する（#49）。著作権行と許諾文の先頭だけの検査にしない（後半の欠落・改変を通さないため）
-  - テストはネットワークに依存しない。FF_REV に対応する上流 `LICENSE-MIT` を `tests/fixtures/` へ保存して比較し、FF_REV 更新時に `gh api "repos/Fandhe-AI/fandhe-frontend/contents/LICENSE-MIT?ref=<新 FF_REV>"` で保存分を作り直す（保存分が FF_REV の取得物であることもテストで確かめる）
-- **理由**: `_ff/` を廃止するのでローカルに上流 checkout が残らない。`cargo install --git` の checkout は CARGO_HOME 配下の不安定なパスにある。raw URL 取得は新たなネットワーク依存・整合性リスク・SSRF 面を足す。同梱なら再現性があり、オフラインでも動く
-- **非採用**: 固定 rev の raw URL 取得。`templates/` への別ファイル同梱（scaffold の所有ファイルが増え、得るものが無い）
+- **決定**: `FF_REV` の固定 rev の raw URL（`https://raw.githubusercontent.com/Fandhe-AI/fandhe-frontend/<FF_REV>/LICENSE-MIT`）から取得し、本文を同梱しない（#47 の 2026-10-06 の決定）。ヘッダーの commit SHA だけ `FF_REV` から埋める
+  - 取得 URL は固定で、可変部分は検証済み `FF_REV` のみ。https 限定・リダイレクト非追従・`--max-time 30`・`--max-filesize 65536`、HTTP 200 のみ許容する
+  - 本文が上流の著作権行（`Copyright (c) <年> Fandhe-AI / fandhe-frontend contributors`）と許諾文の先頭を含まない場合、空・64KiB 超・NUL 入りの場合は、既存の `THIRD-PARTY-LICENSES` に触れず非 0 で停止する（一時ファイル → `mv` の原子的置換）
+  - テストはネットワークに依存しない。スタブ `curl` で成功・失敗・検証不合格の各経路と、curl 引数の固定性を確かめる
+- **理由**: インストールするバイナリと同じ rev の文面になる。ライセンス本文を `build-local.sh` に二重管理せず、FF_REV 更新時の同期作業が要らない
+- **非採用**: `build-local.sh` への heredoc 同梱（FF_REV 更新のたびに本文のドリフトを手で追う必要がある）。`templates/` への別ファイル同梱（scaffold の所有ファイルが増え、得るものが無い）。`cargo install` の checkout を読む案（CARGO_HOME 配下の不安定なパス）
 - **影響**: #49 の生成元を具体化する。`update-recovery.md` の復旧対象は変わらない
 
 ### 決定 3: 生成後の検査

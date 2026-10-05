@@ -5,17 +5,18 @@
 # 対象リポジトリでは tools/docs-site-gen/build-local.sh に置かれ、リポジトリのルートは
 # このスクリプトの 2 階層上として解決する（呼び出し時のカレントディレクトリに依存しない）。
 #
-# 工程: FF_REV 検証 → 匿名 shallow fetch（_ff/） → [THIRD-PARTY-LICENSES 生成]
-#       → check_site → registry 依存 0 件の検査 → wrapper build → 生成 → rebrand → 最小 verify・残存検査
+# 工程: FF_REV 検証 → [THIRD-PARTY-LICENSES 生成（固定 URL から取得）] → check_site
+#       → docs-site を cargo install（匿名・--locked） → 生成（--no-page-sections） → rebrand → 最小 verify・残存検査
 #
-# なぜ cargo install --git ではなく手動 fetch か: fandhe-frontend は submodule
-# （docs/spec → private リポジトリ）を持ち、cargo の git 取得は submodule まで再帰するため
-# 匿名環境では認証失敗になる。submodule を取らない shallow fetch + path 依存で回避する。
+# 上流（fandhe-frontend）の docs-site バイナリを、固定 rev（FF_REV）の匿名 `cargo install --git` で
+# スキル管理下の target/docs-site-install へ入れて実行する。以前の「_ff/ へ shallow fetch + path 依存の
+# wrapper を build」は上流が匿名 install に対応したため不要になった。templates/docs-site-gen の
+# Cargo.toml・src/main.rs は #53 で配置物から外すまで残るが、このスクリプトのビルドでは使わない。
 #
 # 使い方: build-local.sh [--out DIR] [--clean] [--write-third-party]
 #   --out DIR              出力先（既定 <root>/_site）。既存かつ非空ならエラー
 #   --clean                既定の出力先 <root>/_site のみを削除してから生成する
-#   --write-third-party    _ff/LICENSE-MIT から <root>/THIRD-PARTY-LICENSES を（再）生成する
+#   --write-third-party    固定 rev の LICENSE-MIT を取得して <root>/THIRD-PARTY-LICENSES を（再）生成する
 # 環境変数: CARGO_HOME / RUSTUP_HOME は呼び出し側で上書きできる（隔離ビルド用）。
 # 終了コード: 0 成功 / それ以外は失敗（どの工程かは stderr の "==> " 行で分かる）。
 
@@ -23,8 +24,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-FF_DIR="${ROOT}/_ff"
-FF_URL="https://github.com/Fandhe-AI/fandhe-frontend.git"
+FF_URL="https://github.com/Fandhe-AI/fandhe-frontend"
+INSTALL_ROOT="${SCRIPT_DIR}/target/docs-site-install"
 DEFAULT_OUT="${ROOT}/_site"
 
 OUT="${DEFAULT_OUT}"
@@ -54,9 +55,9 @@ case "${OUT}" in
 esac
 
 # >>> guards（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
-# 不変条件: このスクリプトが書く・消す先（_ff/・target/・Cargo.lock・THIRD-PARTY-LICENSES・既定の
+# 不変条件: このスクリプトが書く・消す先（target/・docs-site-install・THIRD-PARTY-LICENSES・既定の
 # 出力先 _site/）は、(a) 対象リポジトリの実体パス（ROOT_REAL）配下に解決され、(b) 末端自体が
-# symlink でないこと。`git init` / `fetch` / `checkout` / `cargo build` / `mv` / `rm -r` は
+# symlink でないこと。`cargo install` / `mv` / `rm -r` は
 # symlink を辿ってリンク先を書き換え得るため、書く前に必ずこの関数を通す。
 # 唯一の例外は --out（CI は ${RUNNER_TEMP} など対象リポジトリ外へ出力する）で、guard_out が別途検査する。
 #
@@ -113,9 +114,8 @@ fi
 
 # ---- 書き込み先の安全確認（symlink 経由で対象リポジトリの外へ書かない）
 guard_path "${SCRIPT_DIR}" "tools/docs-site-gen" || exit 2
-guard_path "${FF_DIR}" "_ff" || exit 2
-guard_path "${SCRIPT_DIR}/target" "tools/docs-site-gen/target（cargo の出力先）" || exit 2
-guard_path "${SCRIPT_DIR}/Cargo.lock" "tools/docs-site-gen/Cargo.lock（cargo が書く）" || exit 2
+guard_path "${SCRIPT_DIR}/target" "tools/docs-site-gen/target（cargo install の出力先）" || exit 2
+guard_path "${INSTALL_ROOT}" "docs-site のインストール先" || exit 2
 if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
   guard_path "${ROOT}/THIRD-PARTY-LICENSES" "THIRD-PARTY-LICENSES" || exit 2
   if [[ -d "${ROOT}/THIRD-PARTY-LICENSES" ]]; then
@@ -164,113 +164,87 @@ if [[ "${OUT_REAL}" == "${ROOT_REAL}" || "${ROOT_REAL}/" == "${OUT_REAL}/"* ]]; 
   exit 2
 fi
 
-# ---- 匿名 shallow fetch（submodule は取らない）
-# >>> fetch_ff（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
-# _ff/ は生成器のキャッシュ専用ディレクトリで、利用者の作業物を置く場所ではない。それでも
-# 手で編集された場合に備え、未コミット変更・未追跡ファイルがあれば**破棄せず中止**する
-# （checkout -f / clean を使わない）。HEAD が FF_REV と違う clean な状態だけを checkout で進める。
-fetch_ff() {
-  if [[ -e "${FF_DIR}" && ! -d "${FF_DIR}/.git" && -n "$(ls -A "${FF_DIR}")" ]]; then
-    echo "エラー: ${FF_DIR} が git 作業ツリーではない（内容を確認して手動で退避してから再実行）" >&2
-    return 1
-  fi
-  if [[ -e "${FF_DIR}/.git" || -L "${FF_DIR}/.git" ]]; then
-    if [[ -L "${FF_DIR}/.git" || ! -d "${FF_DIR}/.git" ]]; then
-      echo "エラー: ${FF_DIR}/.git が通常のディレクトリではない（symlink・gitdir ファイルはリンク先を書き換え得るため中止）" >&2
-      return 1
-    fi
-    # origin を取得できない（origin が無い・git リポジトリとして読めない）既存リポジトリは、このスクリプトが作った
-    # キャッシュと確認できない。origin を追加して checkout すると利用者の別リポジトリの作業ツリーを書き換えるため中止する。
-    local origin
-    if ! origin="$(git -C "${FF_DIR}" remote get-url origin 2>/dev/null)"; then
-      echo "エラー: ${FF_DIR} は既存の git リポジトリだが origin を取得できない。利用者の別リポジトリの可能性があるため書き換えず中止する。" >&2
-      echo "       不要なら手動で ${FF_DIR} を削除してから再実行する。" >&2
-      return 1
-    fi
-    if [[ "${origin}" != "${FF_URL}" ]]; then
-      echo "エラー: ${FF_DIR} の origin が期待する上流 URL と異なる（${origin}）。利用者の別リポジトリの可能性があるため書き換えず中止する。" >&2
-      echo "       不要なら手動で ${FF_DIR} を削除してから再実行する。" >&2
-      return 1
-    fi
-    local dirty
-    if ! dirty="$(git -C "${FF_DIR}" status --porcelain)"; then
-      echo "エラー: ${FF_DIR} の git 状態を取得できない（破損の可能性。内容を確認して手動で退避してから再実行）" >&2
-      return 1
-    fi
-    if [[ -n "${dirty}" ]]; then
-      echo "エラー: ${FF_DIR} に未コミットの変更または未追跡ファイルがある。破棄しないため中止する。" >&2
-      echo "       必要な変更は退避し、不要なら手動で ${FF_DIR} を削除してから再実行する。" >&2
-      return 1
-    fi
-    if [[ "$(git -C "${FF_DIR}" rev-parse HEAD 2>/dev/null || true)" == "${FF_REV}" ]]; then
-      echo "  既存の _ff が FF_REV と一致するため再利用" >&2
-      return 0
-    fi
-  else
-    # origin を追加するのは、ここで新規に git init した場合だけ。既存のリポジトリの origin は上で一致確認済みで、
-    # 追加も書き換えもしない
-    git init -q "${FF_DIR}"
-    git -C "${FF_DIR}" remote add origin "${FF_URL}"
-  fi
-  # 認証プロンプトで止まらず失敗させる（CI・隔離環境での無限待機を避ける）
-  GIT_TERMINAL_PROMPT=0 git -C "${FF_DIR}" fetch -q --depth 1 origin "${FF_REV}"
-  git -C "${FF_DIR}" checkout -q FETCH_HEAD
-  if [[ "$(git -C "${FF_DIR}" rev-parse HEAD)" != "${FF_REV}" ]]; then
-    echo "エラー: checkout 後の HEAD が FF_REV と一致しない" >&2
-    return 1
-  fi
-}
-# <<< fetch_ff
-step "fandhe-frontend ${FF_REV} を取得"
-fetch_ff || exit 1
+# ---- THIRD-PARTY-LICENSES（固定 rev の LICENSE-MIT を取得して同梱する）
+# >>> third_party（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
+# 取得先は固定 URL（可変部分は検証済み FF_REV のみ）。リダイレクト非追従・https 限定・時間とサイズを制限し、
+# 本文が上流の著作権行と許諾文を含まなければ既存の THIRD-PARTY-LICENSES に触れず非 0 で停止する。
+# 前提: ROOT_REAL・FF_REV が検証済みで、宛先が symlink・ディレクトリでないこと（冒頭で確認済み）。
+write_third_party() {
+  local license_url="https://raw.githubusercontent.com/Fandhe-AI/fandhe-frontend/${FF_REV}/LICENSE-MIT"
+  local code rc size
+  # trap は関数の外（EXIT）で効かせるため、一時ファイルのパスは大域変数で持つ（set -u 下でも参照できる）
+  dl_tmp=""; tpl_tmp=""
+  trap 'rm -f -- "${dl_tmp}" "${tpl_tmp}"' EXIT
+  dl_tmp="$(mktemp "${ROOT_REAL}/.THIRD-PARTY-LICENSES.dl.XXXXXX")" || return 1
+  tpl_tmp="$(mktemp "${ROOT_REAL}/.THIRD-PARTY-LICENSES.XXXXXX")" || { rm -f -- "${dl_tmp}"; return 1; }
 
-if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
-  step "THIRD-PARTY-LICENSES を生成"
-  # 途中失敗で欠けたファイルを残さないよう、一時ファイルへ書いてから mv（同一ディレクトリ内で原子的に置換）
-  TPL_TMP="$(mktemp "${ROOT_REAL}/.THIRD-PARTY-LICENSES.XXXXXX")"
-  trap 'rm -f -- "${TPL_TMP}"' EXIT   # 失敗時に一時ファイルを残さない（成功時は mv 済みで no-op）
+  rc=0
+  code="$(curl --fail --silent --show-error \
+      --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --max-time 30 --max-filesize 65536 \
+      --output "${dl_tmp}" --write-out '%{http_code}' \
+      "${license_url}")" || rc=$?
+  if [[ "${rc}" -ne 0 || "${code}" != "200" ]]; then
+    echo "エラー: LICENSE-MIT の取得に失敗（curl 終了コード ${rc}・HTTP ${code:-?}）。THIRD-PARTY-LICENSES は変更しない" >&2
+    return 1
+  fi
+  # --max-filesize は Content-Length が無いと効かないため、実サイズも検証する
+  size="$(wc -c < "${dl_tmp}" | tr -d '[:space:]')"
+  if [[ -z "${size}" || "${size}" -lt 1 || "${size}" -gt 65536 ]]; then
+    echo "エラー: 取得した LICENSE-MIT のサイズが範囲外（${size:-?} バイト）。THIRD-PARTY-LICENSES は変更しない" >&2
+    return 1
+  fi
+  # NUL バイトを含む本文は拒否する（NUL を除いた長さが元と違えば含む）
+  if [[ "$(LC_ALL=C tr -d '\000' < "${dl_tmp}" | wc -c | tr -d '[:space:]')" != "${size}" ]]; then
+    echo "エラー: 取得した LICENSE-MIT に NUL バイトが含まれる。THIRD-PARTY-LICENSES は変更しない" >&2
+    return 1
+  fi
+  local pat
+  for pat in '^Copyright \(c\) [0-9]{4} Fandhe-AI / fandhe-frontend contributors$' \
+             '^Permission is hereby granted, free of charge, to any'; do
+    rc=0
+    grep -Eq -- "${pat}" "${dl_tmp}" || rc=$?
+    if [[ "${rc}" -eq 1 ]]; then
+      echo "エラー: 取得した LICENSE-MIT に上流の著作権行または許諾文が無い。THIRD-PARTY-LICENSES は変更しない" >&2
+      return 1
+    elif [[ "${rc}" -ne 0 ]]; then
+      echo "エラー: LICENSE-MIT の内容検査自体が失敗（grep 終了コード ${rc}）。THIRD-PARTY-LICENSES は変更しない" >&2
+      return 1
+    fi
+  done
   {
     printf '%s\n' \
       "This repository's documentation site is generated with the docs-site generator of" \
       "fandhe-frontend (https://github.com/Fandhe-AI/fandhe-frontend, commit ${FF_REV})," \
       "which is licensed under MIT OR Apache-2.0. The MIT license text follows." \
       ""
-    cat "${FF_DIR}/LICENSE-MIT"
-  } > "${TPL_TMP}"
-  chmod 0644 "${TPL_TMP}"   # mktemp は 0600 で作るため、通常ファイルと同じ権限へ
-  # 宛先が symlink・ディレクトリでないことは冒頭で確認済み（mv は宛先が symlink なら symlink 自体を
-  # 置換するが、ディレクトリを指す symlink やディレクトリだと配下へ移動してしまうため事前に拒否している）
-  mv -f -- "${TPL_TMP}" "${ROOT_REAL}/THIRD-PARTY-LICENSES"
+    cat "${dl_tmp}"
+  } > "${tpl_tmp}"
+  chmod 0644 "${tpl_tmp}"   # mktemp は 0600 で作るため、通常ファイルと同じ権限へ
+  mv -f -- "${tpl_tmp}" "${ROOT_REAL}/THIRD-PARTY-LICENSES"
+}
+# <<< third_party
+
+if [[ "${WRITE_THIRD_PARTY}" -eq 1 ]]; then
+  step "THIRD-PARTY-LICENSES を生成"
+  write_third_party || exit 1
 fi
 
 # ---- 事前検証
 step "check_site"
 python3 -I -B "${SCRIPT_DIR}/check_site.py" --root "${ROOT}"
 
-# ---- 依存検査: wrapper と上流の依存はすべて path 依存（source が null）であること。
-# crates.io 等の registry 依存が混入すると、匿名・隔離ビルドの前提と供給網の固定方針が崩れる。
-# FF_REV を更新した上流が外部 crate を導入した場合にここで fail-closed になる。
-step "registry 依存が 0 件であることを検査"
-# cargo metadata の失敗を set -e で拾うため、プロセス置換ではなくコマンド置換で受ける。
-META="$(cd "${SCRIPT_DIR}" && cargo metadata --format-version 1 --offline --manifest-path "${SCRIPT_DIR}/Cargo.toml")"
-printf '%s' "${META}" | python3 -I -B -c '
-import json, sys
-meta = json.load(sys.stdin)
-ext = sorted("%s %s" % (p["name"], p["version"]) for p in meta["packages"] if p.get("source") is not None)
-if ext:
-    print("エラー: registry 依存が混入している（%d 件）: %s" % (len(ext), ", ".join(ext[:10])), file=sys.stderr)
-    sys.exit(1)
-print("registry 依存 0 件（packages=%d・すべて path 依存）" % len(meta["packages"]), file=sys.stderr)
-'
-
-# ---- wrapper build（CARGO_TARGET_DIR を固定し、cache 対象の tools/docs-site-gen/target と一致させる）
-step "wrapper を build"
-export CARGO_TARGET_DIR="${SCRIPT_DIR}/target"
-cargo build --release --manifest-path "${SCRIPT_DIR}/Cargo.toml"
+# ---- docs-site をインストール（匿名・FF_REV 固定・--locked。同一 rev なら cargo が再インストールを省略する）
+step "docs-site をインストール"
+GIT_TERMINAL_PROMPT=0 cargo install --git "${FF_URL}" --rev "${FF_REV}" --locked --root "${INSTALL_ROOT}" fandhe-frontend-docs-site
+if [[ ! -x "${INSTALL_ROOT}/bin/docs-site" ]]; then
+  echo "エラー: ${INSTALL_ROOT}/bin/docs-site が生成されていない" >&2
+  exit 1
+fi
 
 # ---- 生成（リンク検査は fail-closed。1 件でも壊れていれば何も書かず非 0）
 step "サイトを生成"
-"${CARGO_TARGET_DIR}/release/docs-site-gen" --root "${ROOT}" --out "${OUT}"
+"${INSTALL_ROOT}/bin/docs-site" --root "${ROOT}" --out "${OUT}" --no-page-sections
 
 # ---- rebrand
 step "rebrand"
