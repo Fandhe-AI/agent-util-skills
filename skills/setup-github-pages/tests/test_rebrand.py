@@ -2590,12 +2590,14 @@ class UpdateSnapshotHardeningTest(unittest.TestCase):
         out = r.stdout
         self.assertIn(f"WOULD-DELETE {self.TPL}", out)
         self.assertIn(f"WOULD-RESTORE {self.BUILD_SH}", out)
-        self.assertIn(f"WOULD-RESTORE {self.RB}", out, "git rm --cached でも HEAD にあるので rm してはいけない")
+        self.assertIn(f"ASK {self.RB}", out, "git rm --cached はステージ済みの削除。利用者の操作なので自動では戻さない")
         r = self.sh("restore", self.snap)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 4, r.stderr)   # ASK が 1 件
         self.assertFalse(new.exists())
         self.assertTrue((self.t / self.RB).exists(), "HEAD にあるファイルを rm してはいけない")
-        self.assertIn(f"RESTORED {self.RB}", r.stdout)
+        self.assertIn(f"ASK {self.RB}", r.stdout)
+        self.assertIn(f"RESTORED {self.BUILD_SH}", r.stdout)
+        self.assertIn("rm --cached".split()[0], "rm")   # 構文確認のダミー（下の index 照合テストが本体）
 
     def test_t1_ancestor_symlink_is_ask_at_record_and_restore(self):
         self.simple_baseline()
@@ -3076,6 +3078,195 @@ class UpdateSnapshotFilterAttrTest(unittest.TestCase):
         sh = (SCRIPTS / "update-snapshot.sh").read_text(encoding="utf-8")
         self.assertRegex(sh, r"out=\"\$\(g check-attr filter -- ")
         self.assertIn("core.fsmonitor=false -c core.hooksPath=/dev/null", sh)
+
+class UpdateSnapshotEntrypointTest(unittest.TestCase):
+    """Y1: ファイルに触れる入口（file_state）を 1 つに集約。祖先を最初に検証し、リンク先を読まない。
+    Y2: restore は index も照合する（ステージ済みの変更を消さない）。"""
+
+    SH = UpdateSnapshotTest.SH
+    ARGS = UpdateSnapshotTest.ARGS
+    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    PAGES = UpdateSnapshotTest.PAGES
+    MANIFEST = UpdateSnapshotTest.MANIFEST
+    BUILD_SH = UpdateSnapshotTest.BUILD_SH
+    RB = UpdateSnapshotTest.RB
+    TPL = UpdateSnapshotTest.TPL
+    SENT = "OUTSIDE-SENTINEL-5be8"
+    setUp = UpdateSnapshotTest.setUp
+    git = UpdateSnapshotTest.git
+    sc = UpdateSnapshotTest.sc
+    sh = UpdateSnapshotTest.sh
+    skill_copy = UpdateSnapshotTest.skill_copy
+    baseline_and_u1 = UpdateSnapshotTest.baseline_and_u1
+    restore = UpdateSnapshotTest.restore
+    simple_baseline = UpdateSnapshotHardeningTest.simple_baseline
+    rec = UpdateSnapshotHardeningTest.rec
+
+    def functions(self):
+        sh = (SCRIPTS / "update-snapshot.sh").read_text(encoding="utf-8")
+        body = "\n".join(l for l in sh.split("\n") if not l.lstrip().startswith("#"))
+        return {m.group(1): m.group(2) for m in re.finditer(r"(?ms)^(\w+)\(\) \{\n(.*?)^\}\n", body)}, body
+
+    def test_y1_single_entrypoint_for_file_access(self):
+        funcs, body = self.functions()
+        hits = [name for name, text in funcs.items() if "hash-object" in text]
+        self.assertEqual(hits, ["file_state"], "hash-object を呼ぶのは file_state の中だけ")
+        self.assertEqual(body.count("hash-object"), 1)
+        fs = funcs["file_state"]
+        self.assertLess(fs.index("ancestors_ok"), fs.index("-L"))
+        self.assertLess(fs.index("ancestors_ok"), fs.index("hash-object"))
+        self.assertLess(fs.index("ancestors_ok"), fs.index("-e "))
+        # パスの種別を見る test（-L / -e / -f）は file_state と ancestors_ok の中だけ
+        for name, text in funcs.items():
+            if name in ("file_state", "ancestors_ok", "check_snap_for_write", "main", "require_root", "ensure_head", "parse_snapshot"):
+                continue
+            self.assertNotRegex(text, r"\[\[ -[Lef] \"\$\{p\}\"", f"{name}: file_state を通さずにパスの種別を見ている")
+        # rm と git restore は cmd_restore の中だけで、file_state（祖先の検証）より後
+        rs = funcs["cmd_restore"]
+        for call in ("head_entry", "attr_filter", "index_vs_head", "g restore", "rm -- "):
+            self.assertGreater(rs.index(call), rs.index("file_state"), f"{call} が file_state より前にある")
+        self.assertEqual([n for n, t in funcs.items() if "rm -- " in t or "g restore" in t], ["cmd_restore"])
+        self.assertNotIn("--staged", funcs["cmd_restore"].split("g restore")[1].split("\n")[0], "index を書き換えない（--worktree のみ）")
+
+    def fake_git_logging(self, log):
+        fake = self.base / "fakebin"
+        fake.mkdir(exist_ok=True)
+        real_git = shutil.which("git")
+        (fake / "git").write_text(f'#!/bin/sh\necho "$@" >> {log}\nexec {real_git} "$@"\n')
+        (fake / "git").chmod(0o755)
+        self.env = dict(self.env, PATH=f"{fake}:{self.env['PATH']}")
+
+    def test_y1_parent_replaced_by_symlink_is_never_read_or_changed(self):
+        """記録後に tools/docs-site-gen が外への symlink（同名ファイルは番兵入り）に変わっても、リンク先を読まない・変更しない。"""
+        self.baseline_and_u1()
+        outside = self.base / "outside"
+        shutil.copytree(self.t / "tools/docs-site-gen", outside)
+        for f in outside.rglob("*"):
+            if f.is_file() and f.stat().st_size < 300000:
+                try:
+                    f.write_text(f.read_text() + f"\n{self.SENT}\n")
+                except UnicodeDecodeError:
+                    pass
+        before = {f: f.read_bytes() for f in outside.rglob("*") if f.is_file()}
+        shutil.rmtree(self.t / "tools/docs-site-gen")
+        (self.t / "tools/docs-site-gen").symlink_to(outside)
+        log = self.base / "git.log"
+        self.fake_git_logging(log)
+        runs = {   # guard は TAINT を付けて以後の判定を変えるので最後に実行する（status・restore は file_state の判定を直接見る）
+            "status": self.sh("status", self.snap),
+            "restore": self.sh("restore", self.snap),
+            "dry-run": self.sh("restore", self.snap, "--dry-run"),
+            "record": self.sh("record", self.snap, self.RB, self.MAIN_RS, self.MANIFEST),
+            "guard": self.sh("guard", self.snap),
+        }
+        for name, r in runs.items():
+            self.assertNotIn(self.SENT, r.stdout + r.stderr, name)
+        self.assertEqual({f: f.read_bytes() for f in outside.rglob("*") if f.is_file()}, before, "外側のファイルが変更・削除された")
+        calls = log.read_text()
+        for line in calls.splitlines():
+            if "hash-object" in line:
+                self.assertNotIn("tools/docs-site-gen", line, f"祖先が symlink のパスに hash-object が呼ばれた: {line}")
+        self.assertIn("ancestor", runs["status"].stdout)
+        self.assertIn(f"ASK {self.RB} 祖先ディレクトリが symlink", runs["restore"].stdout)
+        self.assertEqual(runs["restore"].returncode, 4)
+        self.assertNotIn(f"ancestor {self.PAGES}", runs["status"].stdout)   # .github 側は影響を受けない
+
+    def test_y1_guard_marks_ancestor_symlink_as_taint(self):
+        self.simple_baseline()
+        outside = self.base / "outside2"
+        shutil.copytree(self.t / "tools/docs-site-gen", outside)
+        shutil.rmtree(self.t / "tools/docs-site-gen")
+        (self.t / "tools/docs-site-gen").symlink_to(outside)
+        g = self.sh("guard", self.snap)
+        self.assertEqual(g.returncode, 0, g.stderr)
+        self.assertIn(f"印: {self.RB}（祖先が symlink 等", g.stdout)
+
+    # ---- Y2: index の照合
+
+    def test_y2a_staged_other_content_with_worktree_restored_to_recorded_is_ask(self):
+        self.baseline_and_u1()
+        recorded = (self.t / self.MAIN_RS).read_text()
+        (self.t / self.MAIN_RS).write_text(recorded + "// staged by the user\n")
+        self.git("add", "--", self.MAIN_RS)
+        (self.t / self.MAIN_RS).write_text(recorded)                # 作業ツリーは記録時の内容へ戻す
+        cached_before = self.git("diff", "--cached", "--", self.MAIN_RS)
+        self.assertIn("staged by the user", cached_before)
+        for mode in (("--dry-run",), ()):
+            r = self.sh("restore", self.snap, *mode)
+            self.assertEqual(r.returncode, 4, f"{mode}: {r.stdout}{r.stderr}")
+            self.assertIn(f"ASK {self.MAIN_RS} index に HEAD と違う内容がある", r.stdout)
+            self.assertNotIn(f"RESTORED {self.MAIN_RS}", r.stdout)
+            self.assertEqual(self.git("diff", "--cached", "--", self.MAIN_RS), cached_before, "ステージ済みの変更が消えた")
+        self.assertEqual((self.t / self.MAIN_RS).read_text(), recorded)
+        self.assertIn("staged", self.sh("status", self.snap).stdout)
+
+    def test_y2b_new_file_added_by_user_keeps_file_and_index_entry(self):
+        self.baseline_and_u1()
+        tpl = self.t / self.TPL
+        tpl.write_text("generated\n")
+        self.rec(self.TPL)
+        self.git("add", "--", self.TPL)                              # 利用者が git add した（HEAD に無い新規ファイル）
+        for mode in (("--dry-run",), ()):
+            r = self.sh("restore", self.snap, *mode)
+            self.assertIn(f"ASK {self.TPL} index に HEAD と違う内容がある", r.stdout, mode)
+        self.assertTrue(tpl.exists(), "ステージ済みの新規ファイルを削除してはいけない")
+        self.assertIn(self.TPL, self.git("ls-files", "--", self.TPL), "index のエントリが消えた")
+
+    def test_y2c_unstaged_normal_case_restores_worktree_only_and_keeps_index(self):
+        self.baseline_and_u1()
+        idx_before = self.git("ls-files", "-s")
+        r, res = self.restore()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(res[self.MAIN_RS], "RESTORED")
+        self.assertNotIn("// v9", (self.t / self.MAIN_RS).read_text())
+        self.assertEqual(self.git("ls-files", "-s"), idx_before, "restore が index を書き換えた")
+        self.assertEqual(self.git("diff", "--cached", "--stat"), "")
+
+    def test_y2_unmerged_skip_worktree_assume_unchanged_are_ask(self):
+        self.baseline_and_u1()
+        self.git("update-index", "--skip-worktree", "--", self.RB)
+        self.git("update-index", "--assume-unchanged", "--", self.MAIN_RS)
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4, r.stdout)
+        self.assertIn(f"ASK {self.RB} index の状態を判定できない", r.stdout)
+        self.assertIn(f"ASK {self.MAIN_RS} index の状態を判定できない", r.stdout)
+        self.assertIn("# v9", (self.t / self.RB).read_text())
+
+    def test_y2_guard_marks_staged_paths_as_taint(self):
+        self.simple_baseline()
+        (self.t / self.BUILD_SH).write_text((self.t / self.BUILD_SH).read_text() + "# staged\n")
+        self.git("add", "--", self.BUILD_SH)
+        (self.t / self.BUILD_SH).write_text((self.t / self.BUILD_SH).read_text().replace("# staged\n", ""))
+        g = self.sh("guard", self.snap)
+        self.assertIn(f"印: {self.BUILD_SH}", g.stdout)
+        self.assertIn("ステージ", g.stdout)
+
+    def test_submodule_ancestor_is_not_mistaken_for_absent_from_head(self):
+        """tools が submodule（gitlink）のとき、その下のパスは親の HEAD から見えないだけ。無いと誤判定して削除しない。"""
+        self.assertEqual(self.sc().returncode, 0)
+        sub = self.base / "subrepo"
+        shutil.copytree(self.t / "tools", sub)
+        shutil.rmtree(self.t / "tools")
+        for cmd in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-qm", "sub"]):
+            subprocess.run(["git", "-C", str(sub), *cmd], check=True, env=self.env, capture_output=True)
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "tools")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "with submodule")
+        self.rec(self.RB)
+        r = self.sh("restore", self.snap)
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn(f"ASK {self.RB}", r.stdout)
+        self.assertNotIn("DELETED", r.stdout)
+        self.assertTrue((self.t / self.RB).exists(), "submodule 内のファイルを削除してはいけない")
+
+    def test_stash_after_recording_never_loses_work(self):
+        """記録後に利用者が git stash した場合: 作業ツリーが記録と一致しなくなり ASK（stash の中身を消さない）。"""
+        self.baseline_and_u1()
+        self.git("stash", "push", "-q", "-m", "user stash")
+        stashes = self.git("stash", "list")
+        r = self.sh("restore", self.snap)
+        self.assertNotIn("DELETED", r.stdout)
+        self.assertEqual(self.git("stash", "list"), stashes)
 
 
 class CheckSiteTest(unittest.TestCase):

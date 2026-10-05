@@ -38,6 +38,23 @@
 # 「HEAD に在るか」は `git ls-tree HEAD -- <path>`（終了コード 0 で出力が空 = HEAD に無いと確定、出力あり = 在る、
 # 非 0 = 判定不能）で判定し、判定不能は触らない。パスの祖先に symlink があれば触らない。
 #
+# # ファイルに触れる入口の集約（file_state）
+# パスの中身や種別を見る処理（`-L`・`-e`・`-f`・`git hash-object`）は `file_state` の中だけに置き、その最初に
+# `ancestors_ok`（祖先ディレクトリが symlink・ファイルでない、実体がルートの下）を検証する。不適なら stat も open も
+# せず ANCESTOR を返す（記録後に親ディレクトリがリポジトリ外への symlink に差し替わっても、リンク先を読まない）。
+# `rm`・`git restore` は、`file_state` が記録と一致したパスにだけ行う（cmd_restore の中で file_state の後）。
+# scaffold.py の `_open_regular` と同じ考え方。
+#
+# # index の照合
+# `git restore --staged --worktree` は index も HEAD に戻す。記録後に利用者が別の内容をステージしていれば、作業ツリーが
+# 記録時のままでもステージ済みの変更が消える。U0 で作業ツリーはクリーンで、scaffold はステージしないので、スキルが
+# 触っただけなら index は HEAD と同じはず（方針: 記録時の index を SNAP に残すのではなく、HEAD との一致で判定する。
+# 理由は、基準が「HEAD」1 つで済み、SNAP の形式・TAINT の仕組みを増やさないため）。index のそのパスが HEAD と違う
+# （HEAD に無いパスなら index にエントリがある、HEAD にあるパスなら index に無い = ステージ済みの削除）場合は ASK。
+# stage が 0 以外・skip-worktree・assume-unchanged・git のエラー・想定外の出力は判定不能で ASK（fail-closed）。
+# 読むのは `git ls-files -s` / `-v` と `git ls-tree` だけ（外部コマンドを起動しない）。復元は作業ツリーだけ
+# （`git restore --source=HEAD --worktree`）で、index は書き換えない。
+#
 # 使い方（SNAP は mktemp 等でリポジトリの外に作ったファイル）:
 #   update-snapshot.sh guard       SNAP             scaffold・ビルドの直前に呼ぶ。HEAD を記録し、触られたパスに TAINT を付ける
 #   update-snapshot.sh record      SNAP <path>...   指定パスの現在の内容を記録する（許可リスト内のみ）
@@ -50,6 +67,10 @@
 #            git switch・git branch -D へ進まない）
 
 set -u -o pipefail
+
+# リポジトリの場所・index・オブジェクトを環境変数で差し替えられないようにする（別のリポジトリの HEAD・index を
+# 読む・書くことを防ぐ。決定的な動作のため）
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_REAL=""
@@ -126,28 +147,70 @@ ancestors_ok() {
   return 0
 }
 
-# 現在の状態: ハッシュ（通常ファイル）/ MISSING / SYMLINK / SPECIAL
-current_state() {
+# 現在の状態: ハッシュ（通常ファイル）/ MISSING / SYMLINK / SPECIAL / ANCESTOR（祖先が不適）。
+# パスの中身・種別を見る唯一の入口。最初に祖先を検証し、不適なら何も開かず stat もしない。
+file_state() {
   local p="$1"
-  if [[ -L "${p}" ]]; then echo SYMLINK
+  if ! ancestors_ok "${p}"; then echo ANCESTOR
+  elif [[ -L "${p}" ]]; then echo SYMLINK
   elif [[ ! -e "${p}" ]]; then echo MISSING
   elif [[ -f "${p}" ]]; then g hash-object --no-filters -- "${p}" 2>/dev/null || echo SPECIAL
   else echo SPECIAL
   fi
 }
 
+# 祖先に gitlink（submodule）があるか: 0 = ある / 1 = ない / 2 = 判定不能
+ancestor_gitlink() {
+  local p="$1" acc="" seg out rc
+  [[ "${p}" == */* ]] || return 1
+  local IFS=/
+  for seg in ${p%/*}; do
+    acc="${acc:+${acc}/}${seg}"
+    out="$(g ls-tree HEAD -- "${acc}" 2>/dev/null)"; rc=$?
+    [[ ${rc} -eq 0 ]] || return 2
+    [[ "${out}" != *" commit "* ]] || return 0
+  done
+  return 1
+}
+
 # HEAD の状態: 0 = HEAD に通常ファイルとして在る（HEAD_SHA を設定）/ 1 = HEAD に無いと確定 / 2 = 判定不能・通常ファイルでない
 HEAD_SHA=""
+HEAD_MODE=""
 head_entry() {
   local out rc mode type sha
-  HEAD_SHA=""
+  HEAD_SHA=""; HEAD_MODE=""
   out="$(g ls-tree HEAD -- "$1" 2>/dev/null)"; rc=$?
   [[ ${rc} -eq 0 ]] || return 2
-  [[ -n "${out}" ]] || return 1
+  if [[ -z "${out}" ]]; then
+    # 空 = HEAD に無いと確定、ただし祖先が submodule（gitlink）なら、その下のパスは親リポジトリの HEAD からは見えない
+    # だけで「無い」わけではない。無いと誤判定して削除しないよう、判定不能として扱う
+    ancestor_gitlink "$1"
+    case $? in 0) return 2 ;; 1) return 1 ;; *) return 2 ;; esac
+  fi
   read -r mode type sha _ <<< "${out%%$'\n'*}"
   [[ "${type}" == blob && ( "${mode}" == 100644 || "${mode}" == 100755 ) && "${sha}" =~ ^[0-9a-f]{40,64}$ ]] || return 2
-  HEAD_SHA="${sha}"
+  HEAD_SHA="${sha}"; HEAD_MODE="${mode}"
   return 0
+}
+
+# index のそのパスと HEAD の比較: 0 = 同じ（HEAD にも index にも無い場合を含む）/ 1 = 違う（ステージ済み）/ 2 = 判定不能
+index_vs_head() {
+  local p="$1" he flags lsout idx_mode idx_sha idx_stage
+  head_entry "${p}"; he=$?
+  [[ ${he} -ne 2 ]] || return 2
+  flags="$(g ls-files -v -- "${p}" 2>/dev/null)" || return 2
+  lsout="$(g ls-files -s -- "${p}" 2>/dev/null)" || return 2
+  if [[ -z "${lsout}" ]]; then
+    [[ -z "${flags}" ]] || return 2
+    if [[ ${he} -eq 1 ]]; then return 0; else return 1; fi   # HEAD にあるのに index に無い = ステージ済みの削除
+  fi
+  [[ "${lsout}" != *$'\n'* ]] || return 2                      # 複数行 = 複数 stage（マージ中）
+  [[ "${flags}" == "H ${p}" ]] || return 2                      # skip-worktree（S）・assume-unchanged（小文字）・未マージ等
+  read -r idx_mode idx_sha idx_stage _ <<< "${lsout}"
+  [[ "${idx_stage}" == 0 && "${idx_sha}" =~ ^[0-9a-f]{40,64}$ ]] || return 2
+  [[ "${idx_mode}" == 100644 || "${idx_mode}" == 100755 ]] || return 2
+  [[ ${he} -eq 0 ]] || return 1                                  # HEAD に無いのに index にエントリがある = ステージ済みの追加
+  if [[ "${idx_sha}" == "${HEAD_SHA}" && "${idx_mode}" == "${HEAD_MODE}" ]]; then return 0; else return 1; fi
 }
 
 # スナップショットを「HEAD<TAB>sha」「REC<TAB>hash<TAB>path」「TAINT<TAB>path」の行へ整える（REC は後の記録が優先）
@@ -195,8 +258,8 @@ cmd_record() {
       echo "記録しない（対象外）: $(safe "${p}")" >&2
       continue
     fi
-    if ! ancestors_ok "${p}"; then echo "記録しない（祖先が symlink 等）: $(safe "${p}")" >&2; continue; fi
-    st="$(current_state "${p}")"
+    st="$(file_state "${p}")"
+    if [[ "${st}" == ANCESTOR ]]; then echo "記録しない（祖先が symlink 等）: $(safe "${p}")" >&2; continue; fi
     if [[ ! "${st}" =~ ^[0-9a-f]{40,64}$ ]]; then
       echo "記録しない（${st}）: $(safe "${p}")" >&2
       continue
@@ -241,12 +304,12 @@ cmd_guard() {
   parsed="$(parse_snapshot "${snap}")" || die "スナップショットを読めない"
   while IFS= read -r p; do
     valid_path "${p}" || continue
-    st="$(current_state "${p}")"
+    st="$(file_state "${p}")"
     head_entry "${p}"; he=$?
     headsha=""; [[ ${he} -eq 0 ]] && headsha="${HEAD_SHA}"
     last="$(printf '%s\n' "${parsed}" | awk -F'\t' -v p="${p}" '$1=="REC" && $3==p { print $2 }')"
     reason=""
-    if ! ancestors_ok "${p}"; then
+    if [[ "${st}" == ANCESTOR ]]; then
       reason="祖先が symlink 等"
     elif [[ "${st}" == SYMLINK || "${st}" == SPECIAL ]]; then
       reason="symlink・特殊ファイル"
@@ -254,6 +317,9 @@ cmd_guard() {
       if [[ ${he} -ne 1 || -n "${last}" ]]; then reason="HEAD または前回の記録にあるのに消えている"; fi
     elif [[ "${st}" != "${headsha}" && "${st}" != "${last}" ]]; then
       reason="HEAD とも前回の記録とも違う（利用者が触った）"
+    fi
+    if [[ -z "${reason}" && "${st}" != ANCESTOR ]] && ! index_vs_head "${p}"; then
+      reason="index に HEAD と違う内容がある、または index の状態を判定できない（利用者がステージした可能性）"
     fi
     if [[ -n "${reason}" ]]; then
       printf 'TAINT\t%s\n' "${p}" >> "${snap}"
@@ -268,8 +334,10 @@ cmd_status() {
   while IFS=$'\t' read -r h t p; do
     [[ "${h}" == REC && -n "${p}" ]] || continue
     if printf '%s\n' "${parsed}" | grep -Fxq -- "$(printf 'TAINT\t%s' "${p}")"; then echo "taint $(safe "${p}")"; continue; fi
-    st="$(current_state "${p}")"
-    if [[ "${st}" == "${t}" ]]; then echo "match $(safe "${p}")"
+    st="$(file_state "${p}")"
+    if [[ "${st}" == ANCESTOR ]]; then echo "ancestor $(safe "${p}")"
+    elif [[ "${st}" == "${t}" ]]; then
+      if index_vs_head "${p}"; then echo "match $(safe "${p}")"; else echo "staged $(safe "${p}")"; fi
     elif [[ "${st}" == MISSING ]]; then echo "missing $(safe "${p}")"
     elif [[ "${st}" == SYMLINK ]]; then echo "symlink $(safe "${p}")"
     elif [[ "${st}" == SPECIAL ]]; then echo "special $(safe "${p}")"
@@ -336,15 +404,21 @@ cmd_restore() {
     if printf '%s\n' "${parsed}" | grep -Fxq -- "$(printf 'TAINT\t%s' "${p}")"; then
       echo "ASK ${p} 記録の基準を信頼できない（記録の前に利用者が触った）。差分を示して判断を仰ぐ"; asks=$((asks + 1)); continue
     fi
-    if ! ancestors_ok "${p}"; then echo "ASK ${p} 祖先ディレクトリが symlink 等"; asks=$((asks + 1)); continue; fi
-    st="$(current_state "${p}")"
+    st="$(file_state "${p}")"    # 祖先の検証を最初に行う入口（不適なら ANCESTOR。ここより前にパスを stat・open しない）
     if [[ "${st}" != "${h}" ]]; then
       case "${st}" in
+        ANCESTOR) echo "ASK ${p} 祖先ディレクトリが symlink 等（リンク先は読まない）" ;;
         MISSING) echo "ASK ${p} 消えている（利用者が削除した可能性）" ;;
         SYMLINK) echo "ASK ${p} symlink に変わっている" ;;
         SPECIAL) echo "ASK ${p} 通常ファイルでなくなっている" ;;
         *)       echo "ASK ${p} 書き込み後に内容が変わっている（利用者の編集の可能性）。差分を示して判断を仰ぐ" ;;
       esac
+      asks=$((asks + 1)); continue
+    fi
+    index_vs_head "${p}"; he=$?
+    if [[ ${he} -ne 0 ]]; then
+      if [[ ${he} -eq 1 ]]; then echo "ASK ${p} index に HEAD と違う内容がある（利用者がステージした）。復元は index も戻すため自動では戻さない"
+      else echo "ASK ${p} index の状態を判定できない（マージ中・skip-worktree・assume-unchanged・git のエラー）"; fi
       asks=$((asks + 1)); continue
     fi
     head_entry "${p}"; he=$?
@@ -361,7 +435,7 @@ cmd_restore() {
         asks=$((asks + 1)); continue
       fi
       if [[ -n "${dry}" ]]; then echo "WOULD-RESTORE ${p}"
-      elif g restore --source=HEAD --staged --worktree -- "${p}" 2>/dev/null; then echo "RESTORED ${p}"
+      elif g restore --source=HEAD --worktree -- "${p}" 2>/dev/null; then echo "RESTORED ${p}"
       else echo "ASK ${p} git restore に失敗した"; asks=$((asks + 1)); fi
     else
       if [[ -n "${dry}" ]]; then echo "WOULD-DELETE ${p}"

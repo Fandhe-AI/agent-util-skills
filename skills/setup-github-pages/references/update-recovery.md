@@ -28,7 +28,11 @@
 - **TAINT（基準を信頼できない印）**: 同じパスに 2 回目の記録が来ると、その間に利用者が触った内容が基準へ取り込まれ得る（例: exit 3 → 利用者が `pages.yml` の区間へ追記 → `--update` で再実行 → 追記込みの内容が基準になる）。そこで scaffold・ビルドの直前に `guard` を呼び、現在の内容が HEAD とも前回の記録とも違うパスに印を付ける。印の付いたパスは、以後ずっと自動では戻さない（`ASK`）。記録の直前に作業ツリーの内容が HEAD か前回の記録と一致していれば、利用者が触っていないと判定できる
 - **許可リスト**: 記録・復元・削除してよいのは、所有ファイル・マニフェスト・`.gitignore`・`THIRD-PARTY-LICENSES` だけ。一覧は `scaffold.py --list-paths` が唯一の定義元（スクリプトはそれを呼ぶ）。利用者編集ファイル（`brand.toml`・`nav.toml`・`index.md`・`rust-toolchain.toml`）は `created`（`missing` の再作成）に含まれても記録しないので、自動では削除せず、利用者に確認する
 - **ハッシュ**: `git hash-object --no-filters`。選んだ理由: macOS と Linux で同じ結果になる（`sha256sum` と `shasum` の違いに依存しない）、`core.autocrlf`・属性のフィルタを通さないので設定で結果が変わらない、ファイルを書き込まない。symlink は辿らず（`-L` を先に判定）、通常ファイル以外はハッシュしない
-- **パス**: ルートからの相対パスに限り、`..`・絶対パス・末尾の `/`・`.git`（大文字小文字を区別しない）配下・先頭の `-` などを拒否する。祖先ディレクトリが symlink なら（記録時も復旧時も）触らない。すべてクォートして `--` の後に渡す
+- **パス**: ルートからの相対パスに限り、`..`・絶対パス・末尾の `/`・`.git`（大文字小文字を区別しない）配下・先頭の `-` などを拒否する。すべてクォートして `--` の後に渡す
+- **ファイルに触れる入口は 1 つ（`file_state`）**: パスの中身・種別を見る処理（`-L`・`-e`・`-f`・`git hash-object`）は `file_state` の中だけに置き、その最初に祖先の検証（祖先ディレクトリが symlink・ファイルでない、実体がルートの下）を行う。不適なら、ファイルを開かず stat もせずに `ANCESTOR` を返し、`guard` では TAINT、`status` では `ancestor`、`restore` では `ASK` として扱う（記録後に親ディレクトリがリポジトリ外への symlink に差し替わっても、リンク先を読まない）。`rm`・`git restore` は、`file_state` が記録と一致したパスにだけ、`cmd_restore` の中で行う。この構造は `UpdateSnapshotEntrypointTest` がソースの検査で固定している（`hash-object` を呼ぶのは `file_state` の中だけ、など）
+- **index の照合**: `git restore --staged --worktree` は index も HEAD に戻すため、記録後に利用者が別の内容をステージし、作業ツリーだけを記録時の内容に保つと、ステージ済みの変更が消える。そこで復元・削除の前に index も照合する。U0 で作業ツリーはクリーンで、scaffold はステージしないので、スキルが触っただけなら index は HEAD と同じはず、という前提に立ち、**そのパスの index が HEAD と違えば `ASK`**にする（HEAD に無いパスで index にエントリがある = ステージ済みの追加、HEAD にあるのに index に無い = ステージ済みの削除、blob またはモードが違う）。記録時の index を SNAP に残す方式にしなかったのは、基準を「HEAD」1 つに保ち、SNAP の形式と TAINT の仕組みを増やさないため。stage が 0 以外（マージ中）・skip-worktree・assume-unchanged（`git ls-files -v` の印）・git のエラー・想定外の出力は判定不能で `ASK`（fail-closed）。読むのは `git ls-files -s` / `-v` と `git ls-tree` だけ（外部コマンドを起動しない）。復元は作業ツリーだけ（`git restore --source=HEAD --worktree`）で、index は書き換えない。`guard` も、ステージ済み（または判定不能）のパスに TAINT を付ける
+- **submodule**: 祖先に gitlink がある（`tools` が submodule など）と、その下のパスは親の HEAD から見えないだけで「無い」わけではない。無いと誤判定して削除しないよう、判定不能（`ASK`）にする
+- **環境変数**: `GIT_DIR`・`GIT_WORK_TREE`・`GIT_INDEX_FILE`・`GIT_OBJECT_DIRECTORY`・`GIT_ALTERNATE_OBJECT_DIRECTORIES`・`GIT_COMMON_DIR`・`GIT_NAMESPACE` は起動時に unset する（別のリポジトリの HEAD・index を読む・書くことを防ぐ）
 - **HEAD での存在判定**: `git ls-tree HEAD -- <path>` の終了コードと出力で判定する。終了コード 0 で出力が空 = HEAD に無いと確定（削除してよい）、出力あり = HEAD に通常ファイルとして在る（復元する）、終了コード非 0・通常ファイル以外 = 判定不能（`ASK`）。`git ls-files --error-unmatch` は使わない（致命的エラー・index から外された場合も「未追跡」と誤判定し、HEAD にあるファイルを削除し得る）
 - **対象リポジトリの設定**: git は `-c core.fsmonitor=false -c core.hooksPath=/dev/null` を付けて実行する。次の 2 段で外部コマンドの実行を防ぐ。
   - **ローカル設定の検査（`ASK-ALL`）**: `restore`（`--dry-run` を含む）は、リポジトリのローカル設定に `filter.*.(smudge|clean|process)`・`core.fsmonitor`・`core.hooksPath`・`diff.*.(textconv|command)`・`include.path` / `includeIf.*.path` が 1 件でもあれば、何も戻さず `ASK-ALL` で止める
@@ -56,9 +60,9 @@ bash "${SKILL_DIR}/scripts/update-snapshot.sh" restore "${SNAP}"            # �
 | 出力 | 意味 | 扱い |
 |------|------|------|
 | `WOULD-RESTORE` / `WOULD-DELETE <path>`（`--dry-run`） | 戻す・消す予定 | 利用者に示す |
-| `RESTORED <path>` | 記録と一致し、HEAD に通常ファイルとして在ったので、HEAD へ復元した | 済み |
+| `RESTORED <path>` | 記録と一致し、index が HEAD と同じで、HEAD に通常ファイルとして在ったので、作業ツリーを HEAD の内容へ復元した（index は変更しない） | 済み |
 | `DELETED <path>` | 記録と一致し、HEAD に無いと確定できたので、削除した | 済み |
-| `ASK <path> …` | 記録と一致しない・TAINT・消えた・symlink に変わった・祖先が symlink・HEAD での状態を判定できない・filter 属性が指定されている（または判定できない）・復元や削除に失敗した。**何もしていない** | 利用者に差分を示して個別に判断を仰ぐ（戻す・残す・手動で統合）。差分は下の `git diff`（外部 diff・textconv を使わず、行数と制御文字を絞る）や `scaffold.py --show-diff` で見せる。symlink・特殊ファイルは内容を読まない |
+| `ASK <path> …` | 記録と一致しない・TAINT・消えた・symlink に変わった・祖先が symlink・index が HEAD と違う（ステージ済み）または index の状態を判定できない・HEAD での状態を判定できない・filter 属性が指定されている（または判定できない）・復元や削除に失敗した。**何もしていない** | 利用者に差分を示して個別に判断を仰ぐ（戻す・残す・手動で統合）。差分は下の `git diff`（外部 diff・textconv を使わず、行数と制御文字を絞る）や `scaffold.py --show-diff` で見せる。symlink・特殊ファイルは内容を読まない |
 | `ASK-ALL …`（stderr） | `${SNAP}` が無い・空・読めない、HEAD が動いた（更新用ブランチでコミットした等）、HEAD を解決できない、ローカル設定に外部コマンドを実行し得るキーがある。**何も戻していない** | すべて利用者に確認する |
 
 差分の見せ方（`ASK` のパスごと）:
