@@ -4,7 +4,7 @@
 //!
 //! 対象リポジトリの `tools/docs-site-gen/` に置かれ、`build-local.sh`（ローカル・CI 共通）から
 //! 呼ばれる。`<root>/site/nav.toml` と Markdown を読み、静的サイトを `<out>` へ書き出す。
-//! 生成後の差し替え（ブランド表示）は別工程の `rebrand_site.py` が担う。本 wrapper はビルドのみ。
+//! ブランド表示は `nav.toml` の `[site]` で渡す。本 wrapper はビルドのみ。
 //!
 //! # なぜ stock の `docs-site` バイナリを使わないか
 //!

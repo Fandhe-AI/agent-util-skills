@@ -33,8 +33,6 @@
 | `[[menu]]` | `title`, `index_path`, `source` | 複数セクションを束ねるヘッダーメニューと集約ページ。`index_path` はどの `page.path` とも衝突不可。`[[menu]]` の後に `[[section.*]]` を続けるには新しい `[[section]]` が必要 |
 | `[[menu.item]]` | `section`, `description` | `section` は束ねる既存セクションの `index_path`、`description` は 1 行（空・改行不可）。メンバーは 1 件以上で、直前の `[[menu]]` または `[[menu.item]]` の直後にだけ置ける |
 
-`title`（セクション・ページ・メニュー）に上流名 `fandhe-frontend` を独立した語として含められない（ヘッダー・サイドバー・フッターに出るため、生成後の `verify_attribution` の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可。`check_site.py` が事前に拒否する。#51 で残存検査とともに撤去予定）。
-
 `path` は `/` 始まり・`/` 終わりで、セグメントは英数字・`-`・`_` のみ。サイト全体で一意。
 `source` は相対パスで、`..`・絶対パス・`\` は禁止、ファイルが実在すること。リポジトリ内のどこにあってもよい
 （`docs/guide/x.md` や `README.md` も指定できる。ただし `pages.yml` の利用者区間（`sgp:user-paths:begin` と `end` の間）に `      - "docs/**"` の形で監視パスも追加する。区間の外を編集すると、スキルの更新が競合する）。
@@ -71,7 +69,7 @@ to = "/usage/"
 
 `from` は既存の `page.path` と衝突不可、`to` は実在するページであること。生成物は
 `meta refresh` + `rel=canonical` + `noindex` のみの最小ページ（ヘッダー・フッターを持たない）で、
-`rebrand_site.py` はこれを redirect ページとして許容する。1 件の生成と rebrand 通過を実測済み。
+1 件の生成を実測済み。
 
 ## Markdown サブセット
 

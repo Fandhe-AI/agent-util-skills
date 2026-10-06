@@ -66,8 +66,8 @@ esac
 # python3 は、`-c` なら cwd、スクリプト起動ならそのスクリプトのディレクトリが sys.path の先頭に入る。対象
 # リポジトリ（信頼できない場合がある）の .py（argparse.py 等の標準モジュール名）が標準ライブラリより先に
 # import されないよう、すべての起動に `-I`（隔離モード: cwd・スクリプトのディレクトリ・PYTHONPATH・user site を
-# 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。check_site.py /
-# rebrand_site.py も自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
+# 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。
+# check_site.py も自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
 canon() { python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 # 親ディレクトリだけを実体化し、末端の名前はそのまま残す。末端が symlink かの判定（-L）を
@@ -392,10 +392,15 @@ fi
 # 出力する。これは MIT / Apache-2.0 の通知義務を担う部分のため、上流の DOM が変わっても黙って
 # 消えないよう、文言とリンクが 1 つの連続した並びとして存在することを見る（FF_REV 更新時に実出力で再確認する）。
 # 読むだけで書かない。エラーには dist からの相対パスだけを出し、ファイルの内容は出さない。
-# 第 2 引数は利用者の nav.toml（`[site]` の文言に含まれる上流名を許容するために読む。省略時は許容なし）。
+# 帰属表記の外に残る上流名・上流 URL（fandhe-frontend）は意図的に検査しない（references/maintenance.md の決定 3・決定 4、#47 の決定）。
+# 理由: 上流は `[site]` の値で表示を組み立て、必須キーは check_site.py が事前に強制するため、上流の既定ブランドは
+# 出力に出ない。一方、利用者が `[site]` や nav の title・repository_url・version_badge に上流名を含めるのは正当で、
+# 生成器はそれらを title・サイドバー・リンク等の多数の箇所へ出す。残存検査は、その正当な出力をビルド最終段で
+# 落とすか、許容区間を広げて検査が形骸化するかのどちらかになる。上流の DOM 変更（既定ブランドの混入等）の検知は、
+# FF_REV 更新時の maintenance.md の手順（実出力の確認）で担う。
 # 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
 verify_attribution() {
-  local dist="$1" nav="${2:-}" up pat list links f rel rc n=0 has_chrome
+  local dist="$1" up pat list links f rel rc n=0 has_chrome
   up='https://github\.com/Fandhe-AI/fandhe-frontend'
   pat="Built with <a [^>]*href=\"${up}\"[^>]*>fandhe-frontend docs-site</a> \\(<a [^>]*href=\"${up}/blob/main/LICENSE-MIT\"[^>]*>MIT</a> OR <a [^>]*href=\"${up}/blob/main/LICENSE-APACHE\"[^>]*>Apache-2\\.0</a>\\)"
 
@@ -413,7 +418,7 @@ verify_attribution() {
   # assets/ は利用者の静的ファイルなので対象外
   list="$(find "${dist}" -path "${dist}/assets" -prune -o -type f -name '*.html' -print)" \
     || { echo "エラー: dist の走査（HTML 列挙）に失敗した" >&2; return 1; }
-  # 読み取り前にファイルごと 8 MiB・合計 256 MiB の上限を見る（旧 rebrand_site.py と同値）。超過は検査を中止する
+  # 読み取り前にファイルごと 8 MiB・合計 256 MiB の上限を見る（廃止した置換スクリプトと同値）。超過は検査を中止する
   rc=0
   printf '%s\n' "${list}" | python3 -I -B -c '
 import os, sys
@@ -468,12 +473,12 @@ sys.exit(0 if re.fullmatch(shape, t) else 1)
     # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
     # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
     rc=0
-    SGP_PAT="${pat}" SGP_NAV="${nav}" SGP_SCRIPTS="${SCRIPT_DIR}" python3 -I -B -c '
-import html, os, re, sys
+    SGP_PAT="${pat}" SGP_SCRIPTS="${SCRIPT_DIR}" python3 -I -B -c '
+import os, re, sys
 from pathlib import Path
 # 末尾に足す: 先頭だと対象リポジトリ由来の同名ファイルより先にスキル側が読まれるが、標準ライブラリを隠せない位置に置く
 sys.path.append(os.environ["SGP_SCRIPTS"])
-from _common import RESIDUAL_RE, parse_nav, read_bounded_text
+from _common import read_bounded_text
 # 読み取り上限は上の事前検査（ファイルごと 8 MiB）と同値。超過・UTF-8 不正は検査自体の失敗（exit 3）
 try:
     t = read_bounded_text(Path(sys.argv[1]), 8 * 1024 * 1024)
@@ -482,38 +487,7 @@ except (OSError, ValueError):
 foots = re.findall(r"<footer class=\"docs-footer\">.*?</footer>", t, re.S)
 if len(foots) != 1:
     sys.exit(1)
-if len(re.findall(os.environ["SGP_PAT"], foots[0])) != 1:
-    sys.exit(1)
-# 生成 HTML 全体（ヘッダー・サイドバー・本文・フッター）に、帰属表記以外で上流名が残っていないことを見る。
-# 利用者が [site] に書いた文言（上流名を含む正当な値）は、ヘッダー・フッター・<title> の中に限り許容する。
-# nav.toml は check_site.py / 生成器と同じ解釈（parse_nav: 全 [site] を合算・行末 CR 除去）で読む。
-# 読めない・解釈できない場合は許容なしとして扱う（残存側へ倒す。fail-closed）。
-user = []
-try:
-    navp = Path(os.environ.get("SGP_NAV", ""))
-    if os.path.islink(navp):
-        raise OSError("symlink")
-    for tb in parse_nav(read_bounded_text(navp, 1024 * 1024)):
-        if tb.header == "site":
-            user.extend(tb.values.values())
-except Exception:
-    user = []
-forms = []
-for v in sorted({x for x in user if RESIDUAL_RE.search(x)}, key=len, reverse=True):
-    forms.extend((v, html.escape(v), html.escape(v, quote=False)))
-def strip_user(seg):
-    for form in forms:
-        seg = seg.replace(form, "")
-    return seg
-# 除外は「出力されると確認できる箇所」に限る。帰属表記はフッター内の確認済みの 1 件だけを除き、
-# 利用者の [site] 値はヘッダー・フッター・<title> の中だけで許容する（本文・サイドバー等の同じ文字列は残して検査する）。
-def clean(m):
-    seg = m.group(0)
-    if seg.startswith("<footer"):
-        seg = re.sub(os.environ["SGP_PAT"], "", seg, count=1)
-    return strip_user(seg)
-resid = re.sub(r"<header class=\"docs-header\">.*?</header>|<footer class=\"docs-footer\">.*?</footer>|<title>.*?</title>", clean, t, flags=re.S)
-sys.exit(2 if RESIDUAL_RE.search(resid) else 0)
+sys.exit(0 if len(re.findall(os.environ["SGP_PAT"], foots[0])) == 1 else 1)
 ' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
       echo "エラー: ${rel} のフッター（docs-footer）に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）がちょうど 1 件ない" >&2
@@ -521,10 +495,6 @@ sys.exit(2 if RESIDUAL_RE.search(resid) else 0)
     fi
     if [[ "${rc}" -eq 3 ]]; then
       echo "エラー: ${rel} を上限内の UTF-8 として読めない（検査を中止）" >&2
-      return 1
-    fi
-    if [[ "${rc}" -eq 2 ]]; then
-      echo "エラー: ${rel} に帰属表記以外の上流名（fandhe-frontend・上流 URL）が残っている（[site] の値以外）" >&2
       return 1
     fi
     [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査が失敗した（exit ${rc}）" >&2; return 1; }
@@ -543,6 +513,6 @@ step "verify"
 for f in index.html 404.html assets/site.css assets/site.js assets/search-index.json; do
   test -s "${OUT}/${f}" || { echo "エラー: ${f} が無い、または空" >&2; exit 1; }
 done
-verify_attribution "${OUT}" "${ROOT}/site/nav.toml" || exit 1
+verify_attribution "${OUT}" || exit 1
 
 step "完了: ${OUT}"

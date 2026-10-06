@@ -6,7 +6,7 @@
 `build-local.sh`（ローカルと CI 共通）の最初の工程として呼ばれ、生成器（fandhe-frontend
 docs-site）に渡す前に「生成器は通すが公開物として壊れる」
 入力を止める。生成器自身の検査（リンク検査・nav スキーマ検査）と重複させず、生成器が
-検知できない次の 4 点を担う（`[site]` のブランド値の検証は上流の規則と揃えた `_common.check_site_values`）。
+検知できない次の 3 点を担う（`[site]` のブランド値の検証は上流の規則と揃えた `_common.check_site_values`）。
 
 1. `[site]` のブランド値と base_path: 必須 6 キーの欠落（未指定だと上流の既定表示が公開される）と
    上流が拒否する値を止める。GitHub Pages のプロジェクトサイトは `/<repo>/` 配下で配信されるため、
@@ -14,8 +14,6 @@ docs-site）に渡す前に「生成器は通すが公開物として壊れる�
 2. 予約アセット名: `site/assets/` に生成物と同名のファイルがあると生成器がビルドエラーにする。
    エラー文が分かりにくいため事前に具体名で報告する。
 3. 未置換プレースホルダー（`__SGP_*__`）の残存。
-4. nav の title に上流名 `fandhe-frontend` が含まれる（`build-local.sh` の `verify_attribution` が残存として
-   拒否するため事前に止める。#51 で残存検査とともに撤去予定の暫定規則）。
 
 nav の path が `/themes/` 等の上流ショーケースの接頭辞で始まっても検査しない。`build-local.sh` は
 常に `--no-page-sections` を付けて生成し、上流がその指定でショーケースの注入を止めるため。
@@ -40,7 +38,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     PLACEHOLDER_RE, SubsetError, check_site_values, parse_nav, parse_repository_url, pages_base_path,
-    read_bounded_text, resolves_inside, sanitize, title_problem,
+    read_bounded_text, resolves_inside, sanitize,
 )
 
 # build.rs の RESERVED_ASSET_NAMES と同一（FF_REV 更新時に再確認する。SKILL.md 参照）。
@@ -121,13 +119,6 @@ def check(root: Path) -> tuple[list[str], list[str]]:
 
     # nav が参照する Markdown（プレースホルダー検査と警告の対象）
     sources = [t.values["source"] for t in tables if "source" in t.values]
-
-    # title の上流名（`verify_attribution` が残存として拒否するため事前に止める。撤去は #51）
-    for t in tables:
-        title = t.values.get("title")
-        why = title_problem(title) if title is not None else None
-        if why:
-            errors.append(f"site/nav.toml line {t.line}: {why}")
 
     # 2. 予約アセット名
     assets = root / "site" / "assets"

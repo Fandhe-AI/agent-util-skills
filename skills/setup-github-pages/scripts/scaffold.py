@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""対象リポジトリへ docs サイト一式（wrapper・後処理・workflow・初期サイト）を配置・更新する。
+"""対象リポジトリへ docs サイト一式（wrapper・workflow・初期サイト）を配置・更新する。
 
 # 役割・境界
 
@@ -66,7 +66,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, MAX_TEXT_LEN, SITE_BRAND_MAX, SITE_BADGE_MAX, SITE_TEXT_MAX,
     atomic_write_bytes, check_site_values, is_upstream_repo, pages_base_path, resolves_inside, sanitize,
-    title_problem, write_target_problem, valid_owner, valid_repo_name, parse_subset, read_bounded_text,
+    write_target_problem, valid_owner, valid_repo_name, parse_subset, read_bounded_text,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -85,7 +85,6 @@ FILES = [
     ("templates/docs-site-gen/FF_REV", "tools/docs-site-gen/FF_REV", False, OWNED),
     ("templates/brand.toml", "tools/docs-site-gen/brand.toml", False, USER),
     ("scripts/build-local.sh", "tools/docs-site-gen/build-local.sh", True, OWNED),
-    ("scripts/rebrand_site.py", "tools/docs-site-gen/rebrand_site.py", False, OWNED),
     ("scripts/check_site.py", "tools/docs-site-gen/check_site.py", False, OWNED),
     ("scripts/_common.py", "tools/docs-site-gen/_common.py", False, OWNED),
     ("templates/pages.yml", PAGES_REL, False, OWNED),
@@ -97,7 +96,7 @@ FILES = [
 # スキル側で廃止された所有ファイル（配置先の相対パス）。廃止の判定は、対象リポジトリのマニフェストではなく
 # このスキル側の固定リストだけで行う（マニフェストは信頼しない入力で、任意のパスを「廃止された所有ファイル」
 # として指名させると、利用者に無関係なファイルの削除を促せてしまうため）。廃止したら、ここへ追加する。
-DEPRECATED_OWNED: tuple[str, ...] = ()
+DEPRECATED_OWNED: tuple[str, ...] = ("tools/docs-site-gen/rebrand_site.py",)
 
 # 終了コード: 0 成功 / 2 入力不正・書き込み先が不適 / 3 競合（OWNED の不一致）/ 4 配置後の check_site 失敗
 EXIT_CONFLICT, EXIT_CHECK_FAILED = 3, 4
@@ -383,6 +382,8 @@ _GEN_REL = "tools/docs-site-gen/"
 def known_generator_names() -> set[str]:
     """`tools/docs-site-gen/` 直下にあってよい名前（スキルの配置物と、ビルドで生じるもの）。"""
     names = {Path(dst).name for _, dst, _, _ in FILES if dst.startswith(_GEN_REL) and "/" not in dst[len(_GEN_REL):]}
+    # 廃止済みの所有ファイルは、残っていても「スキルが配置していない」警告にしない（削除候補として別に案内する）
+    names |= {Path(d).name for d in DEPRECATED_OWNED if d.startswith(_GEN_REL) and "/" not in d[len(_GEN_REL):]}
     return names | {Path(MANIFEST_REL).name, "src", "target", "Cargo.lock", "THIRD-PARTY-LICENSES"}
 
 
@@ -611,7 +612,7 @@ def analyze_pages(cur: str, rendered: str) -> dict:
             "norm": "\n".join(lines[:b[0]] + [CANON_BEGIN, CANON_END] + lines[e[0] + 1:])}
 
 
-# tools/docs-site-gen/ 直下に存在してよい名前（許可リスト）。スキルが配置するもの（FILES の basename）・マニフェスト・
+# tools/docs-site-gen/ 直下に存在してよい名前（許可リスト）。スキルが配置するもの（FILES の basename）・廃止済みの所有ファイル・マニフェスト・
 # cargo が作る `target` と `Cargo.lock`・wrapper の `src`・build-local.sh が（--write-third-party で）作る
 # `THIRD-PARTY-LICENSES`（実際は対象リポジトリ直下だが、置かれても無害な既知の名前として含める）。
 # build-local.sh は python を `-B`（__pycache__ を作らない）で起動するため、`__pycache__` は既知にしない
@@ -857,9 +858,6 @@ def main(argv: list[str] | None = None) -> int:
         title = None
         if full:
             title = validate_text("title", args.title, required=True)
-            why = title_problem(title)
-            if why:
-                raise ValueError(f"--{why}")
             if args.brand is None and len(title) > SITE_BRAND_MAX:
                 raise ValueError(f"--title が {SITE_BRAND_MAX} 文字を超える。ブランド名は {SITE_BRAND_MAX} 文字以内のため --brand を明示する")
             brand = validate_text("brand", args.brand if args.brand is not None else title, required=True,

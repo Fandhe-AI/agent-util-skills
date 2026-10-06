@@ -261,12 +261,12 @@ test('build-local.sh は python3 を常に隔離モード（-I -B）で起動す
   // canon・canon_leaf・check_site.py・tomllib 検査の 4 か所（rebrand の 2 か所は #50 で無くなった）
   assert.ok(py.length >= 4, `python3 の呼び出しが 4 箇所に満たない: ${py.length}`)
   for (const l of py) assert.match(l, /python3 -I -B /, `-I -B が無い: ${l.trim()}`)
-  // ブランド設定は nav.toml の [site] へ移った。後処理置換（rebrand_site.py）と brand.toml はビルドで使わない
+  // ブランド設定は nav.toml の [site] へ移った。後処理置換と brand.toml はビルドで使わない（rebrand_site.py は #51 で削除済み）
   const joined = code.join('\n')
   assert.doesNotMatch(joined, /rebrand_site\.py/)
   assert.doesNotMatch(joined, /brand\.toml/)
   // 起動スクリプトのディレクトリを自分で sys.path の末尾へ足す（先頭ではない）。標準モジュール名の影を避ける
-  for (const f of ['check_site.py', 'rebrand_site.py', 'scaffold.py']) {
+  for (const f of ['check_site.py', 'scaffold.py']) {
     const src = read(`scripts/${f}`)
     assert.match(src, /sys\.path\.append\(/)
     assert.doesNotMatch(src, /sys\.path\.insert\(0/)

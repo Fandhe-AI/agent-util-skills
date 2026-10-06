@@ -24,11 +24,11 @@ indent_size = unset
 trim_trailing_whitespace = false
 indent_size = unset
 
-# setup-github-pages の rebrand 回帰テスト用 fixture は、docs-site-gen が出力した HTML・JSON を
+# setup-github-pages の回帰テスト用 fixture は、docs-site-gen が出力した HTML・JSON を
 # バイト一致で保持する（生成器の実出力でなければ上流の DOM 構造ずれを検知できない）。
 # 生成器は末尾改行を出力しないため、final newline を要求すると fixture を改変することになる。
 # 改行コード（LF）と文字コードの検査は維持する
-[skills/setup-github-pages/tests/fixtures/{raw,site-keys}/**]
+[skills/setup-github-pages/tests/fixtures/{redirect,site-keys}/**]
 insert_final_newline = unset
 trim_trailing_whitespace = unset
 indent_size = unset
