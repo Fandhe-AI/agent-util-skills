@@ -66,7 +66,8 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, MAX_TEXT_LEN, SITE_BRAND_MAX, SITE_BADGE_MAX, SITE_TEXT_MAX,
     atomic_write_bytes, check_site_values, is_upstream_repo, pages_base_path, resolves_inside, sanitize,
-    write_target_problem, valid_owner, valid_repo_name, parse_subset, read_bounded_text,
+    write_target_problem, valid_owner, valid_repo_name, parse_subset, parse_nav, site_value_problem,
+    SITE_REQUIRED_KEYS,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -237,40 +238,154 @@ _LEGACY_BRAND_MAP = {"brand": "brand", "repository": "repository_url", "tagline"
                      "favicon_color": "brand_color"}
 
 
+LEGACY_BRAND_REL = "tools/docs-site-gen/brand.toml"
+# 旧 tagline が空だったときに案へ置く、検証を必ず通らない目印。そのまま貼っても check_site がプレースホルダー残存で
+# 止めるため、既定文言が黙って公開されない（fail-closed）。「要入力」のように検証を通る文字列は使わない。
+TAGLINE_PLACEHOLDER = "__SGP_TAGLINE__"
+TAGLINE_NEEDS_INPUT_LINE = (f'tagline = "{TAGLINE_PLACEHOLDER}"  # 要入力: サイトの説明を 1 行。旧 brand.toml の空 tagline'
+                            "（行ごと削除していた旧挙動）は廃止。決めるまで check_site が止める")
+
+
+def _read_nav_site(root_real: Path) -> dict[str, str]:
+    """現在の nav.toml の `[site]`（読めなければ空）。移行案との突き合わせ専用で、検証の判定には使わない。"""
+    try:
+        tables = parse_nav(read_capped(root_real / "site" / "nav.toml", 1024 * 1024).decode("utf-8"))
+    except (OSError, OverflowError, UnicodeDecodeError, ValueError):
+        return {}
+    values: dict[str, str] = {}
+    for t in tables:
+        if t.header == "site":
+            values.update(t.values)
+    return values
+
+
 def legacy_brand_site_proposal(root_real: Path) -> dict | None:
     """旧 `tools/docs-site-gen/brand.toml` から nav.toml `[site]` への移行案を作る（読むだけ。何も書かない・消さない）。
 
-    brand.toml が通常ファイルとして無い・読めない・形式が違うときは None。案は check_site と同じ検証器を通し、
-    通らないキーは名前だけ `problems` に出す（値は載せない）。通ったときだけ `block` に追記用の文面を入れる。block が持つのは旧 brand.toml 由来のキーだけで、nav.toml の既存 `[site]` の他のキー（title・base_path 等）は含まない。呼び出し側は丸ごと置き換えず、キー単位で追加・更新する。
+    役割: 更新モードの main が分類フェーズで 1 回呼び、結果を JSON の `site_migration` と人間向け出力へ流す。
+    brand.toml が無ければ None。あれば必ず dict を返し、`status` で状態を伝える（読めない・不正でも黙って無視しない）。
+    読み取りは scaffold の入口（read_capped: _ROOT_GUARD・O_NOFOLLOW・通常ファイルのみ・上限 64 KiB）を通し、
+    解析は既存の TOML 部分集合パーサを使う。案の値は check_site と同じ検証器を通ったものだけで、problems には
+    キー名と理由だけを載せる（旧値・ファイルの断片は載せない）。block が持つのは `[site]` へ**追加すべき**キーだけ
+    （nav.toml に既にあるキーは含めない）。呼び出し側は丸ごと置き換えず、キー単位で追加する。`applied` は常に False。
     """
-    path = root_real / "tools" / "docs-site-gen" / "brand.toml"
+    path = root_real / LEGACY_BRAND_REL
+    if not os.path.lexists(path):
+        return None
+    res: dict = {"source": LEGACY_BRAND_REL, "status": "unreadable", "entries": [], "needs_input": [],
+                 "block": None, "problems": [], "applied": False}
+
+    def unreadable(why: str) -> dict:
+        res["problems"] = [f"旧 brand.toml を読めない: {why}"]
+        return res
+
+    if not resolves_inside(root_real, path):
+        return unreadable("対象リポジトリの外（または .git 配下）へ解決される")
     try:
-        if path.is_symlink() or not path.is_file() or not resolves_inside(root_real, path):
-            return None
-        tables = parse_subset(read_bounded_text(path, 64 * 1024), {"brand"})
-    except (OSError, ValueError):
-        return None
+        text = read_capped(path, 64 * 1024).decode("utf-8")
+    except OverflowError:
+        return unreadable("64 KiB を超える")
+    except UnicodeDecodeError:
+        return unreadable("UTF-8 ではない")
+    except OSError:
+        return unreadable("シンボリックリンク・通常ファイルでない、または開けない")
+    try:
+        tables = parse_subset(text, {"brand"})
+    except ValueError:
+        return unreadable("TOML サブセットの構文違反")
     if len(tables) != 1:
-        return None
+        return unreadable("[brand] がちょうど 1 つではない")
     old = tables[0].values
+    nav_site = _read_nav_site(root_real)
+
     site = {_LEGACY_BRAND_MAP[k]: v for k, v in old.items() if k in _LEGACY_BRAND_MAP}
     site.setdefault("version_badge", "")
     # 旧設定で任意だったキーの既定値を補う（nav.toml では brand_mark が必須）。旧 favicon_letter が無ければ
-    # ブランド名の最初の ASCII 英数字（大文字化）を使う。導出できなければ検証側が不足として案内する
+    # ブランド名の最初の ASCII 英数字（大文字化）を使う。導出できなければ不足として案内する。tagline の既定値は補わない
     if "brand_mark" not in site:
         first = next((c for c in str(site.get("brand", "")) if c.isascii() and c.isalnum()), "")
         if first:
             site["brand_mark"] = first.upper()
-    unknown = sorted(set(old) - set(_LEGACY_BRAND_MAP))
-    if "tagline" not in site or not site["tagline"].strip():
-        site.pop("tagline", None)
-        return {"block": None, "problems": ["tagline: 旧 brand.toml に説明文が無い（サイトの説明を 1 行決めて追記する）"]
-                + [f"未知のキー {sanitize(k, 60)}" for k in unknown]}
-    problems = check_site_values(site)
-    if problems or unknown:
-        return {"block": None, "problems": [sanitize(x) for x in problems] + [f"未知のキー {sanitize(k, 60)}" for k in unknown]}
-    lines = ["[site]"] + [f'{k} = "{toml_escape(v)}"' for k, v in site.items()]
-    return {"block": "\n".join(lines), "problems": []}
+    tagline_blank = not str(site.get("tagline", "")).strip()
+    tagline_needed = tagline_blank and "tagline" not in nav_site
+    reverse = {v: k for k, v in _LEGACY_BRAND_MAP.items()}
+    problems: list[str] = [f"未知のキー {sanitize(k, 60)}" for k in sorted(set(old) - set(_LEGACY_BRAND_MAP))]
+    entries: list[dict] = []
+    for key in (*SITE_REQUIRED_KEYS, "lang", "brand_color"):
+        if key == "tagline" and tagline_blank:
+            if tagline_needed:
+                entries.append({"key": key, "from": "tagline", "state": "needs_input", "value": None})
+            continue
+        if key not in site:
+            if key in SITE_REQUIRED_KEYS and key not in nav_site:
+                problems.append(f"[site] の `{key}`: 旧 brand.toml に `{reverse.get(key, key)}` が無く、導出もできない（追記する）")
+                entries.append({"key": key, "from": reverse.get(key, key), "state": "invalid", "value": None})
+            continue
+        why = site_value_problem(key, site[key])
+        if why:
+            problems.append(f"[site] の `{key}`（旧 `{reverse.get(key, key)}`）: {why}")
+            entries.append({"key": key, "from": reverse.get(key, key), "state": "invalid", "value": None})
+            continue
+        state = "add" if key not in nav_site else "same" if nav_site[key] == site[key] else "differs"
+        entries.append({"key": key, "from": reverse.get(key, key), "state": state, "value": site[key]})
+    res["entries"] = entries
+    res["needs_input"] = ["tagline"] if tagline_needed else []
+
+    if not [k for k in SITE_REQUIRED_KEYS if k not in nav_site] and not check_site_values(nav_site):
+        res["status"] = "migrated"   # nav.toml が既に必須キーを満たす。brand.toml は削除候補として案内するだけ
+        res["problems"] = [f"[site] の `{e['key']}`: 旧 brand.toml と値が異なる（nav.toml の値を優先する）"
+                           for e in entries if e["state"] == "differs"]
+        return res
+    if problems:
+        res["status"], res["problems"] = "invalid", problems
+        return res
+    adds = [e for e in entries if e["state"] == "add"]
+    lines = ["[site]"] + [f'{e["key"]} = "{toml_escape(e["value"])}"' for e in adds]
+    if tagline_needed:
+        lines.append(TAGLINE_NEEDS_INPUT_LINE)
+        res["problems"] = ["tagline: 旧 brand.toml の説明文が空。旧挙動（行ごと削除）から変わり、既定値は補わない。"
+                           "サイトの説明を 1 行決めて置き換えるまで check_site が止める"]
+    res["status"] = "needs_input" if tagline_needed else "proposal"
+    res["block"] = "\n".join(lines) if len(lines) > 1 else None
+    return res
+
+
+# 旧構成（wrapper 方式）の生成物。スキル所有ファイルではないため削除候補（deprecated）には含めず、案内だけを出す。
+LEGACY_ARTIFACTS: tuple[tuple[str, str], ...] = (
+    ("_ff", "旧構成で上流を shallow fetch した clone。新構成では使わない。不要なら手動で削除してよい"),
+    ("tools/docs-site-gen/Cargo.lock", "旧 wrapper の lock。新構成では使わない。手動で削除してよい"),
+    ("tools/docs-site-gen/target",
+     "新構成でも target/docs-site-install をインストール先と Actions のキャッシュに使う。削除してよいのは旧 wrapper の"
+     "ビルド成果物（target/debug・target/release など）だけ。丸ごと消すと次回のビルドでネットワーク越しに再インストールされる"),
+)
+
+
+def legacy_artifacts(root_real: Path) -> list[dict]:
+    """旧構成の生成物のうち、対象に残っているもの（固定 3 パスの存在だけを見る。内容は読まない・触れない）。"""
+    found = []
+    for rel, note in LEGACY_ARTIFACTS:
+        p = root_real / rel
+        if resolves_inside(root_real, p.parent) and os.path.lexists(p):
+            found.append({"path": rel, "note": note, "symlink": p.is_symlink()})
+    return found
+
+
+def print_site_migration(sm: dict, *, err: bool) -> None:
+    """移行案を人間向けに出す。1 行ずつ out()（無害化）を通す（複数行を 1 回に渡すと改行が潰れる）。"""
+    status = sm["status"]
+    if status == "migrated":
+        out(f"旧 {sm['source']} は nav.toml の [site] へ移行済み（削除候補。自動削除しない）", err=err)
+    elif status == "unreadable":
+        out(f"旧 {sm['source']} から [site] の移行案を作れない（読めない）。nav.toml の [site] を手で追記する", err=err)
+    elif status == "invalid":
+        out(f"旧 {sm['source']} の値が検証を通らず移行案を作れない。直してから nav.toml の [site] へ追記する:", err=err)
+    else:
+        out(f"旧 {sm['source']} からの [site] 移行案（下のキーだけを nav.toml の既存 [site] へ追加する。"
+            "[site] を丸ごと置き換えない — 既存の title・base_path 等は残す。自動では書き換えない）:", err=err)
+        for line in (sm["block"] or "").split("\n"):
+            out(line, err=err)
+    for p in sm["problems"]:
+        out(f"  - {p}", err=err)
 
 
 def validate_text(name: str, value: str, *, required: bool, max_len: int = MAX_TEXT_LEN) -> str:
@@ -822,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
         "ff_rev": None, "created": [], "updated": [], "same": [], "kept": [], "missing": [],
         "conflicts": [], "deprecated": [], "gitignore_added": [], "manifest_written": False,
         "manifest_recreated": False, "warnings": [], "check": None, "diffs": None, "exit_code": None,
+        "site_migration": None, "legacy_artifacts": [],
     }
 
     def finish(code: int, msg: str | None = None) -> int:
@@ -1172,6 +1288,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- 廃止された所有ファイル（スキル側の固定リストだけで判定。表示のみで自動削除しない）
     deprecated = deprecated_present(args.target, root_real, m_files)
+    # 旧構成からの移行案と生成物の案内（読むだけ。nav.toml・brand.toml・_ff 等へは書かない・消さない）。
+    # 書き込み前の分類で計算するので、どの終了コード（0 / 2 / 3 / 4）の JSON にも載る
+    if mode == "update":
+        summary["site_migration"] = legacy_brand_site_proposal(root_real)
+        summary["legacy_artifacts"] = legacy_artifacts(root_real)
     unknown = [k for k in m_files if k not in {d for _, d, _, kd in FILES if kd == OWNED}
                and k not in DEPRECATED_OWNED and k != MANIFEST_REL]
     if unknown:
@@ -1228,6 +1349,8 @@ def main(argv: list[str] | None = None) -> int:
             out(f"  - {path}（{reason}）", err=True)
         fixable = [p for p, k, _ in conflicts if k not in UNFIXABLE_KINDS]
         manual = [p for p, k, _ in conflicts if k in UNFIXABLE_KINDS]
+        if summary["site_migration"]:
+            print_site_migration(summary["site_migration"], err=True)
         out("  対処: まず --show-diff で差分を確認する（内容を読むのは通常ファイルだけ）。", err=True)
         if fixable:
             out("  別用途・利用者の編集を残すなら手動で統合し、スキルの新版で置き換えてよいなら、同じ引数に --update を付けて"
@@ -1308,6 +1431,12 @@ def main(argv: list[str] | None = None) -> int:
             out("削除候補（スキルで廃止された所有ファイル。自動削除しない。内容を確認して手動で削除する）:")
             for d in deprecated:
                 out(_deprecated_line(d, "  - "))
+        if summary["site_migration"]:
+            print_site_migration(summary["site_migration"], err=bool(errors))
+        if summary["legacy_artifacts"]:
+            out("旧構成の生成物（スキル所有ではない。自動では削除しない）:")
+            for a in summary["legacy_artifacts"]:
+                out(f"  - {a['path']}" + ("（シンボリックリンク）" if a["symlink"] else "") + f": {a['note']}")
         if keep:
             out("注: 保持したファイルの内容（nav.toml 等）は生成予定と一致する保証がない。"
                 "下の check_site で検証する（失敗したら該当ファイルを直す）。")
@@ -1316,16 +1445,6 @@ def main(argv: list[str] | None = None) -> int:
     for e in errors:
         out(f"NG {e}", err=True)
     if errors:
-        # 旧 brand.toml からの移行案（案を出すだけ。nav.toml・brand.toml は書き換えない・削除しない）
-        proposal = legacy_brand_site_proposal(root_real) if any("[site]" in e for e in errors) else None
-        if proposal is not None:
-            summary["site_migration"] = proposal
-            if not args.json:
-                if proposal["block"]:
-                    out("旧 brand.toml からの [site] 移行案（下のキーだけを nav.toml の既存 [site] へ追加・更新する。[site] を丸ごと置き換えない — 既存の title・base_path 等は残す。自動では書き換えない）:", err=True)
-                    out(proposal["block"], err=True)
-                else:
-                    out("旧 brand.toml から [site] を作れない項目: " + "; ".join(proposal["problems"]), err=True)
         return finish(EXIT_CHECK_FAILED, "エラー: 配置後の検証（check_site）に失敗した。上の項目を直してから再実行する")
     if not args.json:
         out("check_site ok")

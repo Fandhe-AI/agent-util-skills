@@ -191,7 +191,7 @@ bash "${SKILL_DIR}/scripts/update-snapshot.sh" record-json "${SNAP}" < "${RESULT
   - **`symlink` / `not_regular` / `unreadable` / `outside_root`**: `--update` では解消しない。手動で通常ファイルへ直す（`outside_root` は親ディレクトリの symlink が対象の外を指しているので、通常のディレクトリへ直す。`path` が `tools/docs-site-gen` / `tools/docs-site-gen/src` の `symlink` は、リンク先の中身を確認し、通常のディレクトリへ置き換える）。直してから再実行する
   - それ以外: 利用者の編集を残したい場合は手動で統合し、置き換えてよいと確認できたときだけ `--update` 付きで再実行する（編集を失わせる。実行前に差分を控える。この再実行の JSON を以降の報告に使う）
   - `pages.yml` の追加の監視パス: **区間のある版**は、利用者区間へ書き足してから再実行する。**旧版（区間なし）**は、`--update` の実行が追加 paths のうち検証を通ったものを自動で利用者区間へ移す（落とした分は `warnings` に出る）
-- **exit 4**: `nav.toml` の `[site]` に必須キー（`brand`・`repository_url`・`tagline`・`copyright`・`version_badge`・`brand_mark`）が無い、`nav.toml` が欠落している等。旧 `brand.toml` が残っていれば、scaffold が `[site]` の移行案（JSON の `site_migration`、人間向け出力は stderr）を出す（案は検証済みの値だけで、`nav.toml`・`brand.toml` は書き換えない・削除しない。通らない項目は名前だけ示す）。内容を利用者と確認して `nav.toml` の既存 `[site]` へキー単位で追加・更新する（案は旧 brand.toml 由来のキーだけで、既存の `title`・`base_path` 等は残す。[site] を丸ごと置き換えない）（`repository`→`repository_url`、`favicon_letter`→`brand_mark`、`favicon_color`→`brand_color` と読み替える）。所有ファイルは書き込み済みである。表示された項目と追記例を利用者と確認して直し、同じコマンドを再実行する（JSON の扱いは上記）
+- **exit 4**: `nav.toml` の `[site]` に必須キー（`brand`・`repository_url`・`tagline`・`copyright`・`version_badge`・`brand_mark`）が無い、`nav.toml` が欠落している等。所有ファイルは書き込み済み。旧 `brand.toml` が残っていれば JSON の `site_migration`（人間向け出力は stderr）に `[site]` の案が出る（`nav.toml`・`brand.toml` は書き換えない・削除しない。`applied` は常に false）。`site_migration.status` で分岐する: `proposal` は案を利用者と確認して `nav.toml` の既存 `[site]` へキー単位で追記する。`needs_input`（旧 `tagline` が空）は利用者にサイトの説明文を確認し、`__SGP_TAGLINE__` の行を置き換える（既定値は補わない）。`invalid`・`unreadable` は `problems` のキーを旧 `brand.toml` で直すか `nav.toml` へ手で追記する。`migrated` は案内のみ。**自動運転（非対話）では反映せず、案と `problems` を「要対応」として報告する**。反映後に同じコマンドを再実行する（JSON の扱いは上記。詳細は [`references/scaffold-reference.md`](references/scaffold-reference.md)）
 - **exit 2**: JSON の `error` を読み、指摘（symlink・適用対象外・`.gitignore` の不備・親パスが通常ファイルなど）を直す。書き込み前の検査で止まった場合は何も書かれていない。書き込みの途中の OS エラーなら、失敗したファイルは未変更か未作成のままで、それ以前に書けた分が JSON の `created` / `updated` に残る（原因を直して同じコマンドを再実行する。書けたファイルは `same`、未着手の更新は自動更新、未作成は新規作成になり収束する）。`error` が一時ファイル（`.<名前>.<乱数>.sgp-tmp`）を消せなかったと伝えたら、内容を確認して手動で削除する（プロセスの強制終了で残ることもある。削除してよい）
 
 `削除候補` が表示された場合は、スキルで廃止されたファイルである。内容を確認し、不要なら利用者の了承を得て手動で削除する（自動では削除しない）。
@@ -209,7 +209,7 @@ bash "${SKILL_DIR}/scripts/update-snapshot.sh" record-json "${SNAP}" < "${RESULT
 Step U1 の JSON をもとに、次を利用者へ報告する。
 
 - `FF_REV` の旧 → 新（`ff_rev.old` / `ff_rev.new`）
-- 更新したファイルと理由（`updated`）、保持したファイル（`kept`）、欠落（`missing`）、競合と解決（`conflicts`）、削除候補（`deprecated`）、警告（`warnings`）
+- 更新したファイルと理由（`updated`）、保持したファイル（`kept`）、欠落（`missing`）、競合と解決（`conflicts`）、削除候補（`deprecated`）、旧構成の生成物の案内（`legacy_artifacts`）、`[site]` 移行案の状態（`site_migration`）、警告（`warnings`）
 - `manifest_recreated` が true なら、旧版（マニフェストなし）からの移行であり、以後は未編集の所有ファイルが自動更新になること
 - ローカルビルドの結果（Step U2 の終了コードと `verify ok`）
 

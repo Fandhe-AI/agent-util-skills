@@ -115,6 +115,8 @@ TOML が壊れる・注入される）ため、値は `scaffold.py` が検証・
 | `created` / `updated` / `same` / `kept` / `missing` | 作成・更新（`path` と `reason`）・一致・保持・欠落 |
 | `conflicts` | `path` / `kind` / `reason` |
 | `deprecated` | 削除候補（`path` と `edited`。`brand.toml` のみ `note` を持つ）。`--detect --json` も、`mode=update` のときに同じキーで返す |
+| `site_migration` | 更新モードで旧 `tools/docs-site-gen/brand.toml` があるときの `[site]` 移行案（無ければ `null`）。`status` は `proposal`（案あり）/ `needs_input`（旧 tagline が空。案の tagline 行は `__SGP_TAGLINE__` の目印で、貼っても check_site が止める）/ `invalid`（旧値が検証を通らない。`problems` にキー名と理由だけ。値は載せない）/ `unreadable`（symlink・64 KiB 超・構文違反等で読めない）/ `migrated`（`nav.toml` が既に必須キーを満たす）。`entries`（`key`・`from`・`state` = add / same / differs / needs_input / invalid・`value`）・`needs_input`・`block`（追加すべきキーだけの文面）・`applied`（**常に false**。scaffold は反映しない） |
+| `legacy_artifacts` | 旧構成の生成物（`_ff`・`tools/docs-site-gen/Cargo.lock`・`tools/docs-site-gen/target`）の案内（`path`・`note`・`symlink`）。スキル所有ではないので `deprecated` には含めず、自動では削除しない。`target` は新構成でも `target/docs-site-install` を使うため丸ごとは消さない |
 | `gitignore_added` | 追記した `.gitignore` の行 |
 | `manifest_written` / `manifest_recreated` | マニフェストを書いたか／無くて再作成したか（旧版からの移行） |
 | `warnings` | 警告（マニフェストの無視・`--branch` の食い違い・想定外ファイル・引き継がなかった paths など） |

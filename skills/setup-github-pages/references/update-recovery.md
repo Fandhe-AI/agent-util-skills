@@ -82,7 +82,9 @@ git diff --no-ext-diff --no-textconv --no-color HEAD -- <path> | head -200 | cat
 git -c core.fsmonitor=false -c core.hooksPath=/dev/null switch "${START_BRANCH}" && git branch -D "${NAME}"     # U0 で控えた値
 ```
 
-復旧後、利用者が U0 以降に手で行った変更（exit 3 の統合、exit 4 の `brand.toml` 追記、新規ファイル）と、`ASK` で残したファイルは、作業ツリーに残り、元のブランチへ持ち越される。その旨を利用者に伝える。
+復旧後、利用者が U0 以降に手で行った変更（exit 3 の統合、exit 4 の `nav.toml` の `[site]` への追記、新規ファイル）と、`ASK` で残したファイルは、作業ツリーに残り、元のブランチへ持ち越される。その旨を利用者に伝える。
+
+廃止された旧構成のファイル（旧 `brand.toml`・`Cargo.toml`・`src/main.rs` など）は、`scaffold.py --list-paths` の許可リストに含めない。scaffold はそれらを書かない・消さないので、`record-json` に載らず取り消しの対象にならない。許可リストへ加えると `restore` の `rm` や `git restore` が利用者編集の `brand.toml` に届く経路ができるためである。利用者が移行の一環で廃止ファイルを手で消した後に更新を取り消したい場合は、利用者自身が `git restore --source=HEAD --worktree -- <path>` で戻す。スキルは自動では戻さない。
 
 ## なぜ `scaffold.py --show-diff` の `same` を判定に使わないか
 
