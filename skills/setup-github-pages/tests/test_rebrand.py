@@ -1197,9 +1197,18 @@ class ScaffoldUpdateTest(unittest.TestCase):
         sys.path.insert(0, str(SCRIPTS))
         import scaffold
         root = Path(os.path.realpath(self.t))
-        self.assertEqual(scaffold.unknown_generator_entries(self.t, root), [], "src/main.rs と brand.toml は既知")
-        (self.t / "tools/docs-site-gen/src/lib.rs").write_text("// other\n")
-        self.assertEqual(scaffold.unknown_generator_entries(self.t, root), ["tools/docs-site-gen/src/lib.rs"])
+        # 廃止ファイルを既知扱いするのは update 判定（上の detect）の側。痕跡確認なしの判定では別用途と区別できない
+        self.assertEqual(scaffold.unknown_generator_entries(self.t, root),
+                         ["tools/docs-site-gen/Cargo.toml", "tools/docs-site-gen/brand.toml", "tools/docs-site-gen/src/main.rs"])
+
+    def test_lone_deprecated_file_without_trace_is_foreign(self):
+        for rel in ("tools/docs-site-gen/Cargo.toml", "tools/docs-site-gen/brand.toml", "tools/docs-site-gen/src/main.rs"):
+            d = self.t / rel
+            d.parent.mkdir(parents=True, exist_ok=True)
+            d.write_text("# other tool\n")
+            j = json.loads(self.sc("--detect", "--json", args=()).stdout)
+            self.assertEqual((j["mode"], j["kind"]), ("foreign", "unrelated"), rel)
+            d.unlink()
 
     def test_detect_modes(self):
         def det(*extra):

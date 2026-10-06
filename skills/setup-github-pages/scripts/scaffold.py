@@ -381,11 +381,16 @@ def _origin_owner_repo(target: Path) -> tuple[str, str] | None:
 _GEN_REL = "tools/docs-site-gen/"
 
 
-def known_generator_names() -> set[str]:
-    """`tools/docs-site-gen/` 直下にあってよい名前（スキルの配置物と、ビルドで生じるもの）。"""
+def known_generator_names(include_deprecated: bool = True) -> set[str]:
+    """`tools/docs-site-gen/` 直下にあってよい名前（スキルの配置物と、ビルドで生じるもの）。
+
+    include_deprecated=False では廃止済みの所有ファイル名を含めない。廃止ファイルを既知扱いしてよいのは、有効な
+    マニフェストまたは旧版の配置痕跡で「スキルが配置したディレクトリ」と確認できた場合（update 判定）に限る。
+    """
     names = {Path(dst).name for _, dst, _, _ in FILES if dst.startswith(_GEN_REL) and "/" not in dst[len(_GEN_REL):]}
     # 廃止済みの所有ファイルは、残っていても「スキルが配置していない」警告にしない（削除候補として別に案内する）
-    names |= {Path(d).name for d in DEPRECATED_OWNED if d.startswith(_GEN_REL) and "/" not in d[len(_GEN_REL):]}
+    if include_deprecated:
+        names |= {Path(d).name for d in DEPRECATED_OWNED if d.startswith(_GEN_REL) and "/" not in d[len(_GEN_REL):]}
     return names | {Path(MANIFEST_REL).name, "src", "target", "Cargo.lock", "THIRD-PARTY-LICENSES"}
 
 
@@ -397,15 +402,18 @@ def unknown_generator_entries(target: Path, root_real: Path) -> list[str]:
     ディレクトリ自体が symlink・対象の外へ解決される場合は中を見ない（symlink は generator_symlinks が別途
     競合として拾い、対象の外へ解決されるものは配置先ごとの outside_root 競合になる）。
     名前だけを見て、内容は読まない。
+
+    廃止済みの所有ファイル（Cargo.toml・src/main.rs・brand.toml 等）は既知にしない。この関数は有効なマニフェスト・
+    旧版の配置痕跡がない場合（detect の最終判定）だけが使うため、それらは別用途の同名ファイルと区別できない。
+    update 判定になる場合は detect が先に返し、廃止ファイルは削除候補（deprecated_present）として案内される。
     """
     gen = target / "tools" / "docs-site-gen"
     if not os.path.lexists(gen) or gen.is_symlink() or not resolves_inside(root_real, gen):
         return []
     if not gen.is_dir():
         return [_GEN_REL.rstrip("/") + "（ディレクトリではない）"]
-    known = known_generator_names()
-    # 旧構成の wrapper（src/main.rs）は廃止済みでも既知として扱う（別用途のファイルとは見なさず、削除候補として案内する）
-    known_src = {Path(p).name for p in [dst for _, dst, _, _ in FILES] + list(DEPRECATED_OWNED) if p.startswith(_GEN_REL + "src/")}
+    known = known_generator_names(include_deprecated=False)
+    known_src = {Path(p).name for p in [dst for _, dst, _, _ in FILES] if p.startswith(_GEN_REL + "src/")}
     found: list[str] = []
     try:
         with os.scandir(gen) as it:
