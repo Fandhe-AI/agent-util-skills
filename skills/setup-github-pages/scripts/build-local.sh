@@ -472,7 +472,7 @@ sys.exit(0 if re.fullmatch(shape, t) else 1)
     # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
     rc=0
     SGP_PAT="${pat}" SGP_SCRIPTS="${SCRIPT_DIR}" SGP_NAV="${nav}" python3 -I -B -c '
-import os, re, sys
+import html, os, re, sys
 from pathlib import Path
 # 末尾に足す: 先頭だと対象リポジトリ由来の同名ファイルより先にスキル側が読まれるが、標準ライブラリを隠せない位置に置く
 sys.path.append(os.environ["SGP_SCRIPTS"])
@@ -488,21 +488,30 @@ if len(foots) != 1:
 attrs = re.findall(os.environ["SGP_PAT"], foots[0])
 if len(attrs) != 1:
     sys.exit(1)
-# 帰属表記 1 件を除いた残りに上流名・上流 URL があれば残存（exit 4）。[site] に上流名を書いた利用者は許容する
+# 帰属表記 1 件を除いた残りに上流名・上流 URL があれば残存（exit 4）。[site] に上流名を書いた利用者のために、
+# 上流名を含む [site] の値そのものと一致する箇所だけを除いてから検査する（値が生成される箇所だけを許容し、
+# 残りの HTML は検査する。値の一部に上流名が含まれるだけで HTML 全体の検査を止めない）
 rest = t.replace(re.search(os.environ["SGP_PAT"], foots[0]).group(0), "", 1)
 tok = r"(?<![A-Za-z0-9_-])fandhe-frontend(?![A-Za-z0-9_-])"
-if re.search(tok, rest, re.I) or re.search(r"github\.com/Fandhe-AI/fandhe-frontend(?![A-Za-z0-9_-])", rest, re.I):
-    allowed = False
-    nav = os.environ.get("SGP_NAV", "")
-    if nav:
-        try:
-            for tb in parse_nav(read_bounded_text(Path(nav), 1024 * 1024)):
-                if tb.header == "site" and any("fandhe-frontend" in v.lower() for v in tb.values.values()):
-                    allowed = True
-        except (OSError, ValueError):
-            sys.exit(3)
-    if not allowed:
-        sys.exit(4)
+url = r"github\.com/Fandhe-AI/fandhe-frontend(?![A-Za-z0-9_-])"
+nav = os.environ.get("SGP_NAV", "")
+if nav:
+    try:
+        vals = set()
+        for tb in parse_nav(read_bounded_text(Path(nav), 1024 * 1024)):
+            if tb.header == "site":
+                for v in tb.values.values():
+                    if isinstance(v, str) and re.search(tok, v, re.I):
+                        vals.add(v)
+                        vals.add(html.escape(v))
+                        vals.add(html.escape(v, quote=False))
+    except (OSError, ValueError):
+        sys.exit(3)
+    # 長い値から順に除く。値の直前が "/" のとき（URL の末尾の要素）と英数字・_・- に続くときは値の一部とみなさない
+    for v in sorted(vals, key=len, reverse=True):
+        rest = re.sub(r"(?<![A-Za-z0-9_/-])" + re.escape(v) + r"(?![A-Za-z0-9_-])", "", rest, flags=re.I)
+if re.search(tok, rest, re.I) or re.search(url, rest, re.I):
+    sys.exit(4)
 sys.exit(0)
 ' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
@@ -510,7 +519,7 @@ sys.exit(0)
       return 1
     fi
     if [[ "${rc}" -eq 4 ]]; then
-      echo "エラー: ${rel} に上流名・上流 URL（fandhe-frontend）が帰属表記以外に残っている（[site] で指定した値は除く）" >&2
+      echo "エラー: ${rel} に上流名・上流 URL（fandhe-frontend）が帰属表記以外に残っている（[site] の値と一致する箇所は除く）" >&2
       return 1
     fi
     if [[ "${rc}" -eq 3 ]]; then

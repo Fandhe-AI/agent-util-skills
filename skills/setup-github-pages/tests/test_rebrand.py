@@ -4303,11 +4303,36 @@ class VerifyAttributionTest(unittest.TestCase):
 
     def test_upstream_name_in_site_values_is_tolerated(self):
         self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                    '<header class="docs-header"><span>fandhe-frontend</span>', 1))
+                    '<header class="docs-header"><span>fandhe-frontend docs</span>', 1))
         r = self.verify_nav('[site]\ntitle = "fandhe-frontend docs"\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         r = self.verify_nav('[site]\ntitle = "Mini"\n')
         self.assertEqual(r.returncode, 1)
+
+    def test_site_value_tolerance_is_scoped_to_the_value(self):
+        # 許容は [site] の値と一致する箇所だけ。値に上流名が含まれても HTML 全体の検査は止まらない
+        nav = '[site]\ntitle = "fandhe-frontend docs"\n'
+        for label, inj in {
+            "別ヘッダー表示": "<span>fandhe-frontend</span>",
+            "上流リポジトリへのリンク": f'<a href="{self.UP}">x</a>',
+            "別名 repo の末尾": f'<a href="{self.UP}-docs/x">x</a><b>/fandhe-frontend</b>',
+        }.items():
+            good = (self.dist / "index.html").read_text(encoding="utf-8")
+            self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
+                        '<header class="docs-header"><i>fandhe-frontend docs</i>' + inj, 1))
+            r = self.verify_nav(nav)
+            self.assertEqual(r.returncode, 1, label)
+            (self.dist / "index.html").write_text(good, encoding="utf-8")
+
+    def test_similar_name_in_site_value_does_not_disable_check(self):
+        self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
+                    '<header class="docs-header"><span>fandhe-frontend-docs</span><b>fandhe-frontend</b>', 1))
+        r = self.verify_nav('[site]\nbrand = "fandhe-frontend-docs"\n')
+        self.assertEqual(r.returncode, 1, r.stderr)
+        # 値そのものの箇所だけなら許容
+        self.mutate("index.html", lambda t: t.replace("<b>fandhe-frontend</b>", "", 1))
+        r = self.verify_nav('[site]\nbrand = "fandhe-frontend-docs"\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_oversized_html_stops_the_check(self):
         (self.dist / "big").mkdir()
