@@ -4432,7 +4432,7 @@ class LegacyBrandMigrationTest(unittest.TestCase):
     def test_t3_invalid_old_values_stop_without_echoing_values(self):
         cases = {
             "brand": ("brand", "B" * 65), "version_badge": ("version_badge", "v" * 33),
-            "repository_url": ("repository", "http://github.com/acme/r"), "lang": ("lang", "not a lang!"),
+            "repository_url": ("repository", "http://github.com/acme/r"),
         }
         for key, (old_key, bad) in cases.items():
             with self.subTest(key=key):
@@ -4507,6 +4507,22 @@ class LegacyBrandMigrationTest(unittest.TestCase):
         self.assertEqual(sm["status"], "proposal", sm["problems"])
         self.assertIn('brand_mark = "L"', sm["block"])
         self.assertTrue(any("`lang`" in p for p in sm["problems"]), sm["problems"])
+
+    def test_t3e_invalid_optional_old_value_keeps_required_proposal(self):
+        for old_key, key, bad in (("lang", "lang", "not a lang!"), ("favicon_color", "brand_color", "zzz")):
+            with self.subTest(key=key):
+                nav = self.old_repo(**{old_key: bad + self.SENTINEL})
+                before = nav.read_bytes()
+                r = self.sc("--json")
+                self.assertEqual(r.returncode, 4, r.stderr)
+                sm = self.sm(r)
+                self.assertEqual(sm["status"], "proposal", sm["problems"])
+                self.assertIn('brand_mark = "L"', sm["block"])
+                self.assertIn('repository_url = "https://github.com/acme/r"', sm["block"])
+                self.assertNotIn(f"{key} =", sm["block"])
+                self.assertTrue(any(f"`{key}`" in p for p in sm["problems"]), sm["problems"])
+                self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
+                self.assertEqual(nav.read_bytes(), before)
 
     def test_t5_pasted_needs_input_block_still_fails_check_site(self):
         nav = self.old_repo(tagline="")

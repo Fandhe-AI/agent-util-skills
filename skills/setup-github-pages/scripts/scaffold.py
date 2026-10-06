@@ -345,7 +345,13 @@ def legacy_brand_site_proposal(root_real: Path) -> dict | None:
             continue
         why = site_value_problem(key, site[key])
         if why:
-            blocking.append(f"[site] の `{key}`（旧 `{old_key}`）: {why}" + (f"（{nav_why}）" if in_nav else ""))
+            msg = f"[site] の `{key}`（旧 `{old_key}`）: {why}" + (f"（{nav_why}）" if in_nav else "")
+            # 任意キー（lang / brand_color）の旧値が不正でも、検証済みの必須キーの案を巻き込んで破棄しない。
+            # 案から除外して problems に残し、利用者が手で直す（既定値で動くため公開を止めない）
+            if key in SITE_REQUIRED_KEYS:
+                blocking.append(msg)
+            else:
+                leftovers.append(msg + "。この値は案に含めない（手で直す）")
             entries.append({"key": key, "from": old_key, "state": "invalid", "value": None})
             continue
         entries.append({"key": key, "from": old_key, "state": "replace" if in_nav else "add", "value": site[key]})
