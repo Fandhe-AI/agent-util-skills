@@ -390,7 +390,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 
 - **入力検証**: ブランド表示・URL・ブランチ名はすべて `scaffold.py` / `_common.py` が検証・エスケープする（リポジトリ URL は `https://github.com/<owner>/<repo>` のみ、HTML 出力は `html.escape`）。シェルへ渡す変数は常に `"${VAR}"` でクォートする。外部入力を `sed` や `bash -c` の文字列に展開しない
 - **CSP を壊さない**: 生成物の CSP は `script-src 'self'` 等で厳格。後処理はインライン script / style を一切追加しない。サイトへ手でインラインスクリプトを足さない
-- **置換は構造的に行う**: GitHub URL を一括置換しない。ヘッダー・フッターの「リポジトリへのリンク」要素だけを置換し、LICENSE-MIT / LICENSE-APACHE リンクと「Built with fandhe-frontend docs-site」の帰属表記は保持する。本文（`<main>`）は書き換えない
+- **生成後の置換はしない**: ブランドは `nav.toml` の `[site]` で上流の生成器へ渡し、生成物の HTML・GitHub URL を後から書き換えない。LICENSE-MIT / LICENSE-APACHE リンクと「Built with fandhe-frontend docs-site」の帰属表記は上流の出力のまま保持し、`verify_attribution` で残存を検証する。本文（`<main>`）も書き換えない
 - **書き込み先の限定**: `build-local.sh`・`scaffold.py` が書く・消す先は、対象リポジトリの実体パス配下で、末端が symlink でないものに限る（`tools/docs-site-gen/target/`（`docs-site-install` を含む）・`THIRD-PARTY-LICENSES`・既定の `_site/`。bash は `guard_path`、Python は `resolves_inside` に集約）。`.git` の判定は大文字小文字を区別しない（`.GIT` / `.Git` 経由の読み書きも拒否する）。違反したら何も書かず中止する。`--out` のみ対象リポジトリ外（CI の `${RUNNER_TEMP}` 等）を許すが、末端が symlink なら拒否する。ライセンスの取得先は固定 URL（可変部分は検証済みの `FF_REV` のみ）。dist に symlink があれば `verify_attribution` は辿らず失敗する（読むだけで書かない）
 - **読み込みの上限**: `check_site.py` は `nav.toml`・Markdown・workflow を上限付きで読み（symlink・対象リポジトリの外は読まない）、`brand.toml` は読まない。`verify_attribution` は dist の HTML を grep するだけで（`nav.toml` の `[site]` の値は上流名の許容判定にだけ読む）、失敗時もファイルの内容の断片は出さない（相対パスだけを示す）。`[site]` の値の検証エラーもキー名と規則だけを出し、値は出さない
 - **上流 fandhe-frontend 自身は対象外**: 上流はデザインの出どころで、自サイト用の wrapper・後処理・マニフェストを置く対象ではないため、`--detect` が `foreign` と判定し `scaffold.py` は exit 2 で中止する

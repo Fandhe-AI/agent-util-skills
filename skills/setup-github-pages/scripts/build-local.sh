@@ -452,7 +452,8 @@ for line in sys.stdin.read().split("\n"):
     SGP_PAT="${pat}" SGP_NAV="${nav}" SGP_SCRIPTS="${SCRIPT_DIR}" python3 -I -B -c '
 import html, os, re, sys
 from pathlib import Path
-sys.path.insert(0, os.environ["SGP_SCRIPTS"])
+# 末尾に足す: 先頭だと対象リポジトリ由来の同名ファイルより先にスキル側が読まれるが、標準ライブラリを隠せない位置に置く
+sys.path.append(os.environ["SGP_SCRIPTS"])
 from _common import RESIDUAL_RE, parse_nav, read_bounded_text
 # 読み取り上限は上の事前検査（ファイルごと 8 MiB）と同値。超過・UTF-8 不正は検査自体の失敗（exit 3）
 try:
