@@ -28,7 +28,7 @@ skills/                               -- 本リポジトリが上流ソースと
     templates/                        -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
     scripts/                          -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
   setup-github-pages/
-    references/                       -- site-format.md（nav.toml スキーマ・予約パス・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）、update-recovery.md（更新失敗時の復旧手順）
+    references/                       -- site-format.md（nav.toml スキーマ・予約アセット名・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）、update-recovery.md（更新失敗時の復旧手順）
     templates/                        -- wrapper Cargo.toml・pages.yml・nav.toml・brand.toml・rust-toolchain.toml 雛形
     scripts/                          -- build-local.sh（fandhe-frontend fetch → wrapper build → 帰属表記の存在確認）、check_repo.sh（owner/repo 検証）、update-snapshot.sh（更新の記録・復旧）、check_site.py（検証）、scaffold.py（モード判定・配置・更新・競合差分）、_common.py（検証・無害化）
     tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、rebrand.test.mjs（Node.js ブリッジ）、test_rebrand.py（rebrand/check_site/scaffold 回帰テスト）、fixtures/

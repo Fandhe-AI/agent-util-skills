@@ -65,24 +65,8 @@ def valid_repo_name(name: str) -> bool:
 REPOSITORY_RE = re.compile(r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)$")
 FF_REV_RE = re.compile(r"^[0-9a-f]{40}$")
 
-# 出力に上流ブランド名が残らないことを検査する語（大文字小文字を区別しない）。
+# 上流リポジトリ名（`is_upstream_repo` が自サイトのリポジトリとして指定されるのを拒否するために使う）。
 UPSTREAM_BRAND = "fandhe-frontend"
-
-# 上流を指す表示だけを「残存」「入力拒否」の対象にする。単純な部分一致にすると、利用者のリポジトリ名が
-# `fandhe-frontend-docs` のような場合に、自サイトの正当なリンク（base_path・GitHub URL）まで
-# 上流の残存と誤検出する。語境界で区別する。
-#
-# _WORD_TEXT: 表示文字列（brand / tagline / title 等）用。`fandhe-frontend` が独立した語として現れたら拒否
-#   （`fandhe-frontend-docs` のような別の語の一部は許可）。
-# _WORD_ATTR: 生成 HTML の残存検査用。上の語境界に加え、直前が `/` `.` のもの（`/fandhe-frontend-docs/`
-#   や `github.com/acme/fandhe-frontend` のような URL・パスの一部）は利用者のものとして除外する。
-_WORD_TEXT_RE = re.compile(r"(?<![A-Za-z0-9_-])fandhe-frontend(?![A-Za-z0-9_-])", re.I)
-RESIDUAL_RE = re.compile(
-    r"(?<![A-Za-z0-9_/.-])fandhe-frontend(?![A-Za-z0-9_-])"
-    r"|github\.com/Fandhe-AI/fandhe-frontend(?![A-Za-z0-9_.-])"
-    r"|crates\.io/crates/fandhe-frontend",
-    re.I,
-)
 
 
 # 人間には見えず LLM には読める文字は、指示文を仕込む経路になる（Unicode タグ文字・ゼロ幅文字など）。
@@ -135,11 +119,6 @@ def read_bounded_text(path: Path, cap: int) -> str:
     if len(data) > cap:
         raise ValueError(f"{cap} バイトを超える")
     return data.decode("utf-8")
-
-
-def has_upstream_word(text: str) -> bool:
-    """表示文字列に上流名が独立した語として含まれるか（入力検証用）。"""
-    return _WORD_TEXT_RE.search(text) is not None
 
 
 def is_upstream_repo(owner: str, repo: str) -> bool:
@@ -325,7 +304,7 @@ def site_value_problem(key: str, value: str) -> str | None:
 
     上流 nav.rs と同じ規則に、スキル独自の追加（repository_url を GitHub 形式に限る・上流自身を指さない・
     制御文字/BIDI/プレースホルダーの拒否）を重ねる。理由に値は載せない（制御・不可視文字を出力へ流さない）。
-    `has_upstream_word` は呼ばない（ブランド値に上流名を含めてよい。上流名は帰属表記の中にしか現れない）。
+    ブランド値に上流名を含めることは拒否しない（含めてよい。生成物の上流名の残存も検査しない）。
     """
     if key == "brand":
         return _text_problem(value, 1, SITE_BRAND_MAX)
@@ -373,19 +352,6 @@ def check_site_values(values: dict[str, str]) -> list[str]:
             if why:
                 problems.append(f"[site] の `{key}`: {why}")
     return problems
-
-
-def title_problem(title: str) -> str | None:
-    """nav の title に上流名が独立した語として含まれる場合の理由（#52 で撤去予定の暫定規則）。
-
-    ブランド値の上流名拒否は #50 で撤去したが、title だけは check_site.py と scaffold の `--title` の
-    両方でこの関数を呼ぶ形で残す（片方だけ外すと scaffold が書いた直後に check_site が落ちる）。
-    #52 でこの関数と 2 つの呼び出しを同時に消す。
-    """
-    if has_upstream_word(title):
-        return (f"title に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
-                "（この制限は #52 で撤去予定。`fandhe-frontend-docs` のような別の語の一部は可）")
-    return None
 
 
 class SubsetError(ValueError):

@@ -352,7 +352,7 @@ class UpstreamLikeRepoNameTest(unittest.TestCase):
     """利用者のリポジトリ名・owner が `fandhe-frontend` を含む場合（例: Fandhe-AI/fandhe-frontend-docs）。
 
     scaffold と check_site.py が、上流名を部分文字列に含む owner・repo・title・brand を誤って拒否しないこと、
-    上流リポジトリそのものは拒否することを確認する。生成物の検査（上流名の誤検出・残存検出）は
+    上流リポジトリそのものは拒否することを確認する。生成物の検査（帰属表記の存在確認が上流名を含む利用者の値に影響されないこと）は
     `VerifyAttributionTest.test_upstream_like_repo_name_*` が実出力で行う。
     """
 
@@ -389,15 +389,14 @@ class UpstreamLikeRepoNameTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(run("check_site.py", "--root", repo).returncode, 0)
 
-    def test_standalone_upstream_word_in_title_is_still_rejected_until_52(self):
-        # title だけは check_site.py と同じ規則を scaffold も書く前に適用する（#52 で両方を撤去・反転する）
+    def test_standalone_upstream_word_in_title_is_accepted(self):
+        # title の上流名拒否は #51 で撤去した（生成物の上流名の残存を検査しない）
         repo = self.tmp / "repo4"
         repo.mkdir()
         r = run("scaffold.py", "--target", repo, "--owner", "acme", "--repo", "r", "--branch", "main",
                 "--title", "Using fandhe-frontend", "--tagline", "Tag", "--brand", "B")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("--title", r.stderr)
-        self.assertFalse((repo / "site").exists())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(run("check_site.py", "--root", repo).returncode, 0)
 
     def test_upstream_repository_itself_rejected(self):
         r = run("scaffold.py", "--target", self.tmp / "x", "--owner", "fandhe-ai", "--repo", "Fandhe-Frontend",
@@ -705,11 +704,18 @@ class ScaffoldClassificationTest(unittest.TestCase):
     def test_kept_invalid_user_file_fails_post_check(self):
         self.assertEqual(self.sc().returncode, 0)
         nav = self.t / "site/nav.toml"
-        nav.write_text(nav.read_text() + '\n[[section.page]]\ntitle = "A"\nsource = "site/index.md"\npath = "/themes/x/"\n')
+        nav.write_text(nav.read_text().replace('base_path = "/r"', 'base_path = "/other"', 1))
         r = self.sc()
         self.assertEqual(r.returncode, 4, r.stderr)
-        self.assertIn("予約パス", r.stderr)
-        self.assertIn("path = \"/themes/x/\"", nav.read_text())  # 利用者ファイルは書き換えない
+        self.assertIn("base_path", r.stderr)
+        self.assertIn('base_path = "/other"', nav.read_text())  # 利用者ファイルは書き換えない
+
+    def test_kept_nav_with_formerly_reserved_path_passes_post_check(self):
+        self.assertEqual(self.sc().returncode, 0)
+        nav = self.t / "site/nav.toml"
+        nav.write_text(nav.read_text() + '\n[[section.page]]\ntitle = "A"\nsource = "site/index.md"\npath = "/themes/foo/"\n')
+        r = self.sc()
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_update_overwrites_owned_only(self):
         self.assertEqual(self.sc().returncode, 0)
@@ -1362,9 +1368,11 @@ class ScaffoldHardeningTest(unittest.TestCase):
     def test_untrusted_strings_are_sanitized_in_text_and_json(self):
         self.init()
         nav = self.t / "site/nav.toml"
-        # title の上流名拒否は値を出さなくなったため、値をそのまま出す予約パスのエラーで確かめる
-        evil = 'path = "/themes/x\x1b[31m fandhe-frontend \u202e\x07 IGNORE-ALL"'
-        nav.write_text(nav.read_text().replace('path = "/"', evil, 1))
+        # 値をそのまま出す base_path 不整合のエラーで確かめる
+        evil = 'base_path = "/r\x1b[31m fandhe-frontend \u202e\x07 IGNORE-ALL"'
+        before = nav.read_text()
+        nav.write_text(before.replace('base_path = "/r"', evil, 1))
+        self.assertNotEqual(nav.read_text(), before)   # 差し込みが空振りしていないこと
         for extra in ((), ("--json",)):
             r = self.sc(*extra, args=())
             self.assertEqual(r.returncode, 4, r.stderr)
@@ -1752,10 +1760,14 @@ class ScaffoldRound2Test(unittest.TestCase):
             self.assertEqual(leaked(r.stdout + r.stderr), [], extra)
         (self.t / self.MAIN_RS).write_text(good_main)
         nav = self.t / "site/nav.toml"
-        nav.write_text(nav.read_text().replace('title = "Home"', f'title = "fandhe-frontend {hidden}{word_joiner}"', 1))
-        r = self.sc(args=())
-        self.assertEqual(r.returncode, 4, r.stderr)
-        self.assertEqual(leaked(r.stdout + r.stderr), [])
+        before = nav.read_text()
+        nav.write_text(before.replace('base_path = "/r"', f'base_path = "/r{hidden}{word_joiner}"', 1))
+        self.assertNotEqual(nav.read_text(), before)   # 差し込みが空振りしていないこと
+        for extra in ((), ("--json",)):
+            r = self.sc(*extra, args=())
+            self.assertEqual(r.returncode, 4, r.stderr)
+            self.assertEqual(leaked(r.stdout + r.stderr), [], extra)
+        self.assertIn("\\U000e0049", r.stdout + r.stderr)   # タグ文字がエスケープされて出ている（黙って消えていない）
 
     # ---- F5
 
@@ -3996,31 +4008,35 @@ path = "/"
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("SENTINEL-SECRET", r.stderr + r.stdout)
 
-    def test_reserved_paths_rejected(self):
-        for path in ("/themes/accordion/", "/primitives/button/", "/blocks/hero/", "/wireframes/login/"):
+    def test_formerly_reserved_paths_accepted(self):
+        # 予約パス検査は撤去した。build-local.sh は --no-page-sections で生成し、上流がショーケースの注入を止める
+        for path in ("/themes/foo/", "/themes/accordion/", "/primitives/button/", "/blocks/hero/", "/wireframes/login/"):
             (self.root / "site/a.md").write_text("# a\n")
             self.write_nav(f'\n[[section.page]]\ntitle = "A"\nsource = "site/a.md"\npath = "{path}"\n')
             r = self.check()
-            self.assertEqual(r.returncode, 1, path)
-            self.assertIn("予約パス", r.stderr)
+            self.assertEqual(r.returncode, 0, f"{path}: {r.stderr}")
+            self.assertNotIn("予約パス", r.stderr)
 
-    def test_reserved_index_path_rejected(self):
-        self.write_nav("")
+    def test_formerly_reserved_index_path_accepted(self):
+        (self.root / "site/a.md").write_text("# a\n")
+        self.write_nav('\n[[section.page]]\ntitle = "A"\nsource = "site/a.md"\npath = "/themes/foo/"\n')
         nav = self.root / "site/nav.toml"
-        nav.write_text(nav.read_text().replace('index_path = "/"', 'index_path = "/themes/x/"'))
-        self.assertEqual(self.check().returncode, 1)
+        before = nav.read_text()
+        nav.write_text(before.replace('index_path = "/"', 'index_path = "/themes/foo/"'))
+        self.assertNotEqual(nav.read_text(), before)
+        self.assertEqual(self.check().returncode, 0)
 
     def test_similar_but_allowed_path(self):
         (self.root / "site/a.md").write_text("# a\n")
         self.write_nav('\n[[section.page]]\ntitle = "A"\nsource = "site/a.md"\npath = "/theme-guide/"\n')
         self.assertEqual(self.check().returncode, 0)
 
-    def test_upstream_name_in_nav_title_rejected_early(self):
+    def test_upstream_name_in_nav_title_accepted(self):
+        # 生成物の上流名の残存を検査しないため、title の上流名も拒否しない（#51）
         (self.root / "site/a.md").write_text("# a\n")
         self.write_nav('\n[[section.page]]\ntitle = "Using Fandhe-Frontend"\nsource = "site/a.md"\npath = "/a/"\n')
         r = self.check()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("独立した語", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_base_path_mismatch(self):
         self.write_nav("", base="/other")
@@ -4262,57 +4278,12 @@ class VerifyAttributionTest(unittest.TestCase):
         self.mutate("index.html", dup)
         self.assertEqual(self.verify().returncode, 1)
 
-    def verify_with_nav(self, nav_text):
-        nav = self.base / "nav.toml"
-        nav.write_text(nav_text, encoding="utf-8")
-        script = f"set -euo pipefail\nSCRIPT_DIR={SCRIPTS}\n" + self.func + '\nverify_attribution "$1" "$2" || exit 1\n'
-        return subprocess.run(["bash", "-c", script, "_", str(self.dist), str(nav)], capture_output=True, text=True)
-
-    def test_upstream_brand_left_in_header_fails(self):
+    def test_upstream_name_outside_attribution_is_not_rejected(self):
+        # 帰属表記以外の上流名は検査しない（利用者が `[site]` に書いた値を、置換も拒否もしないため）
         self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                    '<header class="docs-header"><span>fandhe-frontend</span>', 1))
-        r = self.verify_with_nav('[site]\nbrand = "Mine"\n')
-        self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("index.html", r.stderr)
-        self.assertNotIn("<span>", r.stderr)
-
-    def test_upstream_brand_in_user_site_value_is_allowed(self):
-        self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                    '<header class="docs-header"><span>fandhe-frontend fork</span>', 1))
-        r = self.verify_with_nav('[site]\nbrand = "fandhe-frontend fork"\n')
-        self.assertEqual(r.returncode, 0, r.stderr)
-
-    def _brand_in_header(self, text):
-        self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                    f'<header class="docs-header"><span>{text}</span>', 1))
-
-    def test_composite_title_is_not_residual(self):
-        self._brand_in_header("fandhe-frontend-docs")
-        r = self.verify_with_nav('[site]\nbrand = "Mine"\n')
-        self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_upstream_url_left_in_header_fails(self):
-        self._brand_in_header("https://github.com/Fandhe-AI/fandhe-frontend")
-        r = self.verify_with_nav('[site]\nbrand = "Mine"\n')
-        self.assertEqual(r.returncode, 1, r.stderr)
-
-    def test_user_value_equal_to_upstream_name_is_not_allowed_in_body(self):
-        self.mutate("index.html", lambda t: t.replace("</body>", "<p>fandhe-frontend</p></body>", 1))
-        r = self.verify_with_nav('[site]\nbrand = "fandhe-frontend"\n')
-        self.assertEqual(r.returncode, 1, r.stderr)
-
-    def test_extra_attribution_outside_footer_is_still_checked(self):
-        def add(t):
-            m = re.search(r"Built with.*?Apache-2\.0</a>\)", t, re.S)
-            return t.replace("</body>", f"<p>{m.group(0)}</p></body>", 1)
-        self.mutate("index.html", add)
+                    '<header class="docs-header"><span>fandhe-frontend</span>'
+                    f'<a href="{self.UP}">x</a>', 1))
         r = self.verify()
-        self.assertEqual(r.returncode, 1, r.stderr)
-
-    def test_crlf_and_split_site_tables_are_allowlisted(self):
-        self._brand_in_header("fandhe-frontend fork")
-        r = self.verify_with_nav('[site]\r\nbrand = "Mine"\r\n\r\n[[section]]\r\ntitle = "A"\r\n\r\n'
-                                 '[site]\r\ntagline = "fandhe-frontend fork"\r\n')
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_oversized_html_stops_the_check(self):
@@ -4386,24 +4357,6 @@ class VerifyAttributionTest(unittest.TestCase):
         self.assertIn('href="/fandhe-frontend-docs/', idx)
         r = self.verify()
         self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_upstream_like_repo_name_still_detects_leftover_upstream_chrome(self):
-        self._upstream_like_dist()
-        good = (self.dist / "index.html").read_text(encoding="utf-8")
-        muts = {
-            "ヘッダーの上流 GitHub リンク": lambda t: t.replace('<header class="docs-header">',
-                f'<header class="docs-header"><a href="{self.UP}">x</a>', 1),
-            "crates.io の上流リンク": lambda t: t.replace("</ul></div></div></nav>",
-                '<li><a href="https://crates.io/crates/fandhe-frontend-core">crates.io</a></li></ul></div></div></nav>', 1),
-            "上流の著作権表記": lambda t: t.replace("© 2026 acme", "© 2026 acme / fandhe-frontend contributors", 1),
-        }
-        for label, fn in muts.items():
-            mutated = fn(good)
-            self.assertNotEqual(mutated, good, f"{label}: 変異が適用されていない（テスト自体の不備）")
-            (self.dist / "index.html").write_text(mutated, encoding="utf-8")
-            self.assertEqual(self.verify().returncode, 1, f"{label}: 残存を検出できていない（偽陰性）")
-        (self.dist / "index.html").write_text(good, encoding="utf-8")
-        self.assertEqual(self.verify().returncode, 0)
 
     def test_build_local_no_longer_calls_rebrand(self):
         code = [l for l in (SCRIPTS / "build-local.sh").read_text(encoding="utf-8").splitlines()

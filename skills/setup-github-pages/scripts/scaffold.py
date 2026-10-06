@@ -66,7 +66,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     BIDI_RE, CONTROL_RE, FF_REV_RE, PLACEHOLDER_RE, MAX_TEXT_LEN, SITE_BRAND_MAX, SITE_BADGE_MAX, SITE_TEXT_MAX,
     atomic_write_bytes, check_site_values, is_upstream_repo, pages_base_path, resolves_inside, sanitize,
-    title_problem, write_target_problem, valid_owner, valid_repo_name, parse_subset, read_bounded_text,
+    write_target_problem, valid_owner, valid_repo_name, parse_subset, read_bounded_text,
 )
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -858,9 +858,6 @@ def main(argv: list[str] | None = None) -> int:
         title = None
         if full:
             title = validate_text("title", args.title, required=True)
-            why = title_problem(title)
-            if why:
-                raise ValueError(f"--{why}")
             if args.brand is None and len(title) > SITE_BRAND_MAX:
                 raise ValueError(f"--title が {SITE_BRAND_MAX} 文字を超える。ブランド名は {SITE_BRAND_MAX} 文字以内のため --brand を明示する")
             brand = validate_text("brand", args.brand if args.brand is not None else title, required=True,

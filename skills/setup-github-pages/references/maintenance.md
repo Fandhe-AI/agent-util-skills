@@ -33,7 +33,7 @@
    `grep -o -i fandhe-frontend` と `Fandhe-AI` で確認する
 5. 帰属表記の件数を再確認する。1 ページのサイトで `grep -o -i fandhe-frontend _site/index.html | wc -l` が 4（帰属リンクの href と
    リンク文言、LICENSE リンク 2 件）のままであること。増減していれば上流がフッターを変えている
-6. `references/site-format.md` の制約（nav.toml の書式・予約パス・予約アセット・Markdown 対応範囲）が変わっていないか上流
+6. `references/site-format.md` の制約（nav.toml の書式・予約アセット・Markdown 対応範囲）が変わっていないか上流
    ソースで再確認し、`scripts/check_site.py` の `RESERVED_ASSET_NAMES`（上流 `build.rs` の `RESERVED_ASSET_NAMES`）を更新する
 7. `tests/fixtures/site-keys/`・`tests/fixtures/redirect/` を新 rev の生成物で作り直し、`node --test "tests/*.test.mjs"` を通す
 
@@ -45,7 +45,7 @@
 
 | 回避している制約 | 上流の対応（Issue → PR） | スキル側の削除（イシュー） |
 |------------------|--------------------------|----------------------------|
-| stock の `docs-site` が page section registry を強制し、ショーケースを注入する | [#3716](https://github.com/Fandhe-AI/fandhe-frontend/issues/3716) → PR #3728（`--no-page-sections`）、[#3717](https://github.com/Fandhe-AI/fandhe-frontend/issues/3717) → PR #3731（ショーケース注入の停止） | `--no-page-sections` の利用は #49 で反映済み。wrapper の削除は #53、予約パス禁止の撤去は #52 |
+| stock の `docs-site` が page section registry を強制し、ショーケースを注入する | [#3716](https://github.com/Fandhe-AI/fandhe-frontend/issues/3716) → PR #3728（`--no-page-sections`）、[#3717](https://github.com/Fandhe-AI/fandhe-frontend/issues/3717) → PR #3731（ショーケース注入の停止） | `--no-page-sections` の利用は #49 で反映済み。wrapper の削除は #53、予約パス禁止の撤去は #52、title の上流名拒否の撤去は #51 で反映済み |
 | ブランド表示がハードコード | [#3720](https://github.com/Fandhe-AI/fandhe-frontend/issues/3720) → PR #3732（`brand`・`repository_url`）、[#3721](https://github.com/Fandhe-AI/fandhe-frontend/issues/3721) → PR #3733（`tagline`・`copyright`・`version_badge`・`lang`）、[#3722](https://github.com/Fandhe-AI/fandhe-frontend/issues/3722) → PR #3734（`brand_mark`・`brand_color`） | `[site]` への移行と生成後の置換の停止は #50、`rebrand_site.py` の削除は #51 で反映済み（`brand.toml` の廃止は #53） |
 | `cargo install --git` が submodule で失敗する | [#3718](https://github.com/Fandhe-AI/fandhe-frontend/issues/3718) → PR #3730（submodule 非依存化。匿名の `cargo install --git` が通る） | #49 で反映済み（匿名 `cargo install --git`。`_ff/` と path 依存のビルドは廃止。wrapper テンプレートの削除は #53） |
 | 外部利用の契約・手順 | #3724 → PR #3735（契約テスト）、#3725 → PR #3737（CI 経路）、#3726 → PR #3736（利用ガイド）、#3715 → PR #3729（設計文書） | 参照のみ（#56 で文書をリンク化） |
@@ -97,9 +97,9 @@
 
 - **決定**: ブランド値（`brand`・`tagline`・`copyright` 等）に上流名を含める拒否（`has_upstream_word`）は撤去する（#47 の 2026-10-06 の決定）。`is_upstream_repo`（`repository_url` が上流リポジトリ自身を指す拒否）は残す
   - scaffold のブランド値の拒否と `check_site.py` の `[site]` 検証は #50 で撤去済み
-  - `title` の規則（`check_site.py` と scaffold の `--title`）は、#52 で撤去するまで暫定的に残す（片方だけ外すと、scaffold が書いた直後に `check_site.py` が止まるため、両方を共有関数 `title_problem` から呼ぶ）
+  - `title` の規則（`check_site.py` と scaffold の `--title`、共有関数 `title_problem`）は、残存検査と一緒に #51 で撤去済み
 - **理由**: 残存検査をやめたので、衝突を避ける理由が無くなった
-- **影響**: #52 は `title_problem` と、`check_site.py`・scaffold の 2 つの呼び出しを同時に消し、関連テストを反転する
+- **影響**: #51 が残存検査を外すと同時に `title_problem` と、`check_site.py`・scaffold の 2 つの呼び出しを消し、関連テストを反転した
 
 ### 決定 5: `brand.toml` から `[site]` への移行
 
