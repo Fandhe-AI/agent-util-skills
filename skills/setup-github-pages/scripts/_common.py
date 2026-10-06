@@ -379,6 +379,20 @@ def check_site_values(values: dict[str, str]) -> list[str]:
     return problems
 
 
+def title_problem(title: str) -> str | None:
+    """nav の title に上流名が独立した語として含まれる場合の理由（#51 で撤去予定の暫定規則）。
+
+    ブランド値の上流名拒否は #50 で撤去したが、title だけは `build-local.sh` の `verify_attribution` が
+    `[site]` の値以外に出る上流名を残存として拒否するため、check_site.py と scaffold の `--title` の
+    両方でこの関数を呼んで事前に止める（片方だけ外すと scaffold が書いた直後に check_site が落ちる）。
+    #51 が残存検査を外した時点でこの関数と 2 つの呼び出しを同時に消す。
+    """
+    if has_upstream_word(title):
+        return (f"title に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
+                "（この制限は #51 で撤去予定。`fandhe-frontend-docs` のような別の語の一部は可）")
+    return None
+
+
 class SubsetError(ValueError):
     """TOML サブセットの構文違反。メッセージには行番号を含める。"""
 

@@ -748,15 +748,15 @@ class UpstreamLikeRepoNameTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(run("check_site.py", "--root", repo).returncode, 0)
 
-    def test_standalone_upstream_word_in_title_is_accepted(self):
-        # nav の title の上流名拒否は #52 で撤去した（check_site.py と scaffold の両方）
+    def test_standalone_upstream_word_in_title_is_still_rejected_until_51(self):
+        # title だけは check_site.py と同じ規則を scaffold も書く前に適用する（#51 で両方を撤去・反転する）
         repo = self.tmp / "repo4"
         repo.mkdir()
         r = run("scaffold.py", "--target", repo, "--owner", "acme", "--repo", "r", "--branch", "main",
                 "--title", "Using fandhe-frontend", "--tagline", "Tag", "--brand", "B")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn('title = "Using fandhe-frontend"', (repo / "site/nav.toml").read_text())
-        self.assertEqual(run("check_site.py", "--root", repo).returncode, 0)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--title", r.stderr)
+        self.assertFalse((repo / "site").exists())
 
     def test_upstream_repository_itself_rejected(self):
         for url in ("https://github.com/Fandhe-AI/fandhe-frontend", "https://github.com/fandhe-ai/FANDHE-FRONTEND"):
@@ -4409,12 +4409,12 @@ path = "/"
         self.write_nav('\n[[section.page]]\ntitle = "A"\nsource = "site/a.md"\npath = "/theme-guide/"\n')
         self.assertEqual(self.check().returncode, 0)
 
-    def test_upstream_name_in_nav_title_accepted(self):
+    def test_upstream_name_in_nav_title_rejected_early(self):
         (self.root / "site/a.md").write_text("# a\n")
-        self.write_nav('\n[[section.page]]\ntitle = "Using Fandhe-Frontend"\nsource = "site/a.md"\npath = "/a/"\n',
-                       title="fandhe-frontend 入門")
+        self.write_nav('\n[[section.page]]\ntitle = "Using Fandhe-Frontend"\nsource = "site/a.md"\npath = "/a/"\n')
         r = self.check()
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("独立した語", r.stderr)
 
     def test_base_path_mismatch(self):
         self.write_nav("", base="/other")

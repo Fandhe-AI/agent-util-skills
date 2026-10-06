@@ -54,7 +54,7 @@ user-invocable: true
 | ナビ構成 | セクションとページの一覧。既存の Markdown（`README.md`・`docs/`）を公開する場合は、そのパス |
 | 公開範囲の了解 | 上記のとおりサイトは公開される。公開してよい内容か |
 
-ブランド名・タグライン・著作権・リポジトリ名・owner には上流名 `fandhe-frontend` を含めてよい。nav の title については`check_site.py`・scaffold は拒否しないが、生成後の帰属表記の検証（`verify_attribution`）が `[site]` の値以外に出る上流名を止める（この検証の撤去は #51）。それまでは別の表記を勧める。ただし `Fandhe-AI/fandhe-frontend` 自体を自サイトのリポジトリにはできない。
+ブランド名・タグライン・著作権・リポジトリ名・owner には上流名 `fandhe-frontend` を含めてよい。ただし nav の title（`--title`）だけは、上流名を**独立した語として**含められない（`fandhe-frontend-docs` のような別の語の一部は可）。生成後の帰属表記の検証（`verify_attribution`）が `[site]` の値以外に出る上流名を残存として拒否するため、`check_site.py`・scaffold が事前に止める（この制限は #51 で残存検査とともに撤去予定）。ただし `Fandhe-AI/fandhe-frontend` 自体を自サイトのリポジトリにはできない。
 
 ## scaffold.py の概要と終了コード（新規・更新共通）
 
@@ -419,7 +419,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | リンク切れで生成が失敗し `_site/` に何も出力されない | fail-closed 仕様。出力されたエラーの 1 件ずつを直す（存在しない `#anchor`・nav 未登録の `.md`・存在しない絶対パス） |
 | ページ内リンクが公開後に 404 | 絶対パスリンクに `base_path`（`/<repo>`）が無い。`[x](/<repo>/usage/)` と書くか、`[x](./usage.md)` を使う |
 | 画像が表示されない | 上流は画像非対応（`![a](x)` は `!` とリンクになる）。表・コードブロックで代替する |
-| nav.toml の title に `fandhe-frontend` を入れて、生成後の検証で失敗する | `check_site.py`・scaffold は拒否しないが、`verify_attribution` が `[site]` の値以外の上流名を止める（撤去は #51）。別の表記にする。ブランド名・タグラインには入れてよい |
+| nav.toml の title に `fandhe-frontend` を入れて失敗する | title の上流名は `verify_attribution` が拒否するため `check_site.py`・scaffold が事前に止める（#51 で撤去予定）。別の表記にする（`fandhe-frontend-docs` のような別の語の一部は可）。ブランド名・タグラインには入れてよい |
 | `verify` が「帰属表記が無い」で失敗する | 上流 DOM が変わったか、`[site]` 以外の経路で帰属表記が消えた。スキル保守者は [`references/maintenance.md`](references/maintenance.md) の「FF_REV の更新手順」で帰属パターンを再確認する。対象リポジトリ側の利用者は更新を取り消してスキル側の修正を待つ（Step U2） |
 | `build-local.sh` が「LICENSE-MIT の取得に失敗」で止まる | `raw.githubusercontent.com` へ到達できない、または `FF_REV` の commit に `LICENSE-MIT` が無い。ネットワークを確認して再試行する。`THIRD-PARTY-LICENSES` は変更されない |
 | `scaffold.py` が「競合」で exit 3 になる | スキル所有ファイルが配置後に編集されている、またはマニフェストが無い（旧版配置・別用途）。`--show-diff` で差分を確認して利用者に見せ、編集を残すなら手動統合、置き換えてよいときだけ `--update`。**`kind` が `symlink` / `not_regular` / `unreadable` / `outside_root` の競合は `--update` でも解消しない**ので、手動で通常ファイルへ直す。旧版からの移行は `--update` 1 回でマニフェストが書かれ、以後は未編集なら自動更新される。`pages.yml` の追加 paths は利用者区間へ書く |
