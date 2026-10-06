@@ -4302,15 +4302,15 @@ class VerifyAttributionTest(unittest.TestCase):
             self.assertNotIn("fandhe-frontend)", r.stderr)
 
     def test_upstream_name_in_site_values_is_tolerated(self):
-        self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                    '<header class="docs-header"><span>fandhe-frontend docs</span>', 1))
+        # 値が出る確認済みの区間（ヘッダーのブランドリンク）の中なら許容する
+        self.mutate("index.html", lambda t: t.replace(">Mini</a><nav", "><span>fandhe-frontend docs</span></a><nav", 1))
         r = self.verify_nav('[site]\ntitle = "fandhe-frontend docs"\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         r = self.verify_nav('[site]\ntitle = "Mini"\n')
         self.assertEqual(r.returncode, 1)
 
     def test_site_value_tolerance_is_limited_to_generated_regions(self):
-        # 許容するのは fixtures/site-keys の実出力で `[site]` の値が出る箇所だけ（ヘッダー・フッターのブランド枠・
+        # 許容するのは fixtures/site-keys の実出力で `[site]` の値が出る箇所だけ（ヘッダーのブランドリンク・フッターのブランド枠・
         # 著作権表示）。同じ文字列が本文・サイドバー・目次に残っていれば残存として失敗にする
         nav = '[site]\nbrand = "fandhe-frontend docs"\ntagline = "fandhe-frontend docs"\ncopyright = "fandhe-frontend docs"\n'
         val = "fandhe-frontend docs"
@@ -4342,6 +4342,14 @@ class VerifyAttributionTest(unittest.TestCase):
             self.assertEqual(r.returncode, 1, label)
             self.assertIn("上流名", r.stderr, label)
             (self.dist / "index.html").write_text(good, encoding="utf-8")
+        # ヘッダー内でもブランドのリンク（a.docs-brand）の外（サイトセクションのナビ）は許容区間ではない
+        self.mutate("index.html", lambda t: t.replace('docs-header-trigger" aria-current="true" data-current="">Guide<',
+                    f'docs-header-trigger" aria-current="true" data-current="">{val}<', 1))
+        self.assertNotEqual((self.dist / "index.html").read_text(encoding="utf-8"), good)
+        r = self.verify_nav(nav)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("上流名", r.stderr)
+        (self.dist / "index.html").write_text(good, encoding="utf-8")
         # 許容区間に出る値と本文の残存が同居していても、本文側で失敗する
         self.mutate("index.html", lambda t: allowed["ヘッダーのブランド"](denied["本文"](t)))
         self.assertEqual(self.verify_nav(nav).returncode, 1)
