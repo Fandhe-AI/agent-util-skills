@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""対象リポジトリへ docs サイト一式（wrapper・workflow・初期サイト）を配置・更新する。
+"""対象リポジトリへ docs サイト一式（ビルドスクリプト・workflow・初期サイト）を配置・更新する。
 
 # 役割・境界
 
@@ -80,10 +80,7 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 OWNED, USER = "owned", "user"
 PAGES_REL = ".github/workflows/pages.yml"
 FILES = [
-    ("templates/docs-site-gen/Cargo.toml", "tools/docs-site-gen/Cargo.toml", False, OWNED),
-    ("templates/docs-site-gen/src/main.rs", "tools/docs-site-gen/src/main.rs", False, OWNED),
     ("templates/docs-site-gen/FF_REV", "tools/docs-site-gen/FF_REV", False, OWNED),
-    ("templates/brand.toml", "tools/docs-site-gen/brand.toml", False, USER),
     ("scripts/build-local.sh", "tools/docs-site-gen/build-local.sh", True, OWNED),
     ("scripts/check_site.py", "tools/docs-site-gen/check_site.py", False, OWNED),
     ("scripts/_common.py", "tools/docs-site-gen/_common.py", False, OWNED),
@@ -96,7 +93,12 @@ FILES = [
 # スキル側で廃止された所有ファイル（配置先の相対パス）。廃止の判定は、対象リポジトリのマニフェストではなく
 # このスキル側の固定リストだけで行う（マニフェストは信頼しない入力で、任意のパスを「廃止された所有ファイル」
 # として指名させると、利用者に無関係なファイルの削除を促せてしまうため）。廃止したら、ここへ追加する。
-DEPRECATED_OWNED: tuple[str, ...] = ("tools/docs-site-gen/rebrand_site.py",)
+DEPRECATED_OWNED: tuple[str, ...] = ("tools/docs-site-gen/rebrand_site.py", "tools/docs-site-gen/Cargo.toml", "tools/docs-site-gen/src/main.rs", "tools/docs-site-gen/brand.toml",)
+# 廃止ファイルの補足（固定の文言だけ。ファイルの内容は読まない）。brand.toml は利用者が編集する前提のファイルで、
+# マニフェストに記録されたことがないため edited が常に不明になる。そのままだと「スキルの生成物」と誤解されるので明示する。
+DEPRECATED_NOTES: dict[str, str] = {
+    "tools/docs-site-gen/brand.toml": "利用者編集ファイル。nav.toml の [site] へ移行してから削除する",
+}
 
 # 終了コード: 0 成功 / 2 入力不正・書き込み先が不適 / 3 競合（OWNED の不一致）/ 4 配置後の check_site 失敗
 EXIT_CONFLICT, EXIT_CHECK_FAILED = 3, 4
@@ -122,7 +124,7 @@ LEGACY_TRACES = (
     "tools/docs-site-gen/build-local.sh",
 )
 
-GITIGNORE_LINES = ["_ff/", "tools/docs-site-gen/target/", "tools/docs-site-gen/Cargo.lock", "_site/"]
+GITIGNORE_LINES = ["tools/docs-site-gen/target/", "_site/"]
 
 # 読み取りの上限。対象リポジトリのファイルは信頼できないため、巨大ファイル・特殊ファイルで止まらない・
 # メモリを使い切らないようにする。
@@ -402,7 +404,8 @@ def unknown_generator_entries(target: Path, root_real: Path) -> list[str]:
     if not gen.is_dir():
         return [_GEN_REL.rstrip("/") + "（ディレクトリではない）"]
     known = known_generator_names()
-    known_src = {Path(dst).name for _, dst, _, _ in FILES if dst.startswith(_GEN_REL + "src/")}
+    # 旧構成の wrapper（src/main.rs）は廃止済みでも既知として扱う（別用途のファイルとは見なさず、削除候補として案内する）
+    known_src = {Path(p).name for p in [dst for _, dst, _, _ in FILES] + list(DEPRECATED_OWNED) if p.startswith(_GEN_REL + "src/")}
     found: list[str] = []
     try:
         with os.scandir(gen) as it:
@@ -435,6 +438,30 @@ def generator_symlinks(target: Path, root_real: Path) -> list[str]:
     return []
 
 
+def deprecated_present(target: Path, root_real: Path, m_files: dict) -> list[dict]:
+    """スキルで廃止された所有ファイルのうち、対象に通常ファイルとして残っているもの（スキル側の固定リストだけで判定）。
+
+    detect（--detect の削除候補表示）と main（更新の結果表示）の両方から呼ぶ。マニフェストのパスは
+    記録ハッシュとの突き合わせ（edited 判定）にだけ使い、列挙・表示の根拠にしない。
+    """
+    found: list[dict] = []
+    for rel in DEPRECATED_OWNED:
+        pth = target / rel
+        if not regular_inside(root_real, pth):
+            continue
+        h = safe_sha256(pth)
+        item = {"path": rel, "edited": (h != m_files[rel]) if rel in m_files else None}
+        if rel in DEPRECATED_NOTES:
+            item["note"] = DEPRECATED_NOTES[rel]
+        found.append(item)
+    return found
+
+
+def _deprecated_line(d: dict, prefix: str = "削除候補: ") -> str:
+    state = "未編集" if d["edited"] is False else "配置後に編集あり" if d["edited"] else "編集の有無は不明"
+    return f"{prefix}{d['path']}（{state}）" + (f" 注: {d['note']}" if d.get("note") else "")
+
+
 def detect(target: Path, root_real: Path) -> dict:
     """対象リポジトリを判定する（書き込みなし）。
 
@@ -464,11 +491,13 @@ def detect(target: Path, root_real: Path) -> dict:
         return {"mode": "foreign", "kind": "upstream", "reasons": reasons}
     if manifest is not None:
         reasons.append(f"配置マニフェスト {MANIFEST_REL}（FF_REV {manifest[0][:12]}）がある")
-        return {"mode": "update", "kind": "manifest", "reasons": reasons}
+        return {"mode": "update", "kind": "manifest", "reasons": reasons,
+                "deprecated": deprecated_present(target, root_real, manifest[1])}
     legacy = [t for t in LEGACY_TRACES if regular_inside(root_real, target / t)]
     if len(legacy) == len(LEGACY_TRACES):
-        reasons.append("旧版配置の痕跡（FF_REV・wrapper・build-local.sh）がある（マニフェストなし）")
-        return {"mode": "update", "kind": "legacy", "reasons": reasons}
+        reasons.append("旧構成（wrapper 方式）の配置痕跡（FF_REV・wrapper・build-local.sh）がある（マニフェストなし）")
+        return {"mode": "update", "kind": "legacy", "reasons": reasons,
+                "deprecated": deprecated_present(target, root_real, {})}
     present = [dst for _, dst, _, kind in FILES if kind == OWNED and exists_inside(root_real, target / dst)]
     outside = [dst for _, dst, _, _ in FILES if not resolves_inside(root_real, target / dst)]
     if outside:
@@ -613,7 +642,7 @@ def analyze_pages(cur: str, rendered: str) -> dict:
 
 
 # tools/docs-site-gen/ 直下に存在してよい名前（許可リスト）。スキルが配置するもの（FILES の basename）・廃止済みの所有ファイル・マニフェスト・
-# cargo が作る `target` と `Cargo.lock`・wrapper の `src`・build-local.sh が（--write-third-party で）作る
+# cargo が作る `target` と `Cargo.lock`・旧構成（wrapper 方式）の残骸の `src`・build-local.sh が（--write-third-party で）作る
 # `THIRD-PARTY-LICENSES`（実際は対象リポジトリ直下だが、置かれても無害な既知の名前として含める）。
 # build-local.sh は python を `-B`（__pycache__ を作らない）で起動するため、`__pycache__` は既知にしない
 # （事前に置かれた .pyc が読み込まれ得るので、見つけたら警告する）。
@@ -767,9 +796,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--favicon-letter", default=None, help="既定: ブランド名の先頭英数字")
     ap.add_argument("--favicon-color", default="#2b6cb0")
     ap.add_argument("--update", action="store_true",
-                    help="スキル所有ファイル（workflow・wrapper・スクリプト・FF_REV）の不一致を、配置後の編集を含めて"
+                    help="スキル所有ファイル（workflow・スクリプト・FF_REV）の不一致を、配置後の編集を含めて"
                          "強制的に上書きする。未編集のものは --update なしでも自動更新される。"
-                         "利用者編集ファイル（nav.toml・index.md・brand.toml・rust-toolchain.toml）は触らない")
+                         "利用者編集ファイル（nav.toml・index.md・rust-toolchain.toml）は触らない")
     ap.add_argument("--year", default=None, help="著作権表記の年（既定: 現在の年）")
     args = ap.parse_args(argv)
 
@@ -807,13 +836,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.detect:
         if args.json:
             summary["exit_code"] = 0
-            print(json.dumps({"mode": det["mode"], "kind": det["kind"], "reasons": summary["detect"], "exit_code": 0},
-                             ensure_ascii=True))
+            payload = {"mode": det["mode"], "kind": det["kind"], "reasons": summary["detect"], "exit_code": 0}
+            if det["mode"] == "update":
+                payload["deprecated"] = det["deprecated"]
+            print(json.dumps(payload, ensure_ascii=True))
         else:
             out(f"mode={det['mode']}")
             out(f"kind={det['kind']}")
             for r in det["reasons"]:
                 out(f"根拠: {r}")
+            for d in det.get("deprecated", []):
+                out(_deprecated_line(d))
         return 0
     if det["kind"] == "upstream":
         return finish(2, "エラー: 適用対象外: " + " / ".join(det["reasons"]))
@@ -1130,13 +1163,7 @@ def main(argv: list[str] | None = None) -> int:
             problems.append(".gitignore（UTF-8 として読めない、または大きすぎる）")
 
     # ---- 廃止された所有ファイル（スキル側の固定リストだけで判定。表示のみで自動削除しない）
-    deprecated: list[dict] = []
-    for rel in DEPRECATED_OWNED:
-        pth = args.target / rel
-        if not regular_inside(root_real, pth):
-            continue
-        h = safe_sha256(pth)
-        deprecated.append({"path": rel, "edited": (h != m_files[rel]) if rel in m_files else None})
+    deprecated = deprecated_present(args.target, root_real, m_files)
     unknown = [k for k in m_files if k not in {d for _, d, _, kd in FILES if kd == OWNED}
                and k not in DEPRECATED_OWNED and k != MANIFEST_REL]
     if unknown:
@@ -1272,8 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
         if deprecated:
             out("削除候補（スキルで廃止された所有ファイル。自動削除しない。内容を確認して手動で削除する）:")
             for d in deprecated:
-                state = "未編集" if d["edited"] is False else "配置後に編集あり" if d["edited"] else "編集の有無は不明"
-                out(f"  - {d['path']}（{state}）")
+                out(_deprecated_line(d, "  - "))
         if keep:
             out("注: 保持したファイルの内容（nav.toml 等）は生成予定と一致する保証がない。"
                 "下の check_site で検証する（失敗したら該当ファイルを直す）。")

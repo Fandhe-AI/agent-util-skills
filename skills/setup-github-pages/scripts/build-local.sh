@@ -10,8 +10,8 @@
 #
 # 上流（fandhe-frontend）の docs-site バイナリを、固定 rev（FF_REV）の匿名 `cargo install --git` で
 # スキル管理下の target/docs-site-install へ入れて実行する。以前の「_ff/ へ shallow fetch + path 依存の
-# wrapper を build」は上流が匿名 install に対応したため不要になった。templates/docs-site-gen の
-# Cargo.toml・src/main.rs は #53 で配置物から外すまで残るが、このスクリプトのビルドでは使わない。
+# wrapper を build」は上流が匿名 install に対応したため不要になった。wrapper（Cargo.toml・src/main.rs）と
+# brand.toml は scaffold の配置物から外れており、旧構成のリポジトリに残っていても使わない（scaffold の削除候補）。
 #
 # 使い方: build-local.sh [--out DIR] [--clean] [--write-third-party]
 #   --out DIR              出力先（既定 <root>/_site）。既存かつ非空ならエラー

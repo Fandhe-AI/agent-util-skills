@@ -21,6 +21,37 @@ SKILL = HERE.parent
 SCRIPTS = SKILL / "scripts"
 
 
+OLD_WRAPPER_FILES = {
+    "tools/docs-site-gen/Cargo.toml": b'[package]\nname = "docs-site-gen"\n',
+    "tools/docs-site-gen/src/main.rs": b"fn main() {}\n",
+}
+OLD_RETIRED = {"tools/docs-site-gen/rebrand_site.py": b"# retired\n"}
+
+
+def make_old_layout(t, recorded=True, retired=False):
+    """wrapper 方式の旧構成（#53 より前）を、現行の scaffold で構築済みのリポジトリ `t` に再現する。
+
+    スキルは Cargo.toml・src/main.rs・brand.toml をもう配置しない（削除候補として案内するだけ）ため、テストが
+    最小の合成内容で書く。旧構成では Cargo.toml・src/main.rs（と置換スクリプト）が所有ファイルで、マニフェストに
+    ハッシュが記録されていた（recorded=True）。brand.toml は利用者編集ファイルで記録されない。
+    recorded=False はマニフェスト導入前の配置（マニフェストなし）で、旧構成の痕跡 4 点（LEGACY_TRACES）が揃う。
+    削除したテンプレートの実物はコピーしない。
+    """
+    gen = t / "tools/docs-site-gen"
+    man = gen / ".scaffold-manifest.json"
+    files = dict(OLD_WRAPPER_FILES, **(OLD_RETIRED if retired else {}))
+    for rel, content in files.items():
+        (t / rel).parent.mkdir(parents=True, exist_ok=True)
+        (t / rel).write_bytes(content)
+    (gen / "brand.toml").write_text('name = "T"\n')
+    if recorded:
+        m = json.loads(man.read_text())
+        m["files"].update({rel: hashlib.sha256(c).hexdigest() for rel, c in files.items()})
+        man.write_text(json.dumps(m))
+    elif man.exists() or man.is_symlink():
+        man.unlink()
+
+
 def run(script, *args):
     return subprocess.run([sys.executable, str(SCRIPTS / script), *map(str, args)],
                           capture_output=True, text=True)
@@ -695,7 +726,7 @@ class ScaffoldClassificationTest(unittest.TestCase):
         r = self.sc()
         self.assertEqual(r.returncode, 0, r.stderr)
         kept = r.stdout.split("保持（利用者編集）:")[1].split("\n")[0]
-        for f in ("site/index.md", "site/nav.toml", "rust-toolchain.toml", "tools/docs-site-gen/brand.toml"):
+        for f in ("site/index.md", "site/nav.toml", "rust-toolchain.toml"):
             self.assertIn(f, kept)
         self.assertEqual((self.t / "site/index.md").read_text(), "# my own\n")
         self.assertIn('channel = "1.80"', (self.t / "rust-toolchain.toml").read_text())
@@ -723,14 +754,14 @@ class ScaffoldClassificationTest(unittest.TestCase):
         (self.t / self.OWNED_REL).write_text("old script\n")
         (self.t / ".github/workflows/pages.yml").write_text("name: stale\n")
         (self.t / "site/index.md").write_text("# mine\n")
-        (self.t / "tools/docs-site-gen/brand.toml").write_text((self.t / "tools/docs-site-gen/brand.toml").read_text() + "# mine\n")
-        brand_before = (self.t / "tools/docs-site-gen/brand.toml").read_text()
+        nav_mine = (self.t / "site/nav.toml").read_text() + "# mine\n"
+        (self.t / "site/nav.toml").write_text(nav_mine)
         r = self.sc("--update")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((self.t / self.OWNED_REL).read_text(), good_sh)
         self.assertIn("branches:", (self.t / ".github/workflows/pages.yml").read_text())
         self.assertEqual((self.t / "site/index.md").read_text(), "# mine\n")
-        self.assertEqual((self.t / "tools/docs-site-gen/brand.toml").read_text(), brand_before)
+        self.assertEqual((self.t / "site/nav.toml").read_text(), nav_mine)
         upd = r.stdout.split("更新:")[1].split("\n")[0]
         self.assertIn(self.OWNED_REL, upd)
         self.assertIn(".github/workflows/pages.yml", upd)
@@ -770,7 +801,7 @@ class ScaffoldUpdateTest(unittest.TestCase):
     """
 
     ARGS = ("--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T", "--tagline", "Tag")
-    MAIN_RS = "tools/docs-site-gen/src/main.rs"
+    VEHICLE = "tools/docs-site-gen/_common.py"   # 新版スキルが変える所有ファイルの題材（Python のためマーカーは # コメント）
     BUILD_SH = "tools/docs-site-gen/build-local.sh"
     MANIFEST = "tools/docs-site-gen/.scaffold-manifest.json"
     NEW_REV = "b" * 40
@@ -806,10 +837,10 @@ class ScaffoldUpdateTest(unittest.TestCase):
         return json.loads((self.t / self.MANIFEST).read_text())
 
     def new_skill(self):
-        """main.rs と FF_REV を変えた「新版」のスキル。"""
+        """_common.py と FF_REV を変えた「新版」のスキル。"""
         sk = self.skill_copy()
-        main_rs = sk / "templates/docs-site-gen/src/main.rs"
-        main_rs.write_text(main_rs.read_text() + "// new layout\n")
+        main_rs = sk / "scripts/_common.py"
+        main_rs.write_text(main_rs.read_text() + "# new layout\n")
         (sk / "templates/docs-site-gen/FF_REV").write_text(self.NEW_REV + "\n")
         return sk
 
@@ -822,7 +853,7 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.assertNotIn("site/nav.toml", m["files"], "利用者編集ファイルは記録しない")
         self.assertNotIn("tools/docs-site-gen/brand.toml", m["files"])
         import hashlib
-        self.assertEqual(m["files"][self.MAIN_RS], hashlib.sha256((self.t / self.MAIN_RS).read_bytes()).hexdigest())
+        self.assertEqual(m["files"][self.VEHICLE], hashlib.sha256((self.t / self.VEHICLE).read_bytes()).hexdigest())
         before = self.tree()
         r = self.sc()
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -836,11 +867,11 @@ class ScaffoldUpdateTest(unittest.TestCase):
         (self.t / "site/index.md").write_text("# mine\n")
         r = self.sc(args=(), skill=sk)   # 引数なし（--target のみ）
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("// new layout", (self.t / self.MAIN_RS).read_text())
+        self.assertIn("# new layout", (self.t / self.VEHICLE).read_text())
         self.assertEqual((self.t / "tools/docs-site-gen/FF_REV").read_text().strip(), self.NEW_REV)
         self.assertIn(f"FF_REV: {old_rev[:12]} → {self.NEW_REV[:12]}", r.stdout)
         upd = r.stdout.split("更新:")[1].split("\n")[0]
-        self.assertIn(self.MAIN_RS, upd)
+        self.assertIn(self.VEHICLE, upd)
         self.assertIn("tools/docs-site-gen/FF_REV", upd)
         self.assertIn("自動更新", r.stdout)
         self.assertEqual((self.t / "site/index.md").read_text(), "# mine\n")  # 利用者ファイルは保持
@@ -857,29 +888,29 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.assertEqual(j["mode"], "update")
         self.assertTrue(j["ff_rev"]["changed"])
         self.assertEqual(j["ff_rev"]["new"], self.NEW_REV)
-        self.assertIn(self.MAIN_RS, [u["path"] for u in j["updated"]])
+        self.assertIn(self.VEHICLE, [u["path"] for u in j["updated"]])
         self.assertTrue(j["check"]["ok"])
         self.assertEqual(j["conflicts"], [])
 
     def test_user_edited_owned_file_is_conflict_with_no_writes(self):
         self.init()
-        (self.t / self.MAIN_RS).write_text("// my edit\n")
-        sk = self.new_skill()   # 新版も main.rs を変えているので、編集は上書きされてはいけない
+        (self.t / self.VEHICLE).write_text("# my edit\n")
+        sk = self.new_skill()   # 新版も _common.py を変えているので、編集は上書きされてはいけない
         before = self.tree()
         r = self.sc(args=(), skill=sk)
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertIn("利用者が編集し、スキル側も変更した", r.stderr)
-        self.assertIn(self.MAIN_RS, r.stderr)
+        self.assertIn(self.VEHICLE, r.stderr)
         self.assertEqual(self.tree(), before, "競合時に部分書き込み（未編集ファイルの更新・マニフェスト）があった")
         r = self.sc("--update", args=(), skill=sk)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("// new layout", (self.t / self.MAIN_RS).read_text())
-        self.assertNotIn("// my edit", (self.t / self.MAIN_RS).read_text())
+        self.assertIn("# new layout", (self.t / self.VEHICLE).read_text())
+        self.assertNotIn("# my edit", (self.t / self.VEHICLE).read_text())
         self.assertIn("強制上書き", r.stdout)
 
     def test_no_manifest_mismatch_conflicts_then_update_writes_manifest_then_auto(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         (self.t / self.BUILD_SH).write_text("#!/bin/sh\necho legacy\n")
         before = self.tree()
         r = self.sc(args=())
@@ -893,13 +924,14 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.assertTrue((self.t / self.MANIFEST).is_file())
         sk = self.new_skill()
         self.assertEqual(self.sc(args=(), skill=sk).returncode, 0)   # 以後は自動更新
-        self.assertIn("// new layout", (self.t / self.MAIN_RS).read_text())
+        self.assertIn("# new layout", (self.t / self.VEHICLE).read_text())
 
     def test_invalid_manifests_fall_back_to_safe_side(self):
         """不正なマニフェストは丸ごと無視（=マニフェストなし）。自動更新せず、書き込み・削除にも使わない。"""
         import hashlib
         self.init()
         good = json.loads((self.t / self.MANIFEST).read_text())
+        make_old_layout(self.t, recorded=False)   # 旧構成の痕跡が揃っていれば、無視されたマニフェストでも update 判定になる
         sk = self.new_skill()
         victim = self.t / "victim.txt"
         victim.write_text("keep\n")
@@ -913,7 +945,7 @@ class ScaffoldUpdateTest(unittest.TestCase):
             "dotdot path": json.dumps({**good, "files": {**good["files"], "tools/docs-site-gen/../../victim.txt": h}}),
             "absolute path": json.dumps({**good, "files": {**good["files"], "/etc/passwd": h}}),
             "outside prefix": json.dumps({**good, "files": {**good["files"], "victim.txt": h}}),
-            "bad hash": json.dumps({**good, "files": {**good["files"], self.MAIN_RS: "ZZ"}}),
+            "bad hash": json.dumps({**good, "files": {**good["files"], self.VEHICLE: "ZZ"}}),
             "bad ff_rev": json.dumps({**good, "ff_rev": "main"}),
             "oversize": json.dumps({**good, "pad": "x" * 70000}),
             "too many files": json.dumps({**good, "files": {f"tools/docs-site-gen/f{i}": h for i in range(101)}}),
@@ -936,7 +968,7 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.init()
         target_file = self.victim_dir / "victim.json"
         target_file.write_text("untouched\n")
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)   # マニフェストなしの旧構成（痕跡 4 点が揃う）
         (self.t / self.MANIFEST).symlink_to(target_file)
         r = self.sc(args=())
         self.assertEqual(r.returncode, 2, r.stderr)
@@ -1043,7 +1075,8 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.init()
         other = self.t / ".github/workflows/codeql.yml"
         other.write_text("name: codeql\n")
-        brand = "tools/docs-site-gen/brand.toml"
+        brand = "tools/docs-site-gen/my-notes.md"   # 利用者のファイル（廃止リストにない）
+        (self.t / brand).write_text("notes\n")
         m = self.manifest()
         h = hashlib.sha256(b"x").hexdigest()
         m["files"][".github/workflows/codeql.yml"] = hashlib.sha256(other.read_bytes()).hexdigest()
@@ -1098,6 +1131,76 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.assertTrue((self.t / "site/nav.toml").exists())
         self.assertTrue((self.t / "site/index.md").exists())
 
+    # ---- #53: 新構成の配置物と、旧構成（wrapper 方式）の削除候補
+
+    RETIRED_WRAPPER = ("tools/docs-site-gen/Cargo.toml", "tools/docs-site-gen/src/main.rs",
+                       "tools/docs-site-gen/brand.toml", "tools/docs-site-gen/rebrand_site.py")
+
+    def test_new_layout_does_not_place_wrapper_brand_or_rebrand_script(self):
+        r = self.sc("--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual(j["deprecated"], [])
+        for rel in self.RETIRED_WRAPPER:
+            self.assertNotIn(rel, j["created"])
+            self.assertFalse((self.t / rel).exists(), rel)
+        self.assertFalse((self.t / "tools/docs-site-gen/src").exists())
+        out = self.sc("--list-paths", args=()).stdout
+        for rel in self.RETIRED_WRAPPER:
+            self.assertNotIn(rel, out)
+
+    def test_old_layout_update_lists_deprecated_without_deleting_and_is_idempotent(self):
+        self.init()
+        make_old_layout(self.t, recorded=True, retired=True)
+        before = self.tree()
+        r = self.sc("--json", args=())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        j = json.loads(r.stdout)
+        self.assertEqual({d["path"] for d in j["deprecated"]}, set(self.RETIRED_WRAPPER))
+        by = {d["path"]: d for d in j["deprecated"]}
+        self.assertIs(by["tools/docs-site-gen/Cargo.toml"]["edited"], False)
+        self.assertIsNone(by["tools/docs-site-gen/brand.toml"]["edited"], "brand.toml は記録されたことがない")
+        self.assertIn("[site]", by["tools/docs-site-gen/brand.toml"]["note"])
+        # 警告に「未知のエントリ」「スキルが配置していないファイル」として出ない（廃止ファイルは別枠で案内する）
+        w = " ".join(j["warnings"])
+        self.assertNotIn("未知のエントリ", w)
+        self.assertNotIn("配置していない", w)
+        for rel in self.RETIRED_WRAPPER:
+            self.assertTrue((self.t / rel).is_file(), "廃止ファイルを自動削除してはいけない")
+        after = self.tree()
+        self.assertEqual({k: v for k, v in after.items() if not k.endswith(".scaffold-manifest.json")},
+                         {k: v for k, v in before.items() if not k.endswith(".scaffold-manifest.json")})
+        r = self.sc("--json", args=())
+        j = json.loads(r.stdout)
+        self.assertEqual((r.returncode, j["created"], j["updated"]), (0, [], []))
+        text = self.sc(args=()).stdout
+        self.assertIn("削除候補", text)
+        self.assertIn("利用者編集ファイル", text)
+
+    def test_old_layout_without_manifest_is_migrated_then_idempotent(self):
+        self.init()
+        make_old_layout(self.t, recorded=False)
+        r = self.sc("--update", "--json", args=())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual({d["path"] for d in json.loads(r.stdout)["deprecated"]},
+                         {"tools/docs-site-gen/Cargo.toml", "tools/docs-site-gen/src/main.rs", "tools/docs-site-gen/brand.toml"})
+        r = self.sc("--json", args=())
+        j = json.loads(r.stdout)
+        self.assertEqual((r.returncode, j["created"], j["updated"]), (0, [], []))
+        self.assertTrue((self.t / "tools/docs-site-gen/src/main.rs").is_file())
+
+    def test_src_main_rs_is_known_but_other_src_files_are_still_stray(self):
+        self.init()
+        make_old_layout(self.t, recorded=False)
+        j = json.loads(self.sc("--detect", "--json", args=()).stdout)
+        self.assertEqual((j["mode"], j["kind"]), ("update", "legacy"))
+        sys.path.insert(0, str(SCRIPTS))
+        import scaffold
+        root = Path(os.path.realpath(self.t))
+        self.assertEqual(scaffold.unknown_generator_entries(self.t, root), [], "src/main.rs と brand.toml は既知")
+        (self.t / "tools/docs-site-gen/src/lib.rs").write_text("// other\n")
+        self.assertEqual(scaffold.unknown_generator_entries(self.t, root), ["tools/docs-site-gen/src/lib.rs"])
+
     def test_detect_modes(self):
         def det(*extra):
             r = self.sc("--detect", *extra, args=())
@@ -1111,9 +1214,27 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.assertIn("マニフェスト", out)
         j = json.loads(det("--json"))
         self.assertEqual((j["mode"], j["kind"]), ("update", "manifest"))
+        self.assertEqual(j["deprecated"], [], "新構成には削除候補がない")
+        # マニフェストを失った新構成は、旧構成の痕跡（wrapper）が無いため legacy ではなく foreign（--update を案内する安全側）
         (self.t / self.MANIFEST).unlink()
         j = json.loads(det("--json"))
+        self.assertEqual((j["mode"], j["kind"]), ("foreign", "unrelated"))
+        self.assertNotIn("deprecated", j)
+        # マニフェストなしの旧構成（wrapper 方式）は legacy の update。廃止ファイルが削除候補に出る
+        make_old_layout(self.t, recorded=False, retired=True)
+        before = self.tree()
+        j = json.loads(det("--json"))
         self.assertEqual((j["mode"], j["kind"]), ("update", "legacy"))
+        self.assertEqual({d["path"] for d in j["deprecated"]},
+                         {"tools/docs-site-gen/Cargo.toml", "tools/docs-site-gen/src/main.rs",
+                          "tools/docs-site-gen/brand.toml", "tools/docs-site-gen/rebrand_site.py"})
+        notes = {d["path"]: d.get("note") for d in j["deprecated"]}
+        self.assertIn("[site]", notes["tools/docs-site-gen/brand.toml"])
+        self.assertIsNone(notes["tools/docs-site-gen/Cargo.toml"])
+        text = det()
+        self.assertIn("削除候補: tools/docs-site-gen/Cargo.toml", text)
+        self.assertIn("削除候補: tools/docs-site-gen/brand.toml", text)
+        self.assertEqual(self.tree(), before, "--detect は書き込まない")
         # スキル由来でない同名ファイル
         other = self.base / "other"
         other.mkdir()
@@ -1205,7 +1326,7 @@ class ScaffoldHardeningTest(unittest.TestCase):
     """差分表示の安全性・出力の無害化・pages.yml 利用者区間・更新モードの境界（レビュー指摘 A1〜B5 の回帰）。"""
 
     ARGS = ("--owner", "acme", "--repo", "r", "--branch", "main", "--title", "T", "--tagline", "Tag")
-    MAIN_RS = "tools/docs-site-gen/src/main.rs"
+    VEHICLE = "tools/docs-site-gen/_common.py"   # 新版スキルが変える所有ファイルの題材（Python のためマーカーは # コメント）
     BUILD_SH = "tools/docs-site-gen/build-local.sh"
     MANIFEST = "tools/docs-site-gen/.scaffold-manifest.json"
     PAGES = ".github/workflows/pages.yml"
@@ -1286,12 +1407,12 @@ class ScaffoldHardeningTest(unittest.TestCase):
 
     def test_show_diff_regular_file_sanitized_and_capped(self):
         self.init()
-        main_rs = self.t / self.MAIN_RS
-        main_rs.write_text("// my edit \x1b[31mred\x1b[0m \u202e rtl\n" + "\n".join(f"line {i}" for i in range(500)) + "\n")
+        main_rs = self.t / self.VEHICLE
+        main_rs.write_text("# my edit \x1b[31mred\x1b[0m \u202e rtl\n" + "\n".join(f"line {i}" for i in range(500)) + "\n")
         r = self.sc("--show-diff", args=())
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"=== {self.MAIN_RS}", r.stdout)
-        self.assertIn("対象/" + self.MAIN_RS, r.stdout)
+        self.assertIn(f"=== {self.VEHICLE}", r.stdout)
+        self.assertIn("対象/" + self.VEHICLE, r.stdout)
         self.assertNotIn("\x1b", r.stdout)
         self.assertNotIn("\u202e", r.stdout)
         self.assertIn("\\u001b", r.stdout)
@@ -1300,23 +1421,23 @@ class ScaffoldHardeningTest(unittest.TestCase):
         # 大きすぎるファイルは読まない
         main_rs.write_text("x" * (300 * 1024))
         j = json.loads(self.sc("--show-diff", "--json", args=()).stdout)
-        self.assertEqual(j["diffs"][self.MAIN_RS]["status"], "too_large")
+        self.assertEqual(j["diffs"][self.VEHICLE]["status"], "too_large")
         # UTF-8 でない
         main_rs.write_bytes(b"\xff\xfe\x00bad")
         j = json.loads(self.sc("--show-diff", "--json", args=()).stdout)
-        self.assertEqual(j["diffs"][self.MAIN_RS]["status"], "not_utf8")
+        self.assertEqual(j["diffs"][self.VEHICLE]["status"], "not_utf8")
 
     def test_show_diff_lists_unchanged_owned_files_for_recovery(self):
         """復旧手順は --show-diff の same（スキルが書いたまま）と conflicts（手が入った）で自動で戻す対象を決める。"""
         self.init()
-        (self.t / self.MAIN_RS).write_text("// hand merge\n")
+        (self.t / self.VEHICLE).write_text("# hand merge\n")
         before = self.tree()
         j = json.loads(self.sc("--show-diff", "--json", args=()).stdout)
         self.assertEqual(self.tree(), before, "--show-diff は書き込まない（欠けたファイルの再作成も含む）")
         self.assertIn(self.BUILD_SH, j["same"])
         self.assertIn(self.PAGES, j["same"])
-        self.assertNotIn(self.MAIN_RS, j["same"])
-        self.assertEqual([c["path"] for c in j["conflicts"]], [self.MAIN_RS])
+        self.assertNotIn(self.VEHICLE, j["same"])
+        self.assertEqual([c["path"] for c in j["conflicts"]], [self.VEHICLE])
         # 欠落した所有ファイルは書かれず、same にも conflicts にも出ない（復旧は自動で戻さず確認に回す）
         (self.t / self.BUILD_SH).unlink()
         j = json.loads(self.sc("--show-diff", "--json", args=()).stdout)
@@ -1516,7 +1637,7 @@ class ScaffoldHardeningTest(unittest.TestCase):
 
     def test_legacy_pages_extra_paths_migrate_into_region(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         (self.t / self.PAGES).write_text(self.legacy_pages(['      - "docs/**"', '      - "README.md"']))
         r = self.sc(args=())
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1531,7 +1652,7 @@ class ScaffoldHardeningTest(unittest.TestCase):
 
     def test_legacy_pages_with_other_differences_or_bad_extras_conflict(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         (self.t / self.PAGES).write_text(self.legacy_pages(['      - "docs/**"'], lambda t: t.replace("timeout-minutes: 30", "timeout-minutes: 7", 1)))
         snap = self.tree()
         self.assertEqual(self.sc(args=()).returncode, 3)
@@ -1561,22 +1682,22 @@ class ScaffoldHardeningTest(unittest.TestCase):
 
     def test_conflict_reason_distinguishes_skill_changed_or_not(self):
         self.init()
-        (self.t / self.MAIN_RS).write_text("// my edit\n")
+        (self.t / self.VEHICLE).write_text("# my edit\n")
         r = self.sc("--json", args=())
         c = json.loads(r.stdout)["conflicts"][0]
         self.assertEqual(c["kind"], "user_edited_skill_unchanged")
         self.assertIn("スキル側は配置時から変更なし", c["reason"])
         self.assertNotIn("スキルの新版と内容が異なる", r.stderr)
         sk = self.skill_copy()
-        (sk / "templates/docs-site-gen/src/main.rs").write_text(
-            (sk / "templates/docs-site-gen/src/main.rs").read_text() + "// v2\n")
+        (sk / "scripts/_common.py").write_text(
+            (sk / "scripts/_common.py").read_text() + "# v2\n")
         c = json.loads(self.sc("--json", args=(), skill=sk).stdout)["conflicts"][0]
         self.assertEqual(c["kind"], "user_edited_skill_changed")
         self.assertIn("スキル側も変更した", c["reason"])
 
     def test_no_manifest_conflict_mentions_migration(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         (self.t / self.BUILD_SH).write_text("#!/bin/sh\n")
         r = self.sc("--json", args=())
         j = json.loads(r.stdout)
@@ -1673,7 +1794,7 @@ class ScaffoldRound2Test(unittest.TestCase):
     """2 巡目のレビュー指摘（F1 ReDoS・F2 不可視文字・F5 想定外ファイル・F6・G1〜G5）の回帰テスト。"""
 
     ARGS = ScaffoldHardeningTest.ARGS
-    MAIN_RS = ScaffoldHardeningTest.MAIN_RS
+    VEHICLE = ScaffoldHardeningTest.VEHICLE
     BUILD_SH = ScaffoldHardeningTest.BUILD_SH
     MANIFEST = ScaffoldHardeningTest.MANIFEST
     PAGES = ScaffoldHardeningTest.PAGES
@@ -1753,12 +1874,12 @@ class ScaffoldRound2Test(unittest.TestCase):
         def leaked(blob):
             return [ch for ch in blob if 0xE0000 <= ord(ch) <= 0xE007F or ch in (zero_width, word_joiner)]
 
-        good_main = (self.t / self.MAIN_RS).read_text()
-        (self.t / self.MAIN_RS).write_text(f"// edit {hidden}{zero_width}\n")
+        good_main = (self.t / self.VEHICLE).read_text()
+        (self.t / self.VEHICLE).write_text(f"# edit {hidden}{zero_width}\n")
         for extra in (("--show-diff",), ("--show-diff", "--json")):
             r = self.sc(*extra, args=())
             self.assertEqual(leaked(r.stdout + r.stderr), [], extra)
-        (self.t / self.MAIN_RS).write_text(good_main)
+        (self.t / self.VEHICLE).write_text(good_main)
         nav = self.t / "site/nav.toml"
         before = nav.read_text()
         nav.write_text(before.replace('base_path = "/r"', f'base_path = "/r{hidden}{word_joiner}"', 1))
@@ -1887,6 +2008,7 @@ class ScaffoldRound2Test(unittest.TestCase):
         nav.unlink()
         nav.write_text(original)
         brand = self.t / "tools/docs-site-gen/brand.toml"
+        brand.write_text('[brand]\nname = "T"\n')   # 新構成の scaffold は配置しない。旧構成の残骸として置く
         good = brand.read_text()
         brand.unlink()
         brand.symlink_to(secret)   # brand.toml はビルドで読まれないため、symlink でも読まず結果に影響しない
@@ -1923,6 +2045,7 @@ class ScaffoldRound2Test(unittest.TestCase):
         nav.unlink()
         nav.write_text(good_nav)
         brand = self.t / "tools/docs-site-gen/brand.toml"
+        brand.write_text('[brand]\nname = "T"\n')
         good_brand = brand.read_text()
         brand.unlink()
         brand.symlink_to(self.t / ".env")
@@ -1958,7 +2081,7 @@ class ScaffoldRound2Test(unittest.TestCase):
         self.assertEqual(r.returncode, 3, "symlink は --update でも解消しない")
         self.assertEqual(victim.read_text(), "keep\n")
         # 効く競合が混ざる場合は両方を案内する
-        (self.t / self.MAIN_RS).write_text("// mine\n")
+        (self.t / self.VEHICLE).write_text("# mine\n")
         r = self.sc(args=())
         self.assertIn("同じ引数に --update を付けて", r.stderr)
         self.assertIn("--update でも上書きされない", r.stderr)
@@ -2001,7 +2124,7 @@ class ScaffoldRound2Test(unittest.TestCase):
 
     def test_legacy_migration_carries_valid_paths_and_warns_about_dropped(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         extras = ['      - "docs/**"', '      - "../escape"', '      - "README.md"', '      - "/abs/path"']
         (self.t / self.PAGES).write_text(self.legacy_pages(extras))
         r = self.sc("--json", args=())
@@ -2017,7 +2140,7 @@ class ScaffoldRound2Test(unittest.TestCase):
 
     def test_legacy_over_limit_keeps_first_twenty_with_reason(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         (self.t / self.PAGES).write_text(self.legacy_pages([f'      - "d{i:02d}/**"' for i in range(23)]))
         r = self.sc("--json", args=())
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -2220,7 +2343,7 @@ class ScaffoldRound3Test(unittest.TestCase):
 
     def test_update_guidance_requires_user_consent(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         (self.t / "tools/docs-site-gen/build-local.sh").write_text("#!/bin/sh\n")
         r = self.sc(args=())
         self.assertEqual(r.returncode, 3)
@@ -2232,7 +2355,7 @@ class ScaffoldRound3Test(unittest.TestCase):
 
     def test_legacy_loose_path_lines_are_reported_in_conflict_reason_and_update_warning(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         extras = ['      - "docs/**"', "      - 'single/**'", "      - unquoted/**"]
         (self.t / self.PAGES).write_text(self.legacy_pages(extras))
         r = self.sc("--json", args=())
@@ -2426,8 +2549,14 @@ class ScaffoldRound4Test(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
         self.assertEqual(self.snap(), before)
 
-    def test_src_being_a_regular_file_is_refused_without_writing(self):
-        self.assert_parent_file_refused("tools/docs-site-gen/src")
+    def test_src_being_a_regular_file_is_left_alone(self):
+        """src/ は旧構成（wrapper）の残骸でスキルは書かない。通常ファイルでも配置は成功し、触らない。"""
+        src = self.t / "tools/docs-site-gen/src"
+        src.parent.mkdir(parents=True)
+        src.write_text("not a directory\n")
+        r = self.sc("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(src.read_text(), "not a directory\n")
 
     def test_os_error_while_writing_is_reported_as_json_not_traceback(self):
         """分類後に書き込みが失敗しても（ここでは親ディレクトリの書き込み権限なし）、トレースバックにせず JSON を出す。"""
@@ -2495,7 +2624,7 @@ class ScaffoldAtomicWriteTest(unittest.TestCase):
 
     ARGS = ScaffoldHardeningTest.ARGS
     MANIFEST = ScaffoldHardeningTest.MANIFEST
-    MAIN_RS = ScaffoldHardeningTest.MAIN_RS
+    VEHICLE = ScaffoldHardeningTest.VEHICLE
     BUILD_SH = ScaffoldHardeningTest.BUILD_SH
     setUp = ScaffoldHardeningTest.setUp
     sc = ScaffoldHardeningTest.sc
@@ -2522,14 +2651,15 @@ class ScaffoldAtomicWriteTest(unittest.TestCase):
             f.write_text(f.read_text() + line)
         return skill
 
-    # main.rs（約 3.9KB）だけが上限を超え、Cargo.toml（約 1KB）・FF_REV（41B）は収まる大きさ
+    FF_REV_REL = "tools/docs-site-gen/FF_REV"
+    # 書き込み順は FF_REV（41B）→ build-local.sh（約 29KB）。build-local.sh だけが上限を超え、FF_REV は収まる大きさ
     LIMIT = 2000
 
     def test_failure_while_updating_owned_file_leaves_it_unchanged_and_rerun_converges(self):
         self.init()
-        before_main = (self.t / self.MAIN_RS).read_bytes()
-        skill = self.new_skill(**{"templates/docs-site-gen/Cargo.toml": "# v2-first\n",
-                                  "templates/docs-site-gen/src/main.rs": "// v2-last\n"})
+        before_sh = (self.t / self.BUILD_SH).read_bytes()
+        skill = self.new_skill(**{"scripts/build-local.sh": "# v2-last\n"})
+        (skill / "templates/docs-site-gen/FF_REV").write_text("b" * 40 + "\n")   # 先に書かれる FF_REV（上書き）
         before = self.snap()
         r = self.failing_sc(self.LIMIT, "--json", skill=skill, args=())
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
@@ -2537,25 +2667,25 @@ class ScaffoldAtomicWriteTest(unittest.TestCase):
         j = json.loads(r.stdout)
         self.assertEqual(j["exit_code"], 2)
         # 失敗したファイルは旧版のまま（切り詰められていない）。一時ファイルも残らない
-        self.assertEqual((self.t / self.MAIN_RS).read_bytes(), before_main)
-        self.assertIn(self.MAIN_RS, j["error"])
+        self.assertEqual((self.t / self.BUILD_SH).read_bytes(), before_sh)
+        self.assertIn(self.BUILD_SH, j["error"])
         self.assertIn("変更されていない", j["error"])
         self.assertEqual(self.leftovers(), [])
         # それ以前に書けたファイルは updated に記録され、実際に新版になっている
-        self.assertEqual([u["path"] for u in j["updated"]], ["tools/docs-site-gen/Cargo.toml"])
-        self.assertTrue((self.t / "tools/docs-site-gen/Cargo.toml").read_text().endswith("# v2-first\n"))
+        self.assertEqual([u["path"] for u in j["updated"]], [self.FF_REV_REL])
+        self.assertEqual((self.t / self.FF_REV_REL).read_text(), "b" * 40 + "\n")
         # マニフェストは未更新で、失敗した所有ファイルは旧マニフェストのハッシュと一致したまま
-        self.assertEqual(json.loads((self.t / self.MANIFEST).read_text())["files"][self.MAIN_RS],
-                         hashlib.sha256(before_main).hexdigest())
+        self.assertEqual(json.loads((self.t / self.MANIFEST).read_text())["files"][self.BUILD_SH],
+                         hashlib.sha256(before_sh).hexdigest())
         after = self.snap()
-        self.assertEqual([k for k in after if after[k] != before.get(k)], ["tools/docs-site-gen/Cargo.toml"])
-        # 原因を直した再実行（フラグなし）で収束する。書けた Cargo.toml は一致、main.rs は自動更新、競合なし
+        self.assertEqual([k for k in after if after[k] != before.get(k)], [self.FF_REV_REL])
+        # 原因を直した再実行（フラグなし）で収束する。書けた FF_REV は一致、build-local.sh は自動更新、競合なし
         r = self.sc("--json", skill=skill, args=())
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         j = json.loads(r.stdout)
-        self.assertIn("tools/docs-site-gen/Cargo.toml", j["same"])
-        self.assertEqual([u["path"] for u in j["updated"]], [self.MAIN_RS])
-        self.assertTrue((self.t / self.MAIN_RS).read_text().endswith("// v2-last\n"))
+        self.assertIn(self.FF_REV_REL, j["same"])
+        self.assertEqual([u["path"] for u in j["updated"]], [self.BUILD_SH])
+        self.assertTrue((self.t / self.BUILD_SH).read_text().endswith("# v2-last\n"))
         r = self.sc("--json", skill=skill, args=())
         j = json.loads(r.stdout)
         self.assertEqual((r.returncode, j["created"], j["updated"]), (0, [], []))
@@ -2564,15 +2694,15 @@ class ScaffoldAtomicWriteTest(unittest.TestCase):
         r = self.failing_sc(self.LIMIT, "--json")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         j = json.loads(r.stdout)
-        self.assertIn(self.MAIN_RS, j["error"])
-        self.assertFalse((self.t / self.MAIN_RS).exists(), "途中まで書かれた main.rs が残っている")
+        self.assertIn(self.BUILD_SH, j["error"])
+        self.assertFalse((self.t / self.BUILD_SH).exists(), "途中まで書かれた build-local.sh が残っている")
         self.assertEqual(self.leftovers(), [])
-        self.assertEqual(j["created"], ["tools/docs-site-gen/Cargo.toml"])
+        self.assertEqual(j["created"], [self.FF_REV_REL])
         r = self.sc("--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         j = json.loads(r.stdout)
-        self.assertIn("tools/docs-site-gen/Cargo.toml", j["same"])
-        self.assertIn(self.MAIN_RS, j["created"])
+        self.assertIn(self.FF_REV_REL, j["same"])
+        self.assertIn(self.BUILD_SH, j["created"])
 
     def test_manifest_write_failure_leaves_the_old_manifest_intact(self):
         self.init()
@@ -2619,13 +2749,13 @@ class ScaffoldAtomicWriteTest(unittest.TestCase):
         self.init()
         build = self.t / self.BUILD_SH
         self.assertTrue(os.access(build, os.X_OK))
-        os.chmod(self.t / self.MAIN_RS, 0o600)   # 利用者が絞った権限は更新後も保たれる
-        skill = self.new_skill(**{"scripts/build-local.sh": "# v2\n", "templates/docs-site-gen/src/main.rs": "// v2\n"})
+        os.chmod(self.t / self.VEHICLE, 0o600)   # 利用者が絞った権限は更新後も保たれる
+        skill = self.new_skill(**{"scripts/build-local.sh": "# v2\n", "scripts/_common.py": "# v2\n"})
         r = self.sc("--json", skill=skill, args=())
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(build.read_text().endswith("# v2\n"))
         self.assertTrue(os.access(build, os.X_OK), "更新後に実行権限が落ちた")
-        self.assertEqual(stat.S_IMODE((self.t / self.MAIN_RS).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.t / self.VEHICLE).stat().st_mode), 0o600)
         self.assertEqual(self.leftovers(), [])
 
     def test_new_files_follow_umask_not_mkstemp_0600(self):
@@ -2636,7 +2766,7 @@ class ScaffoldAtomicWriteTest(unittest.TestCase):
             self.init()
         finally:
             os.umask(old)
-        self.assertEqual(stat.S_IMODE((self.t / self.MAIN_RS).stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE((self.t / self.VEHICLE).stat().st_mode), 0o644)
         self.assertEqual(stat.S_IMODE((self.t / self.BUILD_SH).stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((self.t / self.MANIFEST).stat().st_mode), 0o644)
 
@@ -2773,7 +2903,7 @@ class ScaffoldCrlfAndOriginTest(unittest.TestCase):
 
     def test_crlf_legacy_pages_migrates_paths_into_region(self):
         self.init()
-        (self.t / self.MANIFEST).unlink()
+        make_old_layout(self.t, recorded=False)
         p = self.t / self.PAGES
         p.write_text(self.legacy_pages(['      - "docs/**"', '      - "README.md"']))
         self.to_crlf(p)
@@ -2830,7 +2960,7 @@ class UpdateSnapshotTest(unittest.TestCase):
 
     SH = SCRIPTS / "update-snapshot.sh"
     ARGS = ScaffoldHardeningTest.ARGS
-    MAIN_RS = ScaffoldHardeningTest.MAIN_RS
+    VEHICLE = ScaffoldHardeningTest.VEHICLE
     PAGES = ScaffoldHardeningTest.PAGES
     MANIFEST = ScaffoldHardeningTest.MANIFEST
     BUILD_SH = ScaffoldHardeningTest.BUILD_SH
@@ -2868,8 +2998,8 @@ class UpdateSnapshotTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", "baseline")
         sk = self.skill_copy()
-        (sk / "templates/docs-site-gen/src/main.rs").write_text(
-            (sk / "templates/docs-site-gen/src/main.rs").read_text() + "// v9\n")
+        (sk / "scripts/_common.py").write_text(
+            (sk / "scripts/_common.py").read_text() + "# v9\n")
         tpl = sk / "templates/pages.yml"
         tpl.write_text(tpl.read_text().replace("timeout-minutes: 30", "timeout-minutes: 61", 1))
         chk = sk / "scripts/check_site.py"
@@ -2878,7 +3008,7 @@ class UpdateSnapshotTest(unittest.TestCase):
         r = self.sc("--json", args=("--branch", "main"), skill=sk)
         self.assertEqual(r.returncode, 0, r.stderr)
         j = json.loads(r.stdout)
-        self.assertEqual(sorted(u["path"] for u in j["updated"]), sorted([self.MAIN_RS, self.PAGES, self.CHK]))
+        self.assertEqual(sorted(u["path"] for u in j["updated"]), sorted([self.VEHICLE, self.PAGES, self.CHK]))
         rr = self.sh("record-json", self.snap, stdin=r.stdout)
         self.assertEqual(rr.returncode, 0, rr.stderr)
         return j
@@ -2901,9 +3031,9 @@ class UpdateSnapshotTest(unittest.TestCase):
         self.assertEqual(res[self.PAGES], "ASK")
         self.assertIn('      - "docs/**"', self.t.joinpath(self.PAGES).read_text())
         self.assertEqual(res[self.CHK], "RESTORED")
-        self.assertEqual(res[self.MAIN_RS], "RESTORED")
+        self.assertEqual(res[self.VEHICLE], "RESTORED")
         self.assertEqual(res[self.MANIFEST], "RESTORED")
-        self.assertNotIn("// v9", self.t.joinpath(self.MAIN_RS).read_text())
+        self.assertNotIn("# v9", self.t.joinpath(self.VEHICLE).read_text())
         self.assertNotIn("# v9", self.t.joinpath(self.CHK).read_text())
         self.assertIn("timeout-minutes: 61", self.pages_text())   # 戻していない（ASK）
 
@@ -2912,11 +3042,11 @@ class UpdateSnapshotTest(unittest.TestCase):
 
     def test_hand_edited_owned_file_is_asked_and_kept(self):
         self.baseline_and_u1()
-        with self.t.joinpath(self.MAIN_RS).open("a") as fh:
-            fh.write("// my hand merge\n")
+        with self.t.joinpath(self.VEHICLE).open("a") as fh:
+            fh.write("# my hand merge\n")
         r, res = self.restore()
-        self.assertEqual(res[self.MAIN_RS], "ASK")
-        self.assertIn("// my hand merge", self.t.joinpath(self.MAIN_RS).read_text())
+        self.assertEqual(res[self.VEHICLE], "ASK")
+        self.assertIn("# my hand merge", self.t.joinpath(self.VEHICLE).read_text())
         self.assertEqual(res[self.CHK], "RESTORED")
 
     def test_third_party_licenses_edit_is_kept_unedited_is_reverted(self):
@@ -2973,16 +3103,16 @@ class UpdateSnapshotTest(unittest.TestCase):
         victim.write_text("keep\n")
         (self.t / self.CHK).unlink()
         (self.t / self.CHK).symlink_to(victim)
-        (self.t / self.MAIN_RS).unlink()
+        (self.t / self.VEHICLE).unlink()
         r, res = self.restore()
         self.assertEqual(res[self.CHK], "ASK")
         self.assertIn("symlink", r.stdout)
-        self.assertEqual(res[self.MAIN_RS], "ASK")
+        self.assertEqual(res[self.VEHICLE], "ASK")
         self.assertIn("消えている", r.stdout)
         self.assertEqual(victim.read_text(), "keep\n")
         st = self.sh("status", self.snap).stdout
         self.assertIn(f"symlink {self.CHK}", st)
-        self.assertIn(f"missing {self.MAIN_RS}", st)
+        self.assertIn(f"missing {self.VEHICLE}", st)
 
     def test_record_json_excludes_user_files_and_unwritten_runs(self):
         """利用者編集ファイル（created でも）は記録しない = 自動で削除しない。書き込みが無い実行は何も記録しない。"""
@@ -3034,7 +3164,7 @@ class UpdateSnapshotHardeningTest(unittest.TestCase):
 
     SH = UpdateSnapshotTest.SH
     ARGS = UpdateSnapshotTest.ARGS
-    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    VEHICLE = UpdateSnapshotTest.VEHICLE
     PAGES = UpdateSnapshotTest.PAGES
     MANIFEST = UpdateSnapshotTest.MANIFEST
     BUILD_SH = UpdateSnapshotTest.BUILD_SH
@@ -3157,7 +3287,7 @@ class UpdateSnapshotHardeningTest(unittest.TestCase):
         sk = self.skill_copy()
         tpl = sk / "templates/pages.yml"
         tpl.write_text(tpl.read_text().replace("timeout-minutes: 30", "timeout-minutes: 61", 1))
-        (self.t / self.MAIN_RS).write_text("// user edit\n")        # 競合を作る（exit 3）
+        (self.t / self.VEHICLE).write_text("# user edit\n")        # 競合を作る（exit 3）
         self.assertEqual(self.sh("guard", self.snap).returncode, 0)
         r = self.sc("--json", args=("--branch", "main"), skill=sk)
         self.assertEqual(r.returncode, 3)
@@ -3248,13 +3378,13 @@ class UpdateSnapshotHardeningTest(unittest.TestCase):
 
     def test_t7_dry_run_changes_nothing_and_exit_codes(self):
         self.baseline_and_u1()
-        with (self.t / self.MAIN_RS).open("a") as fh:
-            fh.write("// hand\n")
+        with (self.t / self.VEHICLE).open("a") as fh:
+            fh.write("# hand\n")
         snap_before = self.snap.read_text()
         before = {p: p.read_bytes() for p in self.t.rglob("*") if p.is_file() and ".git" not in p.parts}
         r = self.sh("restore", self.snap, "--dry-run")
         self.assertEqual(r.returncode, 4)
-        self.assertIn(f"ASK {self.MAIN_RS}", r.stdout)
+        self.assertIn(f"ASK {self.VEHICLE}", r.stdout)
         self.assertIn(f"WOULD-RESTORE {self.CHK}", r.stdout)
         self.assertNotIn("RESTORED ", r.stdout)
         self.assertEqual({p: p.read_bytes() for p in self.t.rglob("*") if p.is_file() and ".git" not in p.parts}, before)
@@ -3440,7 +3570,7 @@ class UpdateSnapshotFilterAttrTest(unittest.TestCase):
 
     SH = UpdateSnapshotTest.SH
     ARGS = UpdateSnapshotTest.ARGS
-    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    VEHICLE = UpdateSnapshotTest.VEHICLE
     PAGES = UpdateSnapshotTest.PAGES
     MANIFEST = UpdateSnapshotTest.MANIFEST
     BUILD_SH = UpdateSnapshotTest.BUILD_SH
@@ -3474,7 +3604,7 @@ class UpdateSnapshotFilterAttrTest(unittest.TestCase):
             self.assertFalse(Path(str(self.sentinel) + "-p").exists(), f"{mode}: process フィルタが実行された")
         self.assertIn("# v9", (self.t / self.CHK).read_text(), "filter 属性のパスは戻さない")
         # filter 属性の無いパスは、グローバルに filter 定義があっても従来どおり戻る
-        self.assertNotIn("// v9", (self.t / self.MAIN_RS).read_text())
+        self.assertNotIn("# v9", (self.t / self.VEHICLE).read_text())
         self.assertFalse(self.sentinel.exists())
 
     def test_dry_run_and_real_run_agree(self):
@@ -3482,10 +3612,10 @@ class UpdateSnapshotFilterAttrTest(unittest.TestCase):
         self.baseline_and_u1()
         (self.t / ".gitattributes").write_text(f"{self.CHK} filter=evil\n")
         d = self.sh("restore", self.snap, "--dry-run").stdout
-        self.assertIn(f"WOULD-RESTORE {self.MAIN_RS}", d)
+        self.assertIn(f"WOULD-RESTORE {self.VEHICLE}", d)
         self.assertIn(f"ASK {self.CHK}", d)
         r = self.sh("restore", self.snap).stdout
-        self.assertIn(f"RESTORED {self.MAIN_RS}", r)
+        self.assertIn(f"RESTORED {self.VEHICLE}", r)
         self.assertIn(f"ASK {self.CHK}", r)
 
     def test_attribute_from_global_attributesfile_is_covered(self):
@@ -3566,7 +3696,7 @@ class UpdateSnapshotEntrypointTest(unittest.TestCase):
 
     SH = UpdateSnapshotTest.SH
     ARGS = UpdateSnapshotTest.ARGS
-    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    VEHICLE = UpdateSnapshotTest.VEHICLE
     PAGES = UpdateSnapshotTest.PAGES
     MANIFEST = UpdateSnapshotTest.MANIFEST
     BUILD_SH = UpdateSnapshotTest.BUILD_SH
@@ -3640,7 +3770,7 @@ class UpdateSnapshotEntrypointTest(unittest.TestCase):
             "status": self.sh("status", self.snap),
             "restore": self.sh("restore", self.snap),
             "dry-run": self.sh("restore", self.snap, "--dry-run"),
-            "record": self.sh("record", self.snap, self.CHK, self.MAIN_RS, self.MANIFEST),
+            "record": self.sh("record", self.snap, self.CHK, self.VEHICLE, self.MANIFEST),
             "guard": self.sh("guard", self.snap),
         }
         for name, r in runs.items():
@@ -3669,19 +3799,19 @@ class UpdateSnapshotEntrypointTest(unittest.TestCase):
 
     def test_y2a_staged_other_content_with_worktree_restored_to_recorded_is_ask(self):
         self.baseline_and_u1()
-        recorded = (self.t / self.MAIN_RS).read_text()
-        (self.t / self.MAIN_RS).write_text(recorded + "// staged by the user\n")
-        self.git("add", "--", self.MAIN_RS)
-        (self.t / self.MAIN_RS).write_text(recorded)                # 作業ツリーは記録時の内容へ戻す
-        cached_before = self.git("diff", "--cached", "--", self.MAIN_RS)
+        recorded = (self.t / self.VEHICLE).read_text()
+        (self.t / self.VEHICLE).write_text(recorded + "# staged by the user\n")
+        self.git("add", "--", self.VEHICLE)
+        (self.t / self.VEHICLE).write_text(recorded)                # 作業ツリーは記録時の内容へ戻す
+        cached_before = self.git("diff", "--cached", "--", self.VEHICLE)
         self.assertIn("staged by the user", cached_before)
         for mode in (("--dry-run",), ()):
             r = self.sh("restore", self.snap, *mode)
             self.assertEqual(r.returncode, 4, f"{mode}: {r.stdout}{r.stderr}")
-            self.assertIn(f"ASK {self.MAIN_RS} index に HEAD と違う内容がある", r.stdout)
-            self.assertNotIn(f"RESTORED {self.MAIN_RS}", r.stdout)
-            self.assertEqual(self.git("diff", "--cached", "--", self.MAIN_RS), cached_before, "ステージ済みの変更が消えた")
-        self.assertEqual((self.t / self.MAIN_RS).read_text(), recorded)
+            self.assertIn(f"ASK {self.VEHICLE} index に HEAD と違う内容がある", r.stdout)
+            self.assertNotIn(f"RESTORED {self.VEHICLE}", r.stdout)
+            self.assertEqual(self.git("diff", "--cached", "--", self.VEHICLE), cached_before, "ステージ済みの変更が消えた")
+        self.assertEqual((self.t / self.VEHICLE).read_text(), recorded)
         self.assertIn("staged", self.sh("status", self.snap).stdout)
 
     def test_y2b_new_file_added_by_user_keeps_file_and_index_entry(self):
@@ -3701,19 +3831,19 @@ class UpdateSnapshotEntrypointTest(unittest.TestCase):
         idx_before = self.git("ls-files", "-s")
         r, res = self.restore()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(res[self.MAIN_RS], "RESTORED")
-        self.assertNotIn("// v9", (self.t / self.MAIN_RS).read_text())
+        self.assertEqual(res[self.VEHICLE], "RESTORED")
+        self.assertNotIn("# v9", (self.t / self.VEHICLE).read_text())
         self.assertEqual(self.git("ls-files", "-s"), idx_before, "restore が index を書き換えた")
         self.assertEqual(self.git("diff", "--cached", "--stat"), "")
 
     def test_y2_unmerged_skip_worktree_assume_unchanged_are_ask(self):
         self.baseline_and_u1()
         self.git("update-index", "--skip-worktree", "--", self.CHK)
-        self.git("update-index", "--assume-unchanged", "--", self.MAIN_RS)
+        self.git("update-index", "--assume-unchanged", "--", self.VEHICLE)
         r = self.sh("restore", self.snap)
         self.assertEqual(r.returncode, 4, r.stdout)
         self.assertIn(f"ASK {self.CHK} index の状態を判定できない", r.stdout)
-        self.assertIn(f"ASK {self.MAIN_RS} index の状態を判定できない", r.stdout)
+        self.assertIn(f"ASK {self.VEHICLE} index の状態を判定できない", r.stdout)
         self.assertIn("# v9", (self.t / self.CHK).read_text())
 
     def test_y2_guard_marks_staged_paths_as_taint(self):
@@ -3758,7 +3888,7 @@ class UpdateSnapshotLineEndingTest(unittest.TestCase):
 
     SH = UpdateSnapshotTest.SH
     ARGS = UpdateSnapshotTest.ARGS
-    MAIN_RS = UpdateSnapshotTest.MAIN_RS
+    VEHICLE = UpdateSnapshotTest.VEHICLE
     BUILD_SH = UpdateSnapshotTest.BUILD_SH
     CHK = UpdateSnapshotTest.CHK
     TPL = UpdateSnapshotTest.TPL
@@ -3805,17 +3935,17 @@ class UpdateSnapshotLineEndingTest(unittest.TestCase):
             self.setUp()
             self.crlf_repo(variant)
             self.assertEqual(self.sh("guard", self.snap).stdout.count("印:"), 0)
-            (self.t / self.MAIN_RS).write_bytes((self.t / self.MAIN_RS).read_bytes().replace(b"\r\n", b"\n") + b"// v9\n")  # スキルが LF で書く
-            self.rec(self.MAIN_RS)
+            (self.t / self.VEHICLE).write_bytes((self.t / self.VEHICLE).read_bytes().replace(b"\r\n", b"\n") + b"# v9\n")  # スキルが LF で書く
+            self.rec(self.VEHICLE)
             r, res = self.restore()
             self.assertEqual(r.returncode, 0, f"{variant}: {r.stdout}{r.stderr}")
-            self.assertEqual(res[self.MAIN_RS], "RESTORED")
-            self.assertNotIn(b"// v9", (self.t / self.MAIN_RS).read_bytes())
-            self.assertIn(b"\r\n", (self.t / self.MAIN_RS).read_bytes(), "復元後は改行変換後（CRLF）になる")
+            self.assertEqual(res[self.VEHICLE], "RESTORED")
+            self.assertNotIn(b"# v9", (self.t / self.VEHICLE).read_bytes())
+            self.assertIn(b"\r\n", (self.t / self.VEHICLE).read_bytes(), "復元後は改行変換後（CRLF）になる")
             # 復旧の 2 回目: 戻したファイルは記録（生バイト）と違うが、HEAD と同じなので ASK にせず SKIP
             r2 = self.sh("restore", self.snap)
             self.assertEqual(r2.returncode, 0, f"{variant}: {r2.stdout}{r2.stderr}")
-            self.assertIn(f"SKIP {self.MAIN_RS} すでに HEAD と同じ内容", r2.stdout)
+            self.assertIn(f"SKIP {self.VEHICLE} すでに HEAD と同じ内容", r2.stdout)
             self.assertNotIn("ASK", r2.stdout)
 
     def test_edited_after_record_is_still_ask_and_second_run_after_delete_is_skip(self):
@@ -4094,7 +4224,10 @@ class ScaffoldTest(unittest.TestCase):
         self.assertEqual(self.scaffold().returncode, 0)
         self.assertEqual((self.tmp / "site/index.md").read_text(), "edited\n")
         gi = (self.tmp / ".gitignore").read_text()
-        self.assertEqual(gi.count("_ff/"), 1)
+        self.assertEqual(gi.count("_ff/"), 0, "上流の匿名 install へ移ったため _ff/ は無視しない")
+        self.assertEqual(gi.count("Cargo.lock"), 0)
+        self.assertEqual(gi.count("tools/docs-site-gen/target/"), 1)
+        self.assertEqual(gi.count("_site/"), 1)
         self.assertTrue((self.tmp / "tools/docs-site-gen/build-local.sh").stat().st_mode & 0o111)
 
     def test_injection_like_values(self):
