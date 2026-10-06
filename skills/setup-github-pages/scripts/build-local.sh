@@ -392,15 +392,10 @@ fi
 # 出力する。これは MIT / Apache-2.0 の通知義務を担う部分のため、上流の DOM が変わっても黙って
 # 消えないよう、文言とリンクが 1 つの連続した並びとして存在することを見る（FF_REV 更新時に実出力で再確認する）。
 # 読むだけで書かない。エラーには dist からの相対パスだけを出し、ファイルの内容は出さない。
-# 帰属表記（フッターの 1 件）を除いた残りに、上流名（fandhe-frontend）・上流 URL（github.com/Fandhe-AI/fandhe-frontend）が
-# 残っていれば失敗にする（上流の既定ブランド・リンクの混入を止める）。ただし利用者が `[site]` の値に上流名を
-# 書いている場合（第 2 引数の nav.toml を読んで判定）は、生成器がその値を出すと tests/fixtures/site-keys の
-# 実出力で確認できた箇所（ヘッダーのブランドリンク a.docs-brand・フッターのブランド枠・著作権表示の段落）の中に限り、値と一致する文字列を許容する。
-# 本文・サイドバー・目次など区間の外に同じ文字列が残っていれば、値と一致していても残存として失敗にする。
-# 上流名に続く `-docs` など別名（リポジトリ名 fandhe-frontend-docs 等）は上流名とみなさない。
+# 生成物の中の上流名の残存は検査しない（利用者が `[site]` に上流名を書いてよいため。`check_site.py` が必須キーを強制する）。
 # 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
 verify_attribution() {
-  local dist="$1" nav="${2:-}" up pat list links f rel rc n=0 has_chrome
+  local dist="$1" up pat list links f rel rc n=0 has_chrome
   up='https://github\.com/Fandhe-AI/fandhe-frontend'
   pat="Built with <a [^>]*href=\"${up}\"[^>]*>fandhe-frontend docs-site</a> \\(<a [^>]*href=\"${up}/blob/main/LICENSE-MIT\"[^>]*>MIT</a> OR <a [^>]*href=\"${up}/blob/main/LICENSE-APACHE\"[^>]*>Apache-2\\.0</a>\\)"
 
@@ -473,12 +468,12 @@ sys.exit(0 if re.fullmatch(shape, t) else 1)
     # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
     # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
     rc=0
-    SGP_PAT="${pat}" SGP_SCRIPTS="${SCRIPT_DIR}" SGP_NAV="${nav}" python3 -I -B -c '
-import html, os, re, sys
+    SGP_PAT="${pat}" SGP_SCRIPTS="${SCRIPT_DIR}" python3 -I -B -c '
+import os, re, sys
 from pathlib import Path
 # 末尾に足す: 先頭だと対象リポジトリ由来の同名ファイルより先にスキル側が読まれるが、標準ライブラリを隠せない位置に置く
 sys.path.append(os.environ["SGP_SCRIPTS"])
-from _common import parse_nav, read_bounded_text
+from _common import read_bounded_text
 # 読み取り上限は上の事前検査（ファイルごと 8 MiB）と同値。超過・UTF-8 不正は検査自体の失敗（exit 3）
 try:
     t = read_bounded_text(Path(sys.argv[1]), 8 * 1024 * 1024)
@@ -487,53 +482,10 @@ except (OSError, ValueError):
 foots = re.findall(r"<footer class=\"docs-footer\">.*?</footer>", t, re.S)
 if len(foots) != 1:
     sys.exit(1)
-attrs = re.findall(os.environ["SGP_PAT"], foots[0])
-if len(attrs) != 1:
-    sys.exit(1)
-# 帰属表記 1 件を除いた残りに上流名・上流 URL があれば残存（exit 4）。[site] に上流名を書いた利用者のために、
-# 上流名を含む [site] の値と一致する箇所を除くが、除くのは生成器が値を出す確認済みの区間の内側だけにする
-# （区間の外は値と同じ文字列でも検査する。値の一部に上流名が含まれるだけで HTML 全体の検査を止めない）
-rest = t.replace(re.search(os.environ["SGP_PAT"], foots[0]).group(0), "", 1)
-tok = r"(?<![A-Za-z0-9_-])fandhe-frontend(?![A-Za-z0-9_-])"
-url = r"github\.com/Fandhe-AI/fandhe-frontend(?![A-Za-z0-9_-])"
-nav = os.environ.get("SGP_NAV", "")
-if nav:
-    try:
-        vals = set()
-        for tb in parse_nav(read_bounded_text(Path(nav), 1024 * 1024)):
-            if tb.header == "site":
-                for v in tb.values.values():
-                    if isinstance(v, str) and re.search(tok, v, re.I):
-                        vals.add(v)
-                        vals.add(html.escape(v))
-                        vals.add(html.escape(v, quote=False))
-    except (OSError, ValueError):
-        sys.exit(3)
-    # 長い値から順に除く。値の直前が "/" のとき（URL の末尾の要素）と英数字・_・- に続くときは値の一部とみなさない
-    ordered = sorted(vals, key=len, reverse=True)
-    def strip_values(m):
-        seg = m.group(0)
-        for v in ordered:
-            seg = re.sub(r"(?<![A-Za-z0-9_/-])" + re.escape(v) + r"(?![A-Za-z0-9_-])", "", seg, flags=re.I)
-        return seg
-    # 許容区間: ヘッダーのブランドリンク（a.docs-brand。同じヘッダー内のセクションナビは含めない）・フッターのブランド枠（ブランド名とタグライン）・著作権表示の最初の段落。
-    # いずれも内側に同種の要素を入れ子にしない形なので、最短一致で閉じタグまでを区間とする
-    zones = (
-        r"<a [^>]*class=\"docs-brand\"[^>]*>.*?</a>"
-        r"|<div class=\"docs-footer-brand\">.*?</div>"
-        r"|<div class=\"docs-footer-bottom\"><p [^>]*>.*?</p>"
-    )
-    rest = re.sub(zones, strip_values, rest, flags=re.S)
-if re.search(tok, rest, re.I) or re.search(url, rest, re.I):
-    sys.exit(4)
-sys.exit(0)
+sys.exit(0 if len(re.findall(os.environ["SGP_PAT"], foots[0])) == 1 else 1)
 ' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
       echo "エラー: ${rel} のフッター（docs-footer）に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）がちょうど 1 件ない" >&2
-      return 1
-    fi
-    if [[ "${rc}" -eq 4 ]]; then
-      echo "エラー: ${rel} に上流名・上流 URL（fandhe-frontend）が帰属表記以外に残っている（[site] の値と一致しても、生成器が値を出す区間の外は除かない）" >&2
       return 1
     fi
     if [[ "${rc}" -eq 3 ]]; then
@@ -556,6 +508,6 @@ step "verify"
 for f in index.html 404.html assets/site.css assets/site.js assets/search-index.json; do
   test -s "${OUT}/${f}" || { echo "エラー: ${f} が無い、または空" >&2; exit 1; }
 done
-verify_attribution "${OUT}" "${ROOT}/site/nav.toml" || exit 1
+verify_attribution "${OUT}" || exit 1
 
 step "完了: ${OUT}"

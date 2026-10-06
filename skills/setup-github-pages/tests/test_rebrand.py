@@ -4278,105 +4278,12 @@ class VerifyAttributionTest(unittest.TestCase):
         self.mutate("index.html", dup)
         self.assertEqual(self.verify().returncode, 1)
 
-    def verify_nav(self, nav_text):
-        nav = self.base / "nav.toml"
-        nav.write_text(nav_text, encoding="utf-8")
-        script = (f"set -euo pipefail\nSCRIPT_DIR={SCRIPTS}\n" + self.func
-                  + '\nverify_attribution "$1" "$2" || exit 1\n')
-        return subprocess.run(["bash", "-c", script, "_", str(self.dist), str(nav)], capture_output=True, text=True)
-
-    def test_upstream_name_or_url_outside_attribution_fails(self):
-        injections = {
-            "名前": "<span>fandhe-frontend</span>",
-            "URL": f'<a href="{self.UP}">x</a>',
-            "URL サブパス": f'<a href="{self.UP}/issues">x</a>',
-        }
-        good = (self.dist / "index.html").read_text(encoding="utf-8")
-        for label, inj in injections.items():
-            (self.dist / "index.html").write_text(good, encoding="utf-8")
-            self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                        '<header class="docs-header">' + inj, 1))
-            r = self.verify()
-            self.assertEqual(r.returncode, 1, label)
-            self.assertIn("index.html", r.stderr, label)
-            self.assertNotIn("fandhe-frontend)", r.stderr)
-
-    def test_upstream_name_in_site_values_is_tolerated(self):
-        # 値が出る確認済みの区間（ヘッダーのブランドリンク）の中なら許容する
-        self.mutate("index.html", lambda t: t.replace(">Mini</a><nav", "><span>fandhe-frontend docs</span></a><nav", 1))
-        r = self.verify_nav('[site]\ntitle = "fandhe-frontend docs"\n')
-        self.assertEqual(r.returncode, 0, r.stderr)
-        r = self.verify_nav('[site]\ntitle = "Mini"\n')
-        self.assertEqual(r.returncode, 1)
-
-    def test_site_value_tolerance_is_limited_to_generated_regions(self):
-        # 許容するのは fixtures/site-keys の実出力で `[site]` の値が出る箇所だけ（ヘッダーのブランドリンク・フッターのブランド枠・
-        # 著作権表示）。同じ文字列が本文・サイドバー・目次に残っていれば残存として失敗にする
-        nav = '[site]\nbrand = "fandhe-frontend docs"\ntagline = "fandhe-frontend docs"\ncopyright = "fandhe-frontend docs"\n'
-        val = "fandhe-frontend docs"
-        good = (self.dist / "index.html").read_text(encoding="utf-8")
-        allowed = {
-            "ヘッダーのブランド": lambda t: t.replace(">Mini</a><nav", f">{val}</a><nav", 1),
-            "フッターのブランド名": lambda t: t.replace('brand-name">Mini<', f'brand-name">{val}<', 1),
-            "フッターのタグライン": lambda t: t.replace('tagline">Tiny site<', f'tagline">{val}<', 1),
-            "著作権表示": lambda t: t.replace("© 2026 acme", f"© 2026 {val}", 1),
-        }
-        for label, fn in allowed.items():
-            self.mutate("index.html", fn)
-            self.assertNotEqual((self.dist / "index.html").read_text(encoding="utf-8"), good, label)
-            r = self.verify_nav(nav)
-            self.assertEqual(r.returncode, 0, f"{label}: {r.stderr}")
-            (self.dist / "index.html").write_text(good, encoding="utf-8")
-        denied = {
-            "本文": lambda t: t.replace("<h1>Mini</h1>", f"<h1>{val}</h1>", 1),
-            "サイドバー": lambda t: t.replace('data-current="">Home</a>', f'data-current="">{val}</a>', 1),
-            "目次": lambda t: t.replace('<h2 class="docs-toc-title" id="docs-toc-heading">On this page',
-                                        f'<h2 class="docs-toc-title" id="docs-toc-heading">{val}', 1),
-            "フッターのナビ": lambda t: t.replace('accent">Guide</a></li></ul></div><div class="docs-footer-group">',
-                                           f'accent">{val}</a></li></ul></div><div class="docs-footer-group">', 1),
-        }
-        for label, fn in denied.items():
-            self.mutate("index.html", fn)
-            self.assertNotEqual((self.dist / "index.html").read_text(encoding="utf-8"), good, label)
-            r = self.verify_nav(nav)
-            self.assertEqual(r.returncode, 1, label)
-            self.assertIn("上流名", r.stderr, label)
-            (self.dist / "index.html").write_text(good, encoding="utf-8")
-        # ヘッダー内でもブランドのリンク（a.docs-brand）の外（サイトセクションのナビ）は許容区間ではない
-        self.mutate("index.html", lambda t: t.replace('docs-header-trigger" aria-current="true" data-current="">Guide<',
-                    f'docs-header-trigger" aria-current="true" data-current="">{val}<', 1))
-        self.assertNotEqual((self.dist / "index.html").read_text(encoding="utf-8"), good)
-        r = self.verify_nav(nav)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("上流名", r.stderr)
-        (self.dist / "index.html").write_text(good, encoding="utf-8")
-        # 許容区間に出る値と本文の残存が同居していても、本文側で失敗する
-        self.mutate("index.html", lambda t: allowed["ヘッダーのブランド"](denied["本文"](t)))
-        self.assertEqual(self.verify_nav(nav).returncode, 1)
-
-    def test_site_value_tolerance_is_scoped_to_the_value(self):
-        # 許容は [site] の値と一致する箇所だけ。値に上流名が含まれても HTML 全体の検査は止まらない
-        nav = '[site]\ntitle = "fandhe-frontend docs"\n'
-        for label, inj in {
-            "別ヘッダー表示": "<span>fandhe-frontend</span>",
-            "上流リポジトリへのリンク": f'<a href="{self.UP}">x</a>',
-            "別名 repo の末尾": f'<a href="{self.UP}-docs/x">x</a><b>/fandhe-frontend</b>',
-        }.items():
-            good = (self.dist / "index.html").read_text(encoding="utf-8")
-            self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                        '<header class="docs-header"><i>fandhe-frontend docs</i>' + inj, 1))
-            r = self.verify_nav(nav)
-            self.assertEqual(r.returncode, 1, label)
-            (self.dist / "index.html").write_text(good, encoding="utf-8")
-
-    def test_similar_name_in_site_value_does_not_disable_check(self):
+    def test_upstream_name_outside_attribution_is_not_rejected(self):
+        # 帰属表記以外の上流名は検査しない（利用者が `[site]` に書いた値を、置換も拒否もしないため）
         self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                    '<header class="docs-header"><span>fandhe-frontend-docs</span><b>fandhe-frontend</b>', 1))
-        r = self.verify_nav('[site]\nbrand = "fandhe-frontend-docs"\n')
-        self.assertEqual(r.returncode, 1, r.stderr)
-        # 値そのものの箇所だけなら許容
-        self.mutate("index.html", lambda t: t.replace("<b>fandhe-frontend</b>", "", 1))
-        r = self.verify_nav('[site]\nbrand = "fandhe-frontend-docs"\n')
+                    '<header class="docs-header"><span>fandhe-frontend</span>'
+                    f'<a href="{self.UP}">x</a>', 1))
+        r = self.verify()
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_oversized_html_stops_the_check(self):
