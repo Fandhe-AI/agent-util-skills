@@ -90,11 +90,11 @@ bash tools/docs-site-gen/build-local.sh --clean --write-third-party
 3. `check_site.py`（`[site]` のブランド値と base_path 整合・予約パス・予約アセット・プレースホルダー残存）
 4. `docs-site` を匿名 `cargo install --git`（`--rev "${FF_REV}" --locked`、インストール先は `tools/docs-site-gen/target/docs-site-install`）。検査済み記録・実行ファイル・台帳（`.crates.toml`）の URL と `FF_REV` がすべて一致する場合は `build-local.sh` が再インストールを省略し、欠落・不一致は再インストールへ倒す
 5. `docs-site --no-page-sections` でサイトを `_site/` へ生成（リンク検査は fail-closed）
-6. 最小 verify と帰属表記の確認（`verify_attribution`。生成後の置換は無い。Built with … docs-site の文言と MIT / Apache-2.0 のリンク 2 本が連なって残っていること、およびヘッダー・フッターに帰属表記以外の上流名が残っていないこと（利用者の `[site]` の値は許容）を見る）
+6. 最小 verify と帰属表記の確認（`verify_attribution`。生成後の置換は無い。Built with … docs-site の文言と MIT / Apache-2.0 のリンク 2 本が連なって残っていること、および生成 HTML 全体に帰属表記以外の上流名が残っていないこと（利用者の `[site]` の値は許容）を見る）
 
 **信頼できないリポジトリではローカルビルドをしない。** ローカルビルドは対象リポジトリ内のコード（`tools/docs-site-gen/` のスクリプト、`rust-toolchain.toml`、`.cargo/` の設定など。cargo は呼び出し時のカレントディレクトリの `.cargo/config.toml` を読む）を実行・読み込む。第三者の PR や、内容を信頼できないリポジトリでは実行せず、CI か隔離環境（使い捨てのコンテナ・VM）で確認する。`scaffold.py` が「スキルが配置していない `*.py`・`build.rs`・`.cargo/`、`path` キーを持つ `rust-toolchain`」などを見つけると `warnings` に出す（中止はしない）。**そのような警告があるときは、内容を利用者に示して了承を得るまで、ローカルビルド（更新の Step U2、新規構築の Step N3）へ進まない。**
 
-`THIRD-PARTY-LICENSES` はリポジトリへコミットする。生成サイトには上流 SSG の出力（HTML / CSS / JS）が含まれるため、MIT の著作権表示とライセンス文の同梱が必要になる。フッターの「Built with fandhe-frontend docs-site (MIT OR Apache-2.0)」の表記とライセンスリンクは後処理が保持する。これは帰属の実務手順であり、法的助言ではない。判断が必要な場合は法務に確認する。
+`THIRD-PARTY-LICENSES` はリポジトリへコミットする。生成サイトには上流 SSG の出力（HTML / CSS / JS）が含まれるため、MIT の著作権表示とライセンス文の同梱が必要になる。フッターの「Built with fandhe-frontend docs-site (MIT OR Apache-2.0)」の表記とライセンスリンクは上流の出力のまま保持される。これは帰属の実務手順であり、法的助言ではない。判断が必要な場合は法務に確認する。
 
 ## フロー
 
@@ -389,7 +389,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 ## 注意事項
 
 - **入力検証**: ブランド表示・URL・ブランチ名はすべて `scaffold.py` / `_common.py` が検証・エスケープする（リポジトリ URL は `https://github.com/<owner>/<repo>` のみ、HTML 出力は `html.escape`）。シェルへ渡す変数は常に `"${VAR}"` でクォートする。外部入力を `sed` や `bash -c` の文字列に展開しない
-- **CSP を壊さない**: 生成物の CSP は `script-src 'self'` 等で厳格。後処理はインライン script / style を一切追加しない。サイトへ手でインラインスクリプトを足さない
+- **CSP を壊さない**: 生成物の CSP は `script-src 'self'` 等で厳格。生成物にインライン script / style を一切追加しない。サイトへ手でインラインスクリプトを足さない
 - **生成後の置換はしない**: ブランドは `nav.toml` の `[site]` で上流の生成器へ渡し、生成物の HTML・GitHub URL を後から書き換えない。LICENSE-MIT / LICENSE-APACHE リンクと「Built with fandhe-frontend docs-site」の帰属表記は上流の出力のまま保持し、`verify_attribution` で残存を検証する。本文（`<main>`）も書き換えない
 - **書き込み先の限定**: `build-local.sh`・`scaffold.py` が書く・消す先は、対象リポジトリの実体パス配下で、末端が symlink でないものに限る（`tools/docs-site-gen/target/`（`docs-site-install` を含む）・`THIRD-PARTY-LICENSES`・既定の `_site/`。bash は `guard_path`、Python は `resolves_inside` に集約）。`.git` の判定は大文字小文字を区別しない（`.GIT` / `.Git` 経由の読み書きも拒否する）。違反したら何も書かず中止する。`--out` のみ対象リポジトリ外（CI の `${RUNNER_TEMP}` 等）を許すが、末端が symlink なら拒否する。ライセンスの取得先は固定 URL（可変部分は検証済みの `FF_REV` のみ）。dist に symlink があれば `verify_attribution` は辿らず失敗する（読むだけで書かない）
 - **読み込みの上限**: `check_site.py` は `nav.toml`・Markdown・workflow を上限付きで読み（symlink・対象リポジトリの外は読まない）、`brand.toml` は読まない。`verify_attribution` は dist の HTML を grep するだけで（`nav.toml` の `[site]` の値は上流名の許容判定にだけ読む）、失敗時もファイルの内容の断片は出さない（相対パスだけを示す）。`[site]` の値の検証エラーもキー名と規則だけを出し、値は出さない

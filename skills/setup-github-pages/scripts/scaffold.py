@@ -27,7 +27,7 @@ SKILL.md の Step 1（`--detect` によるモード判定）、新規構築フ�
 - pages.yml の `sgp:user-paths` 区間（追加の監視パス）は利用者が編集してよい例外。区間の中身は検証して
   保持し、「未編集」判定と記録ハッシュは区間を空にした正規形で行う。
 - 利用者編集ファイル（USER）は常に保持する。更新モードで欠けていても再作成せず「欠落」と報告する
-  （再作成は `--owner/--repo/--branch/--title` を明示したときだけ）。
+  （再作成は `--owner/--repo/--branch/--title/--tagline` を明示したときだけ）。
 - マニフェストは信頼しない入力として扱う。厳密に検証して 1 つでも違反すれば丸ごと無視（=マニフェストなし。
   自動更新は行わず、不一致は競合になる安全側）。マニフェスト内のパスは FILES の固定パスとの突き合わせに
   のみ使い、書き込み・削除・表示の対象にしない。スキルで廃止された所有ファイルはスキル側の固定リスト
@@ -1261,7 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
         out("一致（変更なし）: " + (", ".join(same) or "なし"))
         out("保持（利用者編集）: " + (", ".join(keep) or "なし"))
         if missing:
-            out("欠落（再作成しない。必要なら --owner/--repo/--branch/--title を付けて再実行）: " + ", ".join(missing))
+            out("欠落（再作成しない。必要なら --owner/--repo/--branch/--title/--tagline を付けて再実行）: " + ", ".join(missing))
         out("追記した .gitignore 行: " + (", ".join(to_add) or "なし"))
         out("マニフェスト: " + ("再作成した（マニフェストが無かった旧版配置からの移行）" if summary["manifest_recreated"]
                               else "書き込んだ" if summary["manifest_written"] else "変更なし"))

@@ -465,7 +465,7 @@ if len(foots) != 1:
     sys.exit(1)
 if len(re.findall(os.environ["SGP_PAT"], foots[0])) != 1:
     sys.exit(1)
-# 生成器由来の表示領域（ヘッダー・フッター）に、帰属表記以外で上流名が残っていないことを見る。
+# 生成 HTML 全体（ヘッダー・サイドバー・本文・フッター）に、帰属表記以外で上流名が残っていないことを見る。
 # 利用者が [site] に書いた文言（上流名を含む正当な値）は許容するため、先に取り除く。
 # nav.toml は check_site.py / 生成器と同じ解釈（parse_nav: 全 [site] を合算・行末 CR 除去）で読む。
 # 読めない・解釈できない場合は許容なしとして扱う（残存側へ倒す。fail-closed）。
@@ -479,8 +479,7 @@ try:
             user.extend(tb.values.values())
 except Exception:
     user = []
-heads = re.findall(r"<header class=\"docs-header\".*?</header>", t, re.S)
-resid = "".join(heads) + re.sub(os.environ["SGP_PAT"], "", foots[0])
+resid = re.sub(os.environ["SGP_PAT"], "", t)
 for v in sorted({x for x in user if RESIDUAL_RE.search(x)}, key=len, reverse=True):
     for form in (v, html.escape(v), html.escape(v, quote=False)):
         resid = resid.replace(form, "")
@@ -495,7 +494,7 @@ sys.exit(2 if RESIDUAL_RE.search(resid) else 0)
       return 1
     fi
     if [[ "${rc}" -eq 2 ]]; then
-      echo "エラー: ${rel} のヘッダー・フッターに帰属表記以外の上流名（fandhe-frontend・上流 URL）が残っている（[site] の値以外）" >&2
+      echo "エラー: ${rel} に帰属表記以外の上流名（fandhe-frontend・上流 URL）が残っている（[site] の値以外）" >&2
       return 1
     fi
     [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査が失敗した（exit ${rc}）" >&2; return 1; }
