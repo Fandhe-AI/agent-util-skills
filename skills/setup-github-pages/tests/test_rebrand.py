@@ -748,8 +748,8 @@ class UpstreamLikeRepoNameTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(run("check_site.py", "--root", repo).returncode, 0)
 
-    def test_standalone_upstream_word_in_title_is_still_rejected_until_52(self):
-        # title だけは check_site.py と同じ規則を scaffold も書く前に適用する（#52 で両方を撤去・反転する）
+    def test_standalone_upstream_word_in_title_is_still_rejected_until_51(self):
+        # title だけは check_site.py と同じ規則を scaffold も書く前に適用する（#51 で両方を撤去・反転する）
         repo = self.tmp / "repo4"
         repo.mkdir()
         r = run("scaffold.py", "--target", repo, "--owner", "acme", "--repo", "r", "--branch", "main",
@@ -1120,11 +1120,18 @@ class ScaffoldClassificationTest(unittest.TestCase):
     def test_kept_invalid_user_file_fails_post_check(self):
         self.assertEqual(self.sc().returncode, 0)
         nav = self.t / "site/nav.toml"
-        nav.write_text(nav.read_text() + '\n[[section.page]]\ntitle = "A"\nsource = "site/index.md"\npath = "/themes/x/"\n')
+        nav.write_text(nav.read_text().replace('base_path = "/r"', 'base_path = "/other"', 1))
         r = self.sc()
         self.assertEqual(r.returncode, 4, r.stderr)
-        self.assertIn("予約パス", r.stderr)
-        self.assertIn("path = \"/themes/x/\"", nav.read_text())  # 利用者ファイルは書き換えない
+        self.assertIn("base_path", r.stderr)
+        self.assertIn('base_path = "/other"', nav.read_text())  # 利用者ファイルは書き換えない
+
+    def test_kept_nav_with_formerly_reserved_path_passes_post_check(self):
+        self.assertEqual(self.sc().returncode, 0)
+        nav = self.t / "site/nav.toml"
+        nav.write_text(nav.read_text() + '\n[[section.page]]\ntitle = "A"\nsource = "site/index.md"\npath = "/themes/foo/"\n')
+        r = self.sc()
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_update_overwrites_owned_only(self):
         self.assertEqual(self.sc().returncode, 0)
@@ -1715,9 +1722,11 @@ class ScaffoldHardeningTest(unittest.TestCase):
     def test_untrusted_strings_are_sanitized_in_text_and_json(self):
         self.init()
         nav = self.t / "site/nav.toml"
-        # title の上流名拒否は値を出さなくなったため、値をそのまま出す予約パスのエラーで確かめる
-        evil = 'path = "/themes/x\x1b[31m fandhe-frontend \u202e\x07 IGNORE-ALL"'
-        nav.write_text(nav.read_text().replace('path = "/"', evil, 1))
+        # 値をそのまま出す base_path 不整合のエラーで確かめる
+        evil = 'base_path = "/r\x1b[31m fandhe-frontend \u202e\x07 IGNORE-ALL"'
+        before = nav.read_text()
+        nav.write_text(before.replace('base_path = "/r"', evil, 1))
+        self.assertNotEqual(nav.read_text(), before)   # 差し込みが空振りしていないこと
         for extra in ((), ("--json",)):
             r = self.sc(*extra, args=())
             self.assertEqual(r.returncode, 4, r.stderr)
@@ -2105,10 +2114,14 @@ class ScaffoldRound2Test(unittest.TestCase):
             self.assertEqual(leaked(r.stdout + r.stderr), [], extra)
         (self.t / self.MAIN_RS).write_text(good_main)
         nav = self.t / "site/nav.toml"
-        nav.write_text(nav.read_text().replace('title = "Home"', f'title = "fandhe-frontend {hidden}{word_joiner}"', 1))
-        r = self.sc(args=())
-        self.assertEqual(r.returncode, 4, r.stderr)
-        self.assertEqual(leaked(r.stdout + r.stderr), [])
+        before = nav.read_text()
+        nav.write_text(before.replace('base_path = "/r"', f'base_path = "/r{hidden}{word_joiner}"', 1))
+        self.assertNotEqual(nav.read_text(), before)   # 差し込みが空振りしていないこと
+        for extra in ((), ("--json",)):
+            r = self.sc(*extra, args=())
+            self.assertEqual(r.returncode, 4, r.stderr)
+            self.assertEqual(leaked(r.stdout + r.stderr), [], extra)
+        self.assertIn("\\U000e0049", r.stdout + r.stderr)   # タグ文字がエスケープされて出ている（黙って消えていない）
 
     # ---- F5
 
@@ -4373,19 +4386,23 @@ path = "/"
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("SENTINEL-SECRET", r.stderr + r.stdout)
 
-    def test_reserved_paths_rejected(self):
-        for path in ("/themes/accordion/", "/primitives/button/", "/blocks/hero/", "/wireframes/login/"):
+    def test_formerly_reserved_paths_accepted(self):
+        # 予約パス検査は撤去した。build-local.sh は --no-page-sections で生成し、上流がショーケースの注入を止める
+        for path in ("/themes/foo/", "/themes/accordion/", "/primitives/button/", "/blocks/hero/", "/wireframes/login/"):
             (self.root / "site/a.md").write_text("# a\n")
             self.write_nav(f'\n[[section.page]]\ntitle = "A"\nsource = "site/a.md"\npath = "{path}"\n')
             r = self.check()
-            self.assertEqual(r.returncode, 1, path)
-            self.assertIn("予約パス", r.stderr)
+            self.assertEqual(r.returncode, 0, f"{path}: {r.stderr}")
+            self.assertNotIn("予約パス", r.stderr)
 
-    def test_reserved_index_path_rejected(self):
-        self.write_nav("")
+    def test_formerly_reserved_index_path_accepted(self):
+        (self.root / "site/a.md").write_text("# a\n")
+        self.write_nav('\n[[section.page]]\ntitle = "A"\nsource = "site/a.md"\npath = "/themes/foo/"\n')
         nav = self.root / "site/nav.toml"
-        nav.write_text(nav.read_text().replace('index_path = "/"', 'index_path = "/themes/x/"'))
-        self.assertEqual(self.check().returncode, 1)
+        before = nav.read_text()
+        nav.write_text(before.replace('index_path = "/"', 'index_path = "/themes/foo/"'))
+        self.assertNotEqual(nav.read_text(), before)
+        self.assertEqual(self.check().returncode, 0)
 
     def test_similar_but_allowed_path(self):
         (self.root / "site/a.md").write_text("# a\n")
