@@ -413,6 +413,23 @@ verify_attribution() {
   # assets/ は利用者の静的ファイルなので対象外
   list="$(find "${dist}" -path "${dist}/assets" -prune -o -type f -name '*.html' -print)" \
     || { echo "エラー: dist の走査（HTML 列挙）に失敗した" >&2; return 1; }
+  # 読み取り前にファイルごと 8 MiB・合計 256 MiB の上限を見る（旧 rebrand_site.py と同値）。超過は検査を中止する
+  rc=0
+  printf '%s\n' "${list}" | python3 -I -B -c '
+import os, sys
+total = 0
+for line in sys.stdin.read().split("\n"):
+    if not line:
+        continue
+    size = os.lstat(line).st_size
+    total += size
+    if size > 8 * 1024 * 1024 or total > 256 * 1024 * 1024:
+        sys.exit(1)
+' || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "エラー: dist の HTML がサイズ上限（1 件 8 MiB・合計 256 MiB）を超える、または走査に失敗した" >&2
+    return 1
+  fi
   while IFS= read -r f; do
     [[ -n "${f}" ]] || continue
     rel="${f#"${dist}"/}"
@@ -432,9 +449,16 @@ verify_attribution() {
     # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
     # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
     rc=0
-    SGP_PAT="${pat}" SGP_NAV="${nav}" python3 -I -B -c '
-import os, re, sys
-t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    SGP_PAT="${pat}" SGP_NAV="${nav}" SGP_SCRIPTS="${SCRIPT_DIR}" python3 -I -B -c '
+import html, os, re, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["SGP_SCRIPTS"])
+from _common import RESIDUAL_RE, parse_nav, read_bounded_text
+# 読み取り上限は上の事前検査（ファイルごと 8 MiB）と同値。超過・UTF-8 不正は検査自体の失敗（exit 3）
+try:
+    t = read_bounded_text(Path(sys.argv[1]), 8 * 1024 * 1024)
+except (OSError, ValueError):
+    sys.exit(3)
 foots = re.findall(r"<footer class=\"docs-footer\">.*?</footer>", t, re.S)
 if len(foots) != 1:
     sys.exit(1)
@@ -442,32 +466,35 @@ if len(re.findall(os.environ["SGP_PAT"], foots[0])) != 1:
     sys.exit(1)
 # 生成器由来の表示領域（ヘッダー・フッター）に、帰属表記以外で上流名が残っていないことを見る。
 # 利用者が [site] に書いた文言（上流名を含む正当な値）は許容するため、先に取り除く。
+# nav.toml は check_site.py / 生成器と同じ解釈（parse_nav: 全 [site] を合算・行末 CR 除去）で読む。
+# 読めない・解釈できない場合は許容なしとして扱う（残存側へ倒す。fail-closed）。
 user = []
 try:
-    if os.path.islink(os.environ.get("SGP_NAV", "")):
+    navp = Path(os.environ.get("SGP_NAV", ""))
+    if os.path.islink(navp):
         raise OSError("symlink")
-    with open(os.environ.get("SGP_NAV", ""), encoding="utf-8", errors="replace") as nf:
-        nav = nf.read(256 * 1024)
-    m = re.search(r"^\[site\][ \t]*$(.*?)(?=^\[|\Z)", nav, re.S | re.M)
-    if m:
-        user = [v.replace("\\\"", "\"").replace("\\\\", "\\")
-                for v in re.findall(r"^[ \t]*[A-Za-z_]+[ \t]*=[ \t]*\"((?:[^\"\\\\]|\\\\.)*)\"", m.group(1), re.M)]
-except OSError:
-    pass
+    for tb in parse_nav(read_bounded_text(navp, 1024 * 1024)):
+        if tb.header == "site":
+            user.extend(tb.values.values())
+except Exception:
+    user = []
 heads = re.findall(r"<header class=\"docs-header\".*?</header>", t, re.S)
 resid = "".join(heads) + re.sub(os.environ["SGP_PAT"], "", foots[0])
-import html
-for v in sorted({x for x in user if "fandhe-frontend" in x.lower()}, key=len, reverse=True):
+for v in sorted({x for x in user if RESIDUAL_RE.search(x)}, key=len, reverse=True):
     for form in (v, html.escape(v), html.escape(v, quote=False)):
         resid = resid.replace(form, "")
-sys.exit(2 if "fandhe-frontend" in resid.lower() else 0)
+sys.exit(2 if RESIDUAL_RE.search(resid) else 0)
 ' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
       echo "エラー: ${rel} のフッター（docs-footer）に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）がちょうど 1 件ない" >&2
       return 1
     fi
+    if [[ "${rc}" -eq 3 ]]; then
+      echo "エラー: ${rel} を上限内の UTF-8 として読めない（検査を中止）" >&2
+      return 1
+    fi
     if [[ "${rc}" -eq 2 ]]; then
-      echo "エラー: ${rel} のヘッダー・フッターに帰属表記以外の上流名（fandhe-frontend）が残っている（[site] の値以外）" >&2
+      echo "エラー: ${rel} のヘッダー・フッターに帰属表記以外の上流名（fandhe-frontend・上流 URL）が残っている（[site] の値以外）" >&2
       return 1
     fi
     [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査が失敗した（exit ${rc}）" >&2; return 1; }

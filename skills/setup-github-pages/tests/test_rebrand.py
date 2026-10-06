@@ -4585,7 +4585,7 @@ class VerifyAttributionTest(unittest.TestCase):
 
     def verify(self, env=None):
         # 本体と同じく `|| exit 1` で受ける（関数内の set -e が無効になる条件を再現する）
-        script = "set -euo pipefail\n" + self.func + '\nverify_attribution "$1" || exit 1\n'
+        script = f"set -euo pipefail\nSCRIPT_DIR={SCRIPTS}\n" + self.func + '\nverify_attribution "$1" || exit 1\n'
         return subprocess.run(["bash", "-c", script, "_", str(self.dist)], capture_output=True, text=True, env=env)
 
     def mutate(self, name, fn):
@@ -4638,7 +4638,7 @@ class VerifyAttributionTest(unittest.TestCase):
     def verify_with_nav(self, nav_text):
         nav = self.base / "nav.toml"
         nav.write_text(nav_text, encoding="utf-8")
-        script = "set -euo pipefail\n" + self.func + '\nverify_attribution "$1" "$2" || exit 1\n'
+        script = f"set -euo pipefail\nSCRIPT_DIR={SCRIPTS}\n" + self.func + '\nverify_attribution "$1" "$2" || exit 1\n'
         return subprocess.run(["bash", "-c", script, "_", str(self.dist), str(nav)], capture_output=True, text=True)
 
     def test_upstream_brand_left_in_header_fails(self):
@@ -4654,6 +4654,34 @@ class VerifyAttributionTest(unittest.TestCase):
                     '<header class="docs-header"><span>fandhe-frontend fork</span>', 1))
         r = self.verify_with_nav('[site]\nbrand = "fandhe-frontend fork"\n')
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def _brand_in_header(self, text):
+        self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
+                    f'<header class="docs-header"><span>{text}</span>', 1))
+
+    def test_composite_title_is_not_residual(self):
+        self._brand_in_header("fandhe-frontend-docs")
+        r = self.verify_with_nav('[site]\nbrand = "Mine"\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_upstream_url_left_in_header_fails(self):
+        self._brand_in_header("https://github.com/Fandhe-AI/fandhe-frontend")
+        r = self.verify_with_nav('[site]\nbrand = "Mine"\n')
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_crlf_and_split_site_tables_are_allowlisted(self):
+        self._brand_in_header("fandhe-frontend fork")
+        r = self.verify_with_nav('[site]\r\nbrand = "Mine"\r\n\r\n[[section]]\r\ntitle = "A"\r\n\r\n'
+                                 '[site]\r\ntagline = "fandhe-frontend fork"\r\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_oversized_html_stops_the_check(self):
+        (self.dist / "big").mkdir()
+        with open(self.dist / "big" / "index.html", "wb") as fh:
+            fh.truncate(8 * 1024 * 1024 + 1)
+        r = self.verify()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("サイズ上限", r.stderr)
 
     def test_missing_404_and_symlinks_fail(self):
         (self.dist / "404.html").unlink()
