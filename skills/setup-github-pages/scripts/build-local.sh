@@ -67,7 +67,7 @@ esac
 # リポジトリ（信頼できない場合がある）の .py（argparse.py 等の標準モジュール名）が標準ライブラリより先に
 # import されないよう、すべての起動に `-I`（隔離モード: cwd・スクリプトのディレクトリ・PYTHONPATH・user site を
 # 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。check_site.py /
-# rebrand_site.py も自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
+# check_site.py も自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
 canon() { python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 # 親ディレクトリだけを実体化し、末端の名前はそのまま残す。末端が symlink かの判定（-L）を
@@ -413,7 +413,7 @@ verify_attribution() {
   # assets/ は利用者の静的ファイルなので対象外
   list="$(find "${dist}" -path "${dist}/assets" -prune -o -type f -name '*.html' -print)" \
     || { echo "エラー: dist の走査（HTML 列挙）に失敗した" >&2; return 1; }
-  # 読み取り前にファイルごと 8 MiB・合計 256 MiB の上限を見る（旧 rebrand_site.py と同値）。超過は検査を中止する
+  # 読み取り前にファイルごと 8 MiB・合計 256 MiB の上限を見る（廃止した置換スクリプトと同値）。超過は検査を中止する
   rc=0
   printf '%s\n' "${list}" | python3 -I -B -c '
 import os, sys

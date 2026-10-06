@@ -250,7 +250,7 @@ python3 "${SKILL_DIR}/scripts/scaffold.py" \
 | `tools/docs-site-gen/{Cargo.toml,src/main.rs}` | 旧経路の wrapper。配置されるがビルドには使わない（配置物から外すのは #53） |
 | `tools/docs-site-gen/FF_REV` | 取得する fandhe-frontend の commit SHA（**唯一の定義元**） |
 | `tools/docs-site-gen/brand.toml` | 旧ブランド表示の入力（ビルドでは読まれない。#53 で廃止） |
-| `tools/docs-site-gen/{build-local.sh,rebrand_site.py,check_site.py,_common.py}` | ビルド入口・事前検証（`rebrand_site.py` はビルドで呼ばれない。#51 で廃止。同じディレクトリに置く） |
+| `tools/docs-site-gen/{build-local.sh,check_site.py,_common.py}` | ビルド入口・事前検証（同じディレクトリに置く。廃止した `rebrand_site.py` は配置しない） |
 | `tools/docs-site-gen/.scaffold-manifest.json` | 配置マニフェスト（更新フローが使う。コミットする） |
 | `.github/workflows/pages.yml` | build → deploy の workflow（`paths` に `rust-toolchain.toml` を含み、追加の監視パス用の利用者区間がある） |
 | `site/{nav.toml,index.md}` | 初期サイト |

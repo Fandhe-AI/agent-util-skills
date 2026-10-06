@@ -35,7 +35,7 @@
    リンク文言、LICENSE リンク 2 件）のままであること。増減していれば上流がフッターを変えている
 6. `references/site-format.md` の制約（nav.toml の書式・予約パス・予約アセット・Markdown 対応範囲）が変わっていないか上流
    ソースで再確認し、`scripts/check_site.py` の `RESERVED_ASSET_NAMES`（上流 `build.rs` の `RESERVED_ASSET_NAMES`）を更新する
-7. `tests/fixtures/raw/` を新 rev の生成物で作り直し、`node --test "tests/*.test.mjs"` を通す
+7. `tests/fixtures/site-keys/`・`tests/fixtures/redirect/` を新 rev の生成物で作り直し、`node --test "tests/*.test.mjs"` を通す
 
 ## 上流改修の追跡
 
@@ -46,7 +46,7 @@
 | 回避している制約 | 上流の対応（Issue → PR） | スキル側の削除（イシュー） |
 |------------------|--------------------------|----------------------------|
 | stock の `docs-site` が page section registry を強制し、ショーケースを注入する | [#3716](https://github.com/Fandhe-AI/fandhe-frontend/issues/3716) → PR #3728（`--no-page-sections`）、[#3717](https://github.com/Fandhe-AI/fandhe-frontend/issues/3717) → PR #3731（ショーケース注入の停止） | `--no-page-sections` の利用は #49 で反映済み。wrapper の削除は #53、予約パス禁止の撤去は #52 |
-| ブランド表示がハードコード | [#3720](https://github.com/Fandhe-AI/fandhe-frontend/issues/3720) → PR #3732（`brand`・`repository_url`）、[#3721](https://github.com/Fandhe-AI/fandhe-frontend/issues/3721) → PR #3733（`tagline`・`copyright`・`version_badge`・`lang`）、[#3722](https://github.com/Fandhe-AI/fandhe-frontend/issues/3722) → PR #3734（`brand_mark`・`brand_color`） | `[site]` への移行と生成後の置換の停止は #50 で反映済み（`rebrand_site.py` の削除は #51、`brand.toml` の廃止は #53） |
+| ブランド表示がハードコード | [#3720](https://github.com/Fandhe-AI/fandhe-frontend/issues/3720) → PR #3732（`brand`・`repository_url`）、[#3721](https://github.com/Fandhe-AI/fandhe-frontend/issues/3721) → PR #3733（`tagline`・`copyright`・`version_badge`・`lang`）、[#3722](https://github.com/Fandhe-AI/fandhe-frontend/issues/3722) → PR #3734（`brand_mark`・`brand_color`） | `[site]` への移行と生成後の置換の停止は #50、`rebrand_site.py` の削除は #51 で反映済み（`brand.toml` の廃止は #53） |
 | `cargo install --git` が submodule で失敗する | [#3718](https://github.com/Fandhe-AI/fandhe-frontend/issues/3718) → PR #3730（submodule 非依存化。匿名の `cargo install --git` が通る） | #49 で反映済み（匿名 `cargo install --git`。`_ff/` と path 依存のビルドは廃止。wrapper テンプレートの削除は #53） |
 | 外部利用の契約・手順 | #3724 → PR #3735（契約テスト）、#3725 → PR #3737（CI 経路）、#3726 → PR #3736（利用ガイド）、#3715 → PR #3729（設計文書） | 参照のみ（#56 で文書をリンク化） |
 
@@ -84,14 +84,14 @@
 
 ### 決定 3: 生成後の検査
 
-- **決定**: `rebrand_site.py` の置換と残存検査を廃止し、帰属表記の**存在確認だけ**を行う（#47 の 2026-10-06 の決定）。確認は `build-local.sh` の `verify_attribution`（bash 関数）が担う。`rebrand_site.py` 本体の削除は #51
+- **決定**: `rebrand_site.py` の置換と残存検査を廃止し、帰属表記の**存在確認だけ**を行う（#47 の 2026-10-06 の決定）。確認は `build-local.sh` の `verify_attribution`（bash 関数）が担う。`rebrand_site.py` 本体は #51 で削除済み
   - 対象はビルド成果物（`_site/`）の全 HTML（`assets/` 配下と、クロームを持たず `http-equiv="refresh"` を持つリダイレクト案内を除く。最低 `index.html` と `404.html`）。クロームも refresh も無い未知の構造は失敗にする（fail-closed）
   - 各対象に `Built with … fandhe-frontend docs-site`（帰属リンク）と `LICENSE-MIT`・`LICENSE-APACHE` へのリンク 2 本が連なった並びがあること。1 つの連続した並びとして見るため、本文に同じ URL へのリンクがあっても誤判定しない
   - 残存検査（帰属表記の外に `fandhe-frontend` が無いこと）は行わない。上流が `[site]` の値で表示を組み立てるため、`[site]` の必須 6 キーを `check_site.py` が事前に強制すれば上流の識別情報は出力に出ない
   - dist 内の symlink は 1 つでも失敗にする。読むだけで書かない。エラーには相対パスだけを出し、ファイルの内容は出さない。`grep` の終了コード 2 以上は「欠落」ではなく検査自体の失敗として止める
 - **理由**: 帰属表記の保持は MIT / Apache-2.0 の通知義務に直結するため、存在確認は残す。残存検査は、上流が置換不要の出力を返すようになった今、ブランド値に上流名を含めたい利用者（`brand = "fandhe-frontend guide"` 等）の正当な出力を拒否する副作用の方が大きい
 - **非採用**: 残存検査の維持（#47 の決定前の案。ブランド値の上流名拒否と `title` 規則を残すことになる）。帰属表記を `docs-footer-bottom` の有無で検査対象にする案（フッター欠落ページを素通りさせる）
-- **影響**: #51 は `rebrand_site.py` を削除する。FF_REV 更新時の手順 4・5 で帰属パターンと件数を確認する
+- **影響**: #51 で `rebrand_site.py` を削除した。FF_REV 更新時の手順 4・5 で帰属パターンと件数を確認する
 
 ### 決定 4: 上流名の拒否
 
@@ -112,7 +112,7 @@
   - 適用前にビルドしても、決定 1 の必須キー欠落で `check_site.py` が fail-closed になるので、上流の既定文言が黙って公開されることはない
 - **理由**: 更新モードは利用者編集ファイルを書き換えない不変条件を守る。`nav.toml` はコメントを含む利用者編集物で自動編集は事故が起きやすい。一方、8 キーの検証規則と TOML エスケープは人手だと間違えやすく、決定的な案の生成が要る
 - **非採用**: 完全に人手の移行。キーごとの規則が多く誤りやすい
-- **影響**: #54 の方式を上記に確定する。`Brand`・`load_brand`・`BRAND_REQUIRED_KEYS` は `rebrand_site.py` が参照し続けるため #51 で一緒に削除する。#54 の旧 `brand.toml` 読み取りは自己完結した関数（既存の TOML 部分集合パーサを使う）とする
+- **影響**: #54 の方式を上記に確定する。`Brand`・`load_brand`・`BRAND_REQUIRED_KEYS` は `rebrand_site.py` と一緒に #51 で削除済み。#54 の旧 `brand.toml` 読み取りは自己完結した関数（既存の TOML 部分集合パーサを使う）とする
 
 ### 決定を覆す条件
 

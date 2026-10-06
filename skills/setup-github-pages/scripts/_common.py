@@ -4,8 +4,8 @@
 
 `check_site.py`（生成前の事前検証）と `scaffold.py`（雛形の配置）が同じ解釈で
 `nav.toml` を読み、`[site]` のブランド値に同じ検証を通すための共有モジュール
-（`rebrand_site.py` も `brand.toml` の読み込みに使う。廃止は #51）。
-対象リポジトリの `tools/docs-site-gen/` へ 3 つの .py を一緒に配置する前提で、同じ
+。
+対象リポジトリの `tools/docs-site-gen/` へ `check_site.py` と一緒に配置する前提で、同じ
 ディレクトリからの `import _common` で読み込まれる。標準ライブラリのみに依存する。
 
 # なぜ tomllib を使わないか
@@ -64,9 +64,6 @@ def valid_repo_name(name: str) -> bool:
 
 
 REPOSITORY_RE = re.compile(r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)$")
-LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{1,8})*$")
-COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-LETTER_RE = re.compile(r"^[A-Za-z0-9]$")
 FF_REV_RE = re.compile(r"^[0-9a-f]{40}$")
 
 # 出力に上流ブランド名が残らないことを検査する語（大文字小文字を区別しない）。
@@ -498,133 +495,3 @@ NAV_HEADERS = {
 
 def parse_nav(text: str) -> list[Table]:
     return parse_subset(text, NAV_HEADERS)
-
-
-# ---------------------------------------------------------------- brand.toml
-
-
-@dataclass
-class Brand:
-    brand: str
-    repository: str
-    owner: str
-    repo: str
-    tagline: str
-    copyright: str
-    lang: str
-    version_badge: str
-    favicon_letter: str
-    favicon_color: str
-
-    @property
-    def base_path(self) -> str:
-        """GitHub Pages の公開パス。`<owner>.github.io` リポジトリ（User/Org サイト）はルート配信。"""
-        return pages_base_path(self.owner, self.repo)
-
-
-class BrandError(ValueError):
-    pass
-
-
-
-
-def _text(values: dict[str, str], key: str, *, required: bool) -> str:
-    v = values.get(key, "")
-    if required and not v.strip():
-        raise BrandError(f"brand.toml: `{key}` は必須")
-    if CONTROL_RE.search(v):
-        raise BrandError(f"brand.toml: `{key}` に制御文字を含められない")
-    if len(v) > MAX_TEXT_LEN:
-        raise BrandError(f"brand.toml: `{key}` は {MAX_TEXT_LEN} 文字以内")
-    if has_upstream_word(v):
-        # 後処理後の残存検査（出力に上流ブランド名が無いこと）と区別できなくなるため入力段階で拒否する。
-        raise BrandError(
-            f"brand.toml: `{key}` に上流名 `{UPSTREAM_BRAND}` を独立した語として含められない"
-            "（生成後の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可）"
-        )
-    if BIDI_RE.search(v):
-        raise BrandError(f"brand.toml: `{key}` に双方向制御文字を含められない")
-    if PLACEHOLDER_RE.search(v):
-        raise BrandError(f"brand.toml: `{key}` にプレースホルダー（__SGP_*__）が残っている")
-    return v
-
-
-# brand.toml の必須キーと追記例の既定値。スキルのテンプレートに新しい必須キーが増えたとき、
-# 既存の brand.toml（利用者編集のため scaffold は上書きしない）に不足があれば、汎用の検証エラーではなく
-# 「不足キーと追記例」を案内する。キーを増やすときはここへ追加する（tests が不足の案内を検査する）。
-BRAND_REQUIRED_KEYS: dict[str, str] = {
-    "brand": "<ヘッダーのブランド名>",
-    "repository": "https://github.com/<owner>/<repo>",
-    "copyright": "© <年> <名義>",
-    "lang": "ja",
-    "favicon_letter": "<英数字1文字>",
-    "favicon_color": "#2b6cb0",
-}
-
-
-def load_brand(path: Path) -> Brand:
-    try:
-        text = read_bounded_text(path, 64 * 1024)
-        tables = parse_subset(text, {"brand"})
-    except (OSError, ValueError, SubsetError) as e:
-        raise BrandError(f"brand.toml を読めない: {e}") from e
-    if len(tables) != 1:
-        raise BrandError("brand.toml: [brand] テーブルがちょうど 1 つ必要")
-    v = tables[0].values
-    allowed = {
-        "brand", "repository", "tagline", "copyright", "lang",
-        "version_badge", "favicon_letter", "favicon_color",
-    }
-    unknown = set(v) - allowed
-    if unknown:
-        raise BrandError(f"brand.toml: 未知のキー {sorted(unknown)}")
-
-    missing = [k for k in BRAND_REQUIRED_KEYS if k not in v]
-    if missing:
-        example = ", ".join(f'{k} = "{BRAND_REQUIRED_KEYS[k]}"' for k in missing)
-        raise BrandError(
-            f"brand.toml: 必須キーが不足している: {', '.join(missing)}。[brand] テーブルへ追記する"
-            f"（スキルのテンプレートに新しいキーが増えた場合は templates/brand.toml を参照）。追記例: {example}"
-        )
-
-    brand = _text(v, "brand", required=True)
-    tagline = _text(v, "tagline", required=False)
-    copyright_ = _text(v, "copyright", required=True)
-    version_badge = _text(v, "version_badge", required=False)
-
-    repository = v.get("repository", "")
-    m = REPOSITORY_RE.fullmatch(repository)
-    if not m or not valid_owner(m.group("owner")) or not valid_repo_name(m.group("repo")):
-        raise BrandError(
-            "brand.toml: `repository` は https://github.com/<owner>/<repo> 形式のみ許可"
-            "（GitHub の命名規則。`.` `..` 単独・.git 終端は不可）"
-        )
-    repo = m.group("repo")
-    if is_upstream_repo(m.group("owner"), repo):
-        raise BrandError(
-            "brand.toml: `repository` が上流リポジトリ（Fandhe-AI/fandhe-frontend）そのもの。"
-            "自サイトのリポジトリ URL を指定する"
-        )
-
-    lang = v.get("lang", "")
-    if not LANG_RE.fullmatch(lang):
-        raise BrandError("brand.toml: `lang` は BCP 47 風（例: ja / en / en-US）")
-    letter = v.get("favicon_letter", "")
-    if not LETTER_RE.fullmatch(letter):
-        raise BrandError("brand.toml: `favicon_letter` は英数字 1 文字")
-    color = v.get("favicon_color", "")
-    if not COLOR_RE.fullmatch(color):
-        raise BrandError("brand.toml: `favicon_color` は #RRGGBB 形式")
-
-    return Brand(
-        brand=brand,
-        repository=repository,
-        owner=m.group("owner"),
-        repo=repo,
-        tagline=tagline,
-        copyright=copyright_,
-        lang=lang,
-        version_badge=version_badge,
-        favicon_letter=letter,
-        favicon_color=color,
-    )
