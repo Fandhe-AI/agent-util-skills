@@ -394,7 +394,9 @@ fi
 # 読むだけで書かない。エラーには dist からの相対パスだけを出し、ファイルの内容は出さない。
 # 帰属表記（フッターの 1 件）を除いた残りに、上流名（fandhe-frontend）・上流 URL（github.com/Fandhe-AI/fandhe-frontend）が
 # 残っていれば失敗にする（上流の既定ブランド・リンクの混入を止める）。ただし利用者が `[site]` の値に上流名を
-# 書いている場合（第 2 引数の nav.toml を読んで判定）は、その意図を尊重して残存検査を省く。
+# 書いている場合（第 2 引数の nav.toml を読んで判定）は、生成器がその値を出すと tests/fixtures/site-keys の
+# 実出力で確認できた箇所（ヘッダー全体・フッターのブランド枠・著作権表示の段落）の中に限り、値と一致する文字列を許容する。
+# 本文・サイドバー・目次など区間の外に同じ文字列が残っていれば、値と一致していても残存として失敗にする。
 # 上流名に続く `-docs` など別名（リポジトリ名 fandhe-frontend-docs 等）は上流名とみなさない。
 # 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
 verify_attribution() {
@@ -489,8 +491,8 @@ attrs = re.findall(os.environ["SGP_PAT"], foots[0])
 if len(attrs) != 1:
     sys.exit(1)
 # 帰属表記 1 件を除いた残りに上流名・上流 URL があれば残存（exit 4）。[site] に上流名を書いた利用者のために、
-# 上流名を含む [site] の値そのものと一致する箇所だけを除いてから検査する（値が生成される箇所だけを許容し、
-# 残りの HTML は検査する。値の一部に上流名が含まれるだけで HTML 全体の検査を止めない）
+# 上流名を含む [site] の値と一致する箇所を除くが、除くのは生成器が値を出す確認済みの区間の内側だけにする
+# （区間の外は値と同じ文字列でも検査する。値の一部に上流名が含まれるだけで HTML 全体の検査を止めない）
 rest = t.replace(re.search(os.environ["SGP_PAT"], foots[0]).group(0), "", 1)
 tok = r"(?<![A-Za-z0-9_-])fandhe-frontend(?![A-Za-z0-9_-])"
 url = r"github\.com/Fandhe-AI/fandhe-frontend(?![A-Za-z0-9_-])"
@@ -508,8 +510,20 @@ if nav:
     except (OSError, ValueError):
         sys.exit(3)
     # 長い値から順に除く。値の直前が "/" のとき（URL の末尾の要素）と英数字・_・- に続くときは値の一部とみなさない
-    for v in sorted(vals, key=len, reverse=True):
-        rest = re.sub(r"(?<![A-Za-z0-9_/-])" + re.escape(v) + r"(?![A-Za-z0-9_-])", "", rest, flags=re.I)
+    ordered = sorted(vals, key=len, reverse=True)
+    def strip_values(m):
+        seg = m.group(0)
+        for v in ordered:
+            seg = re.sub(r"(?<![A-Za-z0-9_/-])" + re.escape(v) + r"(?![A-Za-z0-9_-])", "", seg, flags=re.I)
+        return seg
+    # 許容区間: ヘッダー（ブランド表示）・フッターのブランド枠（ブランド名とタグライン）・著作権表示の最初の段落。
+    # いずれも内側に同種の要素を入れ子にしない形なので、最短一致で閉じタグまでを区間とする
+    zones = (
+        r"<header class=\"docs-header\">.*?</header>"
+        r"|<div class=\"docs-footer-brand\">.*?</div>"
+        r"|<div class=\"docs-footer-bottom\"><p [^>]*>.*?</p>"
+    )
+    rest = re.sub(zones, strip_values, rest, flags=re.S)
 if re.search(tok, rest, re.I) or re.search(url, rest, re.I):
     sys.exit(4)
 sys.exit(0)
@@ -519,7 +533,7 @@ sys.exit(0)
       return 1
     fi
     if [[ "${rc}" -eq 4 ]]; then
-      echo "エラー: ${rel} に上流名・上流 URL（fandhe-frontend）が帰属表記以外に残っている（[site] の値と一致する箇所は除く）" >&2
+      echo "エラー: ${rel} に上流名・上流 URL（fandhe-frontend）が帰属表記以外に残っている（[site] の値と一致しても、生成器が値を出す区間の外は除かない）" >&2
       return 1
     fi
     if [[ "${rc}" -eq 3 ]]; then

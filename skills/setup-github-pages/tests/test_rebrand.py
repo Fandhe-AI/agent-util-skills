@@ -4309,6 +4309,43 @@ class VerifyAttributionTest(unittest.TestCase):
         r = self.verify_nav('[site]\ntitle = "Mini"\n')
         self.assertEqual(r.returncode, 1)
 
+    def test_site_value_tolerance_is_limited_to_generated_regions(self):
+        # 許容するのは fixtures/site-keys の実出力で `[site]` の値が出る箇所だけ（ヘッダー・フッターのブランド枠・
+        # 著作権表示）。同じ文字列が本文・サイドバー・目次に残っていれば残存として失敗にする
+        nav = '[site]\nbrand = "fandhe-frontend docs"\ntagline = "fandhe-frontend docs"\ncopyright = "fandhe-frontend docs"\n'
+        val = "fandhe-frontend docs"
+        good = (self.dist / "index.html").read_text(encoding="utf-8")
+        allowed = {
+            "ヘッダーのブランド": lambda t: t.replace(">Mini</a><nav", f">{val}</a><nav", 1),
+            "フッターのブランド名": lambda t: t.replace('brand-name">Mini<', f'brand-name">{val}<', 1),
+            "フッターのタグライン": lambda t: t.replace('tagline">Tiny site<', f'tagline">{val}<', 1),
+            "著作権表示": lambda t: t.replace("© 2026 acme", f"© 2026 {val}", 1),
+        }
+        for label, fn in allowed.items():
+            self.mutate("index.html", fn)
+            self.assertNotEqual((self.dist / "index.html").read_text(encoding="utf-8"), good, label)
+            r = self.verify_nav(nav)
+            self.assertEqual(r.returncode, 0, f"{label}: {r.stderr}")
+            (self.dist / "index.html").write_text(good, encoding="utf-8")
+        denied = {
+            "本文": lambda t: t.replace("<h1>Mini</h1>", f"<h1>{val}</h1>", 1),
+            "サイドバー": lambda t: t.replace('data-current="">Home</a>', f'data-current="">{val}</a>', 1),
+            "目次": lambda t: t.replace('<h2 class="docs-toc-title" id="docs-toc-heading">On this page',
+                                        f'<h2 class="docs-toc-title" id="docs-toc-heading">{val}', 1),
+            "フッターのナビ": lambda t: t.replace('accent">Guide</a></li></ul></div><div class="docs-footer-group">',
+                                           f'accent">{val}</a></li></ul></div><div class="docs-footer-group">', 1),
+        }
+        for label, fn in denied.items():
+            self.mutate("index.html", fn)
+            self.assertNotEqual((self.dist / "index.html").read_text(encoding="utf-8"), good, label)
+            r = self.verify_nav(nav)
+            self.assertEqual(r.returncode, 1, label)
+            self.assertIn("上流名", r.stderr, label)
+            (self.dist / "index.html").write_text(good, encoding="utf-8")
+        # 許容区間に出る値と本文の残存が同居していても、本文側で失敗する
+        self.mutate("index.html", lambda t: allowed["ヘッダーのブランド"](denied["本文"](t)))
+        self.assertEqual(self.verify_nav(nav).returncode, 1)
+
     def test_site_value_tolerance_is_scoped_to_the_value(self):
         # 許容は [site] の値と一致する箇所だけ。値に上流名が含まれても HTML 全体の検査は止まらない
         nav = '[site]\ntitle = "fandhe-frontend docs"\n'
