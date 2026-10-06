@@ -6,7 +6,7 @@
 # このスクリプトの 2 階層上として解決する（呼び出し時のカレントディレクトリに依存しない）。
 #
 # 工程: FF_REV 検証 → [THIRD-PARTY-LICENSES 生成（固定 URL から取得）] → check_site
-#       → docs-site を cargo install（匿名・--locked） → 生成（--no-page-sections） → rebrand → 最小 verify・残存検査
+#       → docs-site を cargo install（匿名・--locked） → 生成（--no-page-sections） → 最小 verify・帰属表記の確認
 #
 # 上流（fandhe-frontend）の docs-site バイナリを、固定 rev（FF_REV）の匿名 `cargo install --git` で
 # スキル管理下の target/docs-site-install へ入れて実行する。以前の「_ff/ へ shallow fetch + path 依存の
@@ -67,7 +67,7 @@ esac
 # リポジトリ（信頼できない場合がある）の .py（argparse.py 等の標準モジュール名）が標準ライブラリより先に
 # import されないよう、すべての起動に `-I`（隔離モード: cwd・スクリプトのディレクトリ・PYTHONPATH・user site を
 # 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。check_site.py /
-# rebrand_site.py は自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
+# rebrand_site.py も自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
 canon() { python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 # 親ディレクトリだけを実体化し、末端の名前はそのまま残す。末端が symlink かの判定（-L）を
@@ -386,19 +386,163 @@ if [[ "${NEED_LOCK_CHECK}" -eq 1 ]]; then
   printf '%s\n' "${FF_REV}" > "${CHECKED_MARK}" || { echo "エラー: 検査済みの記録を書けない" >&2; exit 1; }
 fi
 
+# >>> verify_attribution（tests/test_rebrand.py がこの区間を取り出して単体実行する。区間の目印を消さない）
+# 生成物（dist）に上流の帰属表記が残っていることを確認する。上流（docs-site）は `[site]` の値で表示を
+# 組み立て、帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク 2 本）だけを必ず
+# 出力する。これは MIT / Apache-2.0 の通知義務を担う部分のため、上流の DOM が変わっても黙って
+# 消えないよう、文言とリンクが 1 つの連続した並びとして存在することを見る（FF_REV 更新時に実出力で再確認する）。
+# 読むだけで書かない。エラーには dist からの相対パスだけを出し、ファイルの内容は出さない。
+# 第 2 引数は利用者の nav.toml（`[site]` の文言に含まれる上流名を許容するために読む。省略時は許容なし）。
+# 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
+verify_attribution() {
+  local dist="$1" nav="${2:-}" up pat list links f rel rc n=0 has_chrome
+  up='https://github\.com/Fandhe-AI/fandhe-frontend'
+  pat="Built with <a [^>]*href=\"${up}\"[^>]*>fandhe-frontend docs-site</a> \\(<a [^>]*href=\"${up}/blob/main/LICENSE-MIT\"[^>]*>MIT</a> OR <a [^>]*href=\"${up}/blob/main/LICENSE-APACHE\"[^>]*>Apache-2\\.0</a>\\)"
+
+  # 生成器は symlink を出さない。あれば検査対象の外を指し得るため失敗にする
+  links="$(find "${dist}" -type l)" || { echo "エラー: dist の走査（symlink 検査）に失敗した" >&2; return 1; }
+  if [[ -n "${links}" ]]; then
+    echo "エラー: dist に symlink が含まれる（生成器は出さない）" >&2
+    return 1
+  fi
+
+  for rel in index.html 404.html; do
+    [[ -f "${dist}/${rel}" ]] || { echo "エラー: ${rel} が通常ファイルとして存在しない" >&2; return 1; }
+  done
+
+  # assets/ は利用者の静的ファイルなので対象外
+  list="$(find "${dist}" -path "${dist}/assets" -prune -o -type f -name '*.html' -print)" \
+    || { echo "エラー: dist の走査（HTML 列挙）に失敗した" >&2; return 1; }
+  # 読み取り前にファイルごと 8 MiB・合計 256 MiB の上限を見る（旧 rebrand_site.py と同値）。超過は検査を中止する
+  rc=0
+  printf '%s\n' "${list}" | python3 -I -B -c '
+import os, sys
+total = 0
+for line in sys.stdin.read().split("\n"):
+    if not line:
+        continue
+    size = os.lstat(line).st_size
+    total += size
+    if size > 8 * 1024 * 1024 or total > 256 * 1024 * 1024:
+        sys.exit(1)
+' || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "エラー: dist の HTML がサイズ上限（1 件 8 MiB・合計 256 MiB）を超える、または走査に失敗した" >&2
+    return 1
+  fi
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    rel="${f#"${dist}"/}"
+    rc=0; grep -qF -- 'class="docs-header"' "${f}" || rc=$?
+    [[ "${rc}" -le 1 ]] || { echo "エラー: ${rel} の検査（grep）が失敗した（exit ${rc}）" >&2; return 1; }
+    has_chrome=$(( rc == 0 ? 1 : 0 ))
+    if [[ "${has_chrome}" -eq 0 ]]; then
+      case "${rel}" in
+        index.html|404.html) echo "エラー: ${rel} にサイトのヘッダー（class=\"docs-header\"）が無い" >&2; return 1 ;;
+      esac
+      # リダイレクト案内はサイトのクロームを持たないため対象外。ただし refresh の文字列がどこかにあるだけでは
+      # 免除しない。上流 redirect.rs の生成物と同じ形（head に meta refresh だけ・body は案内の <p> 1 つ）に
+      # ファイル全体が一致するときに限る。それ以外の chrome なしページは fail-closed
+      rc=0
+      python3 -I -B -c '
+import re, sys
+from pathlib import Path
+try:
+    t = Path(sys.argv[1]).read_text(encoding="utf-8")
+except (OSError, ValueError):
+    sys.exit(3)
+shape = (
+    r"\s*<!DOCTYPE html>\s*<html(?: lang=\"[A-Za-z0-9-]{1,35}\")?>\s*<head>"
+    r"(?:<meta charset=\"utf-8\">)?"
+    r"<meta http-equiv=\"refresh\" content=\"[^\"<>]*\">"
+    r"(?:<link rel=\"canonical\" href=\"[^\"<>]*\">)?"
+    r"(?:<meta name=\"robots\" content=\"[^\"<>]*\">)?"
+    r"(?:<title>[^<>]*</title>)?"
+    r"</head>\s*<body>\s*<p>[^<>]*(?:<a href=\"[^\"<>]*\">[^<>]*</a>)?</p>\s*</body>\s*</html>\s*"
+)
+sys.exit(0 if re.fullmatch(shape, t) else 1)
+' "${f}" || rc=$?
+      [[ "${rc}" -le 1 ]] || { echo "エラー: ${rel} の検査（リダイレクト判定）が失敗した（exit ${rc}）" >&2; return 1; }
+      if [[ "${rc}" -eq 0 ]]; then continue; fi
+    fi
+    # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
+    # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
+    rc=0
+    SGP_PAT="${pat}" SGP_NAV="${nav}" SGP_SCRIPTS="${SCRIPT_DIR}" python3 -I -B -c '
+import html, os, re, sys
+from pathlib import Path
+# 末尾に足す: 先頭だと対象リポジトリ由来の同名ファイルより先にスキル側が読まれるが、標準ライブラリを隠せない位置に置く
+sys.path.append(os.environ["SGP_SCRIPTS"])
+from _common import RESIDUAL_RE, parse_nav, read_bounded_text
+# 読み取り上限は上の事前検査（ファイルごと 8 MiB）と同値。超過・UTF-8 不正は検査自体の失敗（exit 3）
+try:
+    t = read_bounded_text(Path(sys.argv[1]), 8 * 1024 * 1024)
+except (OSError, ValueError):
+    sys.exit(3)
+foots = re.findall(r"<footer class=\"docs-footer\">.*?</footer>", t, re.S)
+if len(foots) != 1:
+    sys.exit(1)
+if len(re.findall(os.environ["SGP_PAT"], foots[0])) != 1:
+    sys.exit(1)
+# 生成 HTML 全体（ヘッダー・サイドバー・本文・フッター）に、帰属表記以外で上流名が残っていないことを見る。
+# 利用者が [site] に書いた文言（上流名を含む正当な値）は、ヘッダー・フッター・<title> の中に限り許容する。
+# nav.toml は check_site.py / 生成器と同じ解釈（parse_nav: 全 [site] を合算・行末 CR 除去）で読む。
+# 読めない・解釈できない場合は許容なしとして扱う（残存側へ倒す。fail-closed）。
+user = []
+try:
+    navp = Path(os.environ.get("SGP_NAV", ""))
+    if os.path.islink(navp):
+        raise OSError("symlink")
+    for tb in parse_nav(read_bounded_text(navp, 1024 * 1024)):
+        if tb.header == "site":
+            user.extend(tb.values.values())
+except Exception:
+    user = []
+forms = []
+for v in sorted({x for x in user if RESIDUAL_RE.search(x)}, key=len, reverse=True):
+    forms.extend((v, html.escape(v), html.escape(v, quote=False)))
+def strip_user(seg):
+    for form in forms:
+        seg = seg.replace(form, "")
+    return seg
+# 除外は「出力されると確認できる箇所」に限る。帰属表記はフッター内の確認済みの 1 件だけを除き、
+# 利用者の [site] 値はヘッダー・フッター・<title> の中だけで許容する（本文・サイドバー等の同じ文字列は残して検査する）。
+def clean(m):
+    seg = m.group(0)
+    if seg.startswith("<footer"):
+        seg = re.sub(os.environ["SGP_PAT"], "", seg, count=1)
+    return strip_user(seg)
+resid = re.sub(r"<header class=\"docs-header\">.*?</header>|<footer class=\"docs-footer\">.*?</footer>|<title>.*?</title>", clean, t, flags=re.S)
+sys.exit(2 if RESIDUAL_RE.search(resid) else 0)
+' "${f}" || rc=$?
+    if [[ "${rc}" -eq 1 ]]; then
+      echo "エラー: ${rel} のフッター（docs-footer）に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）がちょうど 1 件ない" >&2
+      return 1
+    fi
+    if [[ "${rc}" -eq 3 ]]; then
+      echo "エラー: ${rel} を上限内の UTF-8 として読めない（検査を中止）" >&2
+      return 1
+    fi
+    if [[ "${rc}" -eq 2 ]]; then
+      echo "エラー: ${rel} に帰属表記以外の上流名（fandhe-frontend・上流 URL）が残っている（[site] の値以外）" >&2
+      return 1
+    fi
+    [[ "${rc}" -eq 0 ]] || { echo "エラー: ${rel} の検査が失敗した（exit ${rc}）" >&2; return 1; }
+    n=$(( n + 1 ))
+  done <<< "${list}"
+  echo "verify ok: HTML ${n} 件に帰属表記あり" >&2
+}
+# <<< verify_attribution
+
 # ---- 生成（リンク検査は fail-closed。1 件でも壊れていれば何も書かず非 0）
 step "サイトを生成"
 "${INSTALL_ROOT}/bin/docs-site" --root "${ROOT}" --out "${OUT}" --no-page-sections
-
-# ---- rebrand
-step "rebrand"
-python3 -I -B "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml"
 
 # ---- 最小 verify（空サイト・アセット欠落を黙って公開しない。-s で 0 バイトも検出）
 step "verify"
 for f in index.html 404.html assets/site.css assets/site.js assets/search-index.json; do
   test -s "${OUT}/${f}" || { echo "エラー: ${f} が無い、または空" >&2; exit 1; }
 done
-python3 -I -B "${SCRIPT_DIR}/rebrand_site.py" --dist "${OUT}" --brand "${SCRIPT_DIR}/brand.toml" --verify-only
+verify_attribution "${OUT}" "${ROOT}/site/nav.toml" || exit 1
 
 step "完了: ${OUT}"

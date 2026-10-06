@@ -1,6 +1,6 @@
 <!-- source: https://github.com/Fandhe-AI/fandhe-frontend/tree/b3e31ef663a98b6080feb98c84ade238d1074a08/crates/docs-site/src (nav.rs, markdown.rs, highlight.rs, linkcheck.rs, redirect.rs, build.rs) -->
 <!-- 最終確認日: 2026-10-05 -->
-<!-- 取得状況: ✅ 取得済み（旧 rev cf5edb9 → 現 rev b3e31ef の nav.rs・build.rs・redirect.rs の差分と上流の外部利用ガイドを本書の各節と突き合わせ、現 rev で scaffold → build-local.sh（匿名 fetch・build・生成・rebrand・verify）の通過を実測。redirects.toml の生成は旧 rev で実測済みで、現 rev では未再実測） -->
+<!-- 取得状況: ✅ 取得済み（旧 rev cf5edb9 → 現 rev b3e31ef の nav.rs・build.rs・redirect.rs の差分と上流の外部利用ガイドを本書の各節と突き合わせ、現 rev で scaffold → build-local.sh（匿名 fetch・build・生成・verify）の通過を実測。redirects.toml の生成は旧 rev で実測済みで、現 rev では未再実測） -->
 
 # docs サイトのファイル書式（nav.toml / redirects.toml / Markdown）
 
@@ -23,7 +23,8 @@
 
 | テーブル | キー | 制約 |
 |----------|------|------|
-| `[site]` | `title` | フッターのブランド名にのみ反映される |
+| `[site]` | `title` | `<title>`・サイドバー等の表示名 |
+| `[site]` | `brand` `repository_url` `tagline` `copyright` `version_badge` `brand_mark`（必須 6 キー）、`lang` `brand_color`（任意） | ブランド表示（ヘッダー・フッター・favicon・`<html lang>`）。必須 6 キーが欠けると `check_site.py` が止める（`version_badge` は空文字で非表示）。`repository_url` は `https://github.com/<owner>/<repo>` のみで `base_path` の導出元。許容値の正は上流ガイド `docs/guides/docs-site-external-repos.md`（キー表は書き写さない） |
 | `[site]` | `base_path` | `""` か `/` 始まりで末尾 `/` なし。プロジェクトサイトは `/<リポジトリ名>` |
 | `[[section]]` | `title`, `index_path` | `index_path` は配下の `page.path` と完全一致。ページが 0 件のセクションは不可 |
 | `[[section.page]]` | `title`, `source`, `path` | `section` の直後に置く |
