@@ -4491,6 +4491,23 @@ class LegacyBrandMigrationTest(unittest.TestCase):
                 self.assertIn("旧挙動", tag_lines[0])
                 self.assertNotIn("Legacy Docs", tag_lines[0])   # brand 由来などの既定値を補わない
 
+    def test_t4b_blank_old_tagline_with_invalid_nav_tagline_says_replace(self):
+        nav = self.old_repo(tagline="")
+        self._set_nav_site(nav, ['tagline = ""'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "needs_input")
+        tag_lines = [l for l in sm["block"].splitlines() if l.startswith("tagline")]
+        self.assertEqual(len(tag_lines), 1)
+        self.assertIn("置き換える", tag_lines[0])
+
+    def test_t3d_nav_leftover_without_old_source_does_not_discard_other_keys(self):
+        nav = self.old_repo(lang=None, favicon_color=None)
+        self._set_nav_site(nav, ['lang = "not a lang!"', 'brand_color = "zzz"'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "proposal", sm["problems"])
+        self.assertIn('brand_mark = "L"', sm["block"])
+        self.assertTrue(any("`lang`" in p for p in sm["problems"]), sm["problems"])
+
     def test_t5_pasted_needs_input_block_still_fails_check_site(self):
         nav = self.old_repo(tagline="")
         sm = self.sm(self.sc("--json"))
