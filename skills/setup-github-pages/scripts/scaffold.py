@@ -399,11 +399,27 @@ LEGACY_ARTIFACTS: tuple[tuple[str, str], ...] = (
 )
 
 
+def only_current_install(p: Path) -> bool:
+    """target が現行構成の docs-site-install だけを含む実ディレクトリか（直下の名前だけを見る。辿らない）。"""
+    if p.is_symlink() or not p.is_dir():
+        return False
+    try:
+        names = os.listdir(p)
+    except OSError:
+        return False
+    return all(n == "docs-site-install" for n in names)
+
+
 def legacy_artifacts(root_real: Path) -> list[dict]:
-    """旧構成の生成物のうち、対象に残っているもの（固定 3 パスの存在だけを見る。内容は読まない・触れない）。"""
+    """旧構成の生成物のうち、対象に残っているもの（固定 3 パスの存在と、target 直下の名前だけを見る。中身は読まない・触れない）。
+
+    target は現行構成も docs-site-install のために使うため、直下が docs-site-install だけなら旧構成の生成物として案内しない。
+    """
     found = []
     for rel, note in LEGACY_ARTIFACTS:
         p = root_real / rel
+        if rel.endswith("/target") and only_current_install(p):
+            continue
         if resolves_inside(root_real, p.parent) and os.path.lexists(p):
             found.append({"path": rel, "note": note, "symlink": p.is_symlink()})
     return found
