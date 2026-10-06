@@ -303,50 +303,73 @@ def legacy_brand_site_proposal(root_real: Path) -> dict | None:
     # 旧設定で任意だったキーの既定値を補う（nav.toml では brand_mark が必須）。旧 favicon_letter が無ければ
     # ブランド名の最初の ASCII 英数字（大文字化）を使う。導出できなければ不足として案内する。tagline の既定値は補わない
     if "brand_mark" not in site:
-        first = next((c for c in str(site.get("brand", "")) if c.isascii() and c.isalnum()), "")
+        brand_src = site.get("brand") or nav_site.get("brand", "")
+        first = next((c for c in str(brand_src) if c.isascii() and c.isalnum()), "")
         if first:
             site["brand_mark"] = first.upper()
+
+    def nav_ok(key: str) -> bool:
+        """nav.toml に当該キーがあり、check_site と同じ検証器を通る（旧値に頼らず充足している）か。"""
+        return key in nav_site and site_value_problem(key, nav_site[key]) is None
+
     tagline_blank = not str(site.get("tagline", "")).strip()
-    tagline_needed = tagline_blank and "tagline" not in nav_site
+    tagline_needed = tagline_blank and not nav_ok("tagline")
     reverse = {v: k for k, v in _LEGACY_BRAND_MAP.items()}
-    problems: list[str] = [f"未知のキー {sanitize(k, 60)}" for k in sorted(set(old) - set(_LEGACY_BRAND_MAP))]
+    # 未知の旧キーは移行に無関係（[site] へ写さない）ため、案の可否を妨げない注記に留める
+    notes: list[str] = [f"旧 brand.toml の未知のキー {sanitize(k, 60)} は移行しない" for k in sorted(set(old) - set(_LEGACY_BRAND_MAP))]
+    blocking: list[str] = []
     entries: list[dict] = []
     for key in (*SITE_REQUIRED_KEYS, "lang", "brand_color"):
+        old_key = reverse.get(key, key)
         if key == "tagline" and tagline_blank:
             if tagline_needed:
                 entries.append({"key": key, "from": "tagline", "state": "needs_input", "value": None})
             continue
+        if nav_ok(key):
+            # nav.toml 側が既に有効。旧値は案の可否に関係させず、有効な旧値があるときだけ差異を報告する
+            if key in site and site_value_problem(key, site[key]) is None:
+                entries.append({"key": key, "from": old_key, "state": "same" if nav_site[key] == site[key] else "differs",
+                                "value": site[key]})
+            continue
+        in_nav = key in nav_site
+        nav_why = f"nav.toml の既存の値が不正（{site_value_problem(key, nav_site[key])}）。置換が必要" if in_nav else ""
         if key not in site:
-            if key in SITE_REQUIRED_KEYS and key not in nav_site:
-                problems.append(f"[site] の `{key}`: 旧 brand.toml に `{reverse.get(key, key)}` が無く、導出もできない（追記する）")
-                entries.append({"key": key, "from": reverse.get(key, key), "state": "invalid", "value": None})
+            if key in SITE_REQUIRED_KEYS or in_nav:
+                blocking.append(f"[site] の `{key}`: " + (nav_why + "。" if in_nav else "") +
+                                f"旧 brand.toml に `{old_key}` が無く、導出もできない（追記する）")
+                entries.append({"key": key, "from": old_key, "state": "invalid", "value": None})
             continue
         why = site_value_problem(key, site[key])
         if why:
-            problems.append(f"[site] の `{key}`（旧 `{reverse.get(key, key)}`）: {why}")
-            entries.append({"key": key, "from": reverse.get(key, key), "state": "invalid", "value": None})
+            blocking.append(f"[site] の `{key}`（旧 `{old_key}`）: {why}" + (f"（{nav_why}）" if in_nav else ""))
+            entries.append({"key": key, "from": old_key, "state": "invalid", "value": None})
             continue
-        state = "add" if key not in nav_site else "same" if nav_site[key] == site[key] else "differs"
-        entries.append({"key": key, "from": reverse.get(key, key), "state": state, "value": site[key]})
+        entries.append({"key": key, "from": old_key, "state": "replace" if in_nav else "add", "value": site[key]})
     res["entries"] = entries
     res["needs_input"] = ["tagline"] if tagline_needed else []
 
-    if not [k for k in SITE_REQUIRED_KEYS if k not in nav_site] and not check_site_values(nav_site):
-        res["status"] = "migrated"   # nav.toml が既に必須キーを満たす。brand.toml は削除候補として案内するだけ
+    if blocking:
+        res["status"], res["problems"] = "invalid", blocking + notes
+        return res
+    todo = [e for e in entries if e["state"] in ("add", "replace")]
+    if not todo and not tagline_needed:
+        res["status"] = "migrated"   # nav.toml が既に有効な値で充足。brand.toml は削除候補として案内するだけ
         res["problems"] = [f"[site] の `{e['key']}`: 旧 brand.toml と値が異なる（nav.toml の値を優先する）"
-                           for e in entries if e["state"] == "differs"]
+                           for e in entries if e["state"] == "differs"] + notes
         return res
-    if problems:
-        res["status"], res["problems"] = "invalid", problems
-        return res
-    adds = [e for e in entries if e["state"] == "add"]
-    lines = ["[site]"] + [f'{e["key"]} = "{toml_escape(e["value"])}"' for e in adds]
+    lines = ["[site]"]
+    for e in todo:
+        line = f'{e["key"]} = "{toml_escape(e["value"])}"'
+        if e["state"] == "replace":
+            line += f"  # nav.toml の既存の `{e['key']}` 行は不正。追加でなく置き換える"
+        lines.append(line)
+    res["problems"] = list(notes)
     if tagline_needed:
         lines.append(TAGLINE_NEEDS_INPUT_LINE)
-        res["problems"] = ["tagline: 旧 brand.toml の説明文が空。旧挙動（行ごと削除）から変わり、既定値は補わない。"
-                           "サイトの説明を 1 行決めて置き換えるまで check_site が止める"]
+        res["problems"].append("tagline: 旧 brand.toml の説明文が空。旧挙動（行ごと削除）から変わり、既定値は補わない。"
+                               "サイトの説明を 1 行決めて置き換えるまで check_site が止める")
     res["status"] = "needs_input" if tagline_needed else "proposal"
-    res["block"] = "\n".join(lines) if len(lines) > 1 else None
+    res["block"] = "\n".join(lines)
     return res
 
 

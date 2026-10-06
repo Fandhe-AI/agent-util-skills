@@ -4447,6 +4447,32 @@ class LegacyBrandMigrationTest(unittest.TestCase):
                 self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
                 self.assertEqual(nav.read_bytes(), before)
 
+    def _set_nav_site(self, nav, lines):
+        nav.write_text(nav.read_text().replace("[site]\n", "[site]\n" + "".join(l + "\n" for l in lines), 1))
+
+    def test_t3b_invalid_existing_nav_value_is_proposed_as_replace(self):
+        nav = self.old_repo()
+        self._set_nav_site(nav, ['brand = ""', 'repository_url = "https://github.com/acme/r"', 'tagline = "Old tag"',
+                                 'copyright = "(c) 2024 acme"', 'version_badge = "v1"'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "proposal")
+        ent = {e["key"]: e for e in sm["entries"]}
+        self.assertEqual(ent["brand"]["state"], "replace")
+        self.assertEqual(ent["brand_mark"]["state"], "add")
+        self.assertIn('brand = "Legacy Docs"', sm["block"])
+        self.assertIn("置き換える", sm["block"])
+        self.assertIn('brand_mark = "L"', sm["block"])
+
+    def test_t3c_unrelated_old_invalid_value_does_not_block_proposal(self):
+        nav = self.old_repo(brand="B" * 65, lang="not a lang!", mystery="x")
+        self._set_nav_site(nav, ['brand = "Kept Brand"', 'repository_url = "https://github.com/acme/r"',
+                                 'tagline = "Old tag"', 'copyright = "(c) 2024 acme"', 'version_badge = "v1"',
+                                 'lang = "ja"'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "proposal", sm["problems"])
+        self.assertIn('brand_mark = "L"', sm["block"])
+        self.assertNotIn("brand =", sm["block"])
+
     def test_t4_blank_tagline_needs_input_without_default(self):
         for tag in ("", "   ", None):
             with self.subTest(tag=tag):
