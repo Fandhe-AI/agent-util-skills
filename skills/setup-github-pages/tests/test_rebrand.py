@@ -4669,6 +4669,19 @@ class VerifyAttributionTest(unittest.TestCase):
         r = self.verify_with_nav('[site]\nbrand = "Mine"\n')
         self.assertEqual(r.returncode, 1, r.stderr)
 
+    def test_user_value_equal_to_upstream_name_is_not_allowed_in_body(self):
+        self.mutate("index.html", lambda t: t.replace("</body>", "<p>fandhe-frontend</p></body>", 1))
+        r = self.verify_with_nav('[site]\nbrand = "fandhe-frontend"\n')
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_extra_attribution_outside_footer_is_still_checked(self):
+        def add(t):
+            m = re.search(r"Built with.*?Apache-2\.0</a>\)", t, re.S)
+            return t.replace("</body>", f"<p>{m.group(0)}</p></body>", 1)
+        self.mutate("index.html", add)
+        r = self.verify()
+        self.assertEqual(r.returncode, 1, r.stderr)
+
     def test_crlf_and_split_site_tables_are_allowlisted(self):
         self._brand_in_header("fandhe-frontend fork")
         r = self.verify_with_nav('[site]\r\nbrand = "Mine"\r\n\r\n[[section]]\r\ntitle = "A"\r\n\r\n'

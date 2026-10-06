@@ -466,7 +466,7 @@ if len(foots) != 1:
 if len(re.findall(os.environ["SGP_PAT"], foots[0])) != 1:
     sys.exit(1)
 # 生成 HTML 全体（ヘッダー・サイドバー・本文・フッター）に、帰属表記以外で上流名が残っていないことを見る。
-# 利用者が [site] に書いた文言（上流名を含む正当な値）は許容するため、先に取り除く。
+# 利用者が [site] に書いた文言（上流名を含む正当な値）は、ヘッダー・フッター・<title> の中に限り許容する。
 # nav.toml は check_site.py / 生成器と同じ解釈（parse_nav: 全 [site] を合算・行末 CR 除去）で読む。
 # 読めない・解釈できない場合は許容なしとして扱う（残存側へ倒す。fail-closed）。
 user = []
@@ -479,10 +479,21 @@ try:
             user.extend(tb.values.values())
 except Exception:
     user = []
-resid = re.sub(os.environ["SGP_PAT"], "", t)
+forms = []
 for v in sorted({x for x in user if RESIDUAL_RE.search(x)}, key=len, reverse=True):
-    for form in (v, html.escape(v), html.escape(v, quote=False)):
-        resid = resid.replace(form, "")
+    forms.extend((v, html.escape(v), html.escape(v, quote=False)))
+def strip_user(seg):
+    for form in forms:
+        seg = seg.replace(form, "")
+    return seg
+# 除外は「出力されると確認できる箇所」に限る。帰属表記はフッター内の確認済みの 1 件だけを除き、
+# 利用者の [site] 値はヘッダー・フッター・<title> の中だけで許容する（本文・サイドバー等の同じ文字列は残して検査する）。
+def clean(m):
+    seg = m.group(0)
+    if seg.startswith("<footer"):
+        seg = re.sub(os.environ["SGP_PAT"], "", seg, count=1)
+    return strip_user(seg)
+resid = re.sub(r"<header class=\"docs-header\">.*?</header>|<footer class=\"docs-footer\">.*?</footer>|<title>.*?</title>", clean, t, flags=re.S)
 sys.exit(2 if RESIDUAL_RE.search(resid) else 0)
 ' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
