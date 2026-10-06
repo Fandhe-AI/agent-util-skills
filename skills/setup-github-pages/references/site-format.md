@@ -72,7 +72,7 @@ to = "/usage/"
 
 `from` は既存の `page.path` と衝突不可、`to` は実在するページであること。生成物は
 `meta refresh` + `rel=canonical` + `noindex` のみの最小ページ（ヘッダー・フッターを持たない）で、
-`rebrand_site.py` はこれを redirect ページとして許容する。1 件の生成と rebrand 通過を実測済み。
+1 件の生成を実測済み。
 
 ## Markdown サブセット
 

@@ -58,7 +58,7 @@
 ### setup-github-pages
 
 - `gh repo view`（既定ブランチ解決）・`cargo install --git`（fandhe-frontend の匿名取得）・`gh api`（Pages 設定の確認。新規構築では有効化も行う）で github.com への、`curl`（`--write-third-party` 時の `LICENSE-MIT` 取得）で raw.githubusercontent.com へのネットワークアクセスが必須（raw.githubusercontent.com は #49 で加わった要件）
-- `scripts/build-local.sh` と `scripts/rebrand_site.py`・`scripts/check_site.py` はビルド・検証・置換処理でネットワーク不要。ただし前提となる `cargo install --git` が必須なため「ネットワーク不要」とはいえず「要」と判定
+- `scripts/build-local.sh` と `scripts/check_site.py` はビルド・検証処理でネットワーク不要。ただし前提となる `cargo install --git` が必須なため「ネットワーク不要」とはいえず「要」と判定
 - 初回セットアップ時および `FF_REV` が更新された場合に `tools/docs-site-gen/target/docs-site-install` へ docs-site をインストールする。`FF_REV` が変わらない場合のビルドはそのインストール済みバイナリを使う（`cargo install` は同一 rev の再インストールを省略する）。`--write-third-party` を付けると毎回 `LICENSE-MIT` を取得する
 - GitHub Actions（`pages.yml`）による自動デプロイもネットワーク越しの push 検知と権限検証を要する
 - SKILL.md 側の詳細は [../skills/setup-github-pages/SKILL.md](../skills/setup-github-pages/SKILL.md) の前提条件・ネットワーク要件を参照

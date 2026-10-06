@@ -66,7 +66,7 @@ esac
 # python3 は、`-c` なら cwd、スクリプト起動ならそのスクリプトのディレクトリが sys.path の先頭に入る。対象
 # リポジトリ（信頼できない場合がある）の .py（argparse.py 等の標準モジュール名）が標準ライブラリより先に
 # import されないよう、すべての起動に `-I`（隔離モード: cwd・スクリプトのディレクトリ・PYTHONPATH・user site を
-# 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。check_site.py /
+# 使わない）を付ける。`-B` は __pycache__ を作らない（置かれた .pyc の読み込みを避ける）。
 # check_site.py も自分で自ディレクトリを sys.path の末尾に足すので、_common は import できる。
 canon() { python3 -I -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 

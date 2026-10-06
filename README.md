@@ -70,7 +70,7 @@ fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub
 - [fandhe-frontend の公式サイト](https://fandhe-ai.github.io/fandhe-frontend/)のデザイン・構成・機能（テーマ切替・検索・アクセシビリティ）をそのまま再利用
 - 新規構築: Rust 製 SSG（fandhe-frontend の `crates/docs-site`）をラッパーで呼ぶため、ビルド・生成・デプロイすべてをローカル・CI の同じ入口で実行
 - 構築済みサイトの更新: 構築済みのリポジトリでスキルを再実行すると、スキルの最新構成（生成器の固定 commit `FF_REV`・wrapper・スクリプト・`pages.yml`）へ更新する。利用者のファイル（`site/`・`brand.toml`・`pages.yml` の追加 `paths`）は保持し、配置後に手を加えたスキル所有ファイルは上書きせず競合として止まる。Pages の設定は変更しない
-- ブランド名・GitHub リンク・著作権・favicon などを `brand.toml` と後処理（`rebrand_site.py`）で置き換え
+- ブランド名・GitHub リンク・著作権・favicon などを `brand.toml` から `nav.toml` の `[site]` へ反映
 - `Fandhe-AI/actions` の共通 reusable workflow で GitHub Pages へ自動デプロイ
 - 詳細は [skills/setup-github-pages/SKILL.md](skills/setup-github-pages/SKILL.md) を参照
 
