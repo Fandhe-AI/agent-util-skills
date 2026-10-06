@@ -19,6 +19,8 @@ nav の path が `/themes/` 等の上流ショーケースの接頭辞で始ま�
 常に `--no-page-sections` を付けて生成し、上流がその指定でショーケースの注入を止めるため。
 このフラグを外す変更をする場合は、予約パス検査の復活が要る（`tests/rev-pin.test.mjs` が欠落を検出する）。
 
+加えて、`[site]` の必須キーが無く旧 brand.toml が残る場合は、更新モードの移行案への案内をエラー文に足す（存在だけを見る）。
+
 警告のみ（終了コードに影響しない）: Markdown の画像記法（上流は画像非対応）、base_path を
 含まない絶対パスリンク、THIRD-PARTY-LICENSES の欠落。
 
@@ -37,7 +39,7 @@ from pathlib import Path
 # 同じディレクトリに標準モジュール名のファイル（argparse.py 等）があっても標準ライブラリを先に解決させる。
 sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
-    PLACEHOLDER_RE, SubsetError, check_site_values, parse_nav, parse_repository_url, pages_base_path,
+    PLACEHOLDER_RE, SITE_REQUIRED_KEYS, SubsetError, check_site_values, parse_nav, parse_repository_url, pages_base_path,
     read_bounded_text, resolves_inside, sanitize,
 )
 
@@ -99,7 +101,7 @@ def check(root: Path) -> tuple[list[str], list[str]]:
         raise ValueError(f"site/nav.toml を読めない: {e}") from e
 
     # 1. [site] の検証と base_path の整合。上流は [site] の再掲を同じ文脈として積むため全テーブルを合算し、
-    # 同名キーの重複は上流と同じく拒否する。brand.toml はビルドで読まれないため読まない。
+    # 同名キーの重複は上流と同じく拒否する。brand.toml はビルドで読まれないため内容は読まない（[site] の必須キー欠落時に限り、存在だけを見て移行の案内を足す）。
     values: dict[str, str] = {}
     for t in tables:
         if t.header != "site":
@@ -109,6 +111,14 @@ def check(root: Path) -> tuple[list[str], list[str]]:
                 errors.append(f"site/nav.toml line {t.line}: [site] のキー `{sanitize(k, 60)}` が重複している")
             values[k] = v
     errors.extend(f"site/nav.toml {p}" for p in check_site_values(values))
+    # 旧構成の brand.toml が残り、[site] の必須キーが無い = 旧構成から未移行。存在だけを見て内容は読まず、symlink も辿らない
+    legacy_brand = root / "tools" / "docs-site-gen" / "brand.toml"
+    if any(k not in values for k in SITE_REQUIRED_KEYS) and resolves_inside(root, legacy_brand.parent) \
+            and os.path.lexists(legacy_brand):
+        errors.append(
+            "旧構成の tools/docs-site-gen/brand.toml が残っている（ビルドでは読まれない）。setup-github-pages の更新モード"
+            "（scaffold.py）を実行すると、brand.toml から [site] への移行案が出る。案を確認して nav.toml の [site] へ"
+            "キー単位で追記する")
     base = values.get("base_path", "")
     parsed = parse_repository_url(values["repository_url"]) if "repository_url" in values else None
     if parsed is not None and base != pages_base_path(*parsed):

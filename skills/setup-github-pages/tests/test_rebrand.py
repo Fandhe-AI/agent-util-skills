@@ -1306,8 +1306,9 @@ class ScaffoldUpdateTest(unittest.TestCase):
         r = self.sc(args=())
         self.assertEqual(r.returncode, 4, r.stderr)
         self.assertIn("移行案", r.stderr)
-        self.assertIn('repository_url = "https://github.com/acme/r"', r.stderr)
-        self.assertIn('brand_mark = "L"', r.stderr)
+        # 案は nav.toml に無いキーだけ（既にある repository_url 等は含めない）。複数行のまま出る
+        self.assertIn('\nbrand_mark = "L"\n', r.stderr)
+        self.assertNotIn('repository_url = "https://github.com/acme/r"\nbrand_mark', r.stderr)
         self.assertEqual(nav.read_text(), before, "nav.toml を書き換えてはいけない")
         self.assertTrue((self.t / "tools/docs-site-gen/brand.toml").exists())
 
@@ -3145,7 +3146,8 @@ class UpdateSnapshotTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", "baseline")
         for bad in ("../x", "/etc/passwd", ".git/config", ".GIT/config", ".Git", "a/../b", "-rf", "a b", "a\tb", "x" * 300, ".",
-                    "tools/docs-site-gen/", "site/nav.toml", "tools/docs-site-gen/brand.toml", "README.md"):
+                    "tools/docs-site-gen/", "site/nav.toml", "tools/docs-site-gen/brand.toml", "tools/docs-site-gen/Cargo.toml",
+                    "tools/docs-site-gen/src/main.rs", "README.md"):
             r = self.sh("record", self.snap, bad)
             self.assertEqual(r.returncode, 2, bad)
         self.assertNotIn("REC", self.snap.read_text() if self.snap.exists() else "")
@@ -4348,6 +4350,304 @@ class ScaffoldSiteKeysTest(unittest.TestCase):
                 "--branch", "main", "--title", "Mini")   # 4 引数を明示した更新は tagline も必須
         self.assertEqual(r.returncode, 2)
         self.assertIn("--tagline", r.stderr)
+
+
+LEGACY_BRAND_LINES = {
+    "brand": "Legacy Docs", "repository": "https://github.com/acme/r", "tagline": "Old tag",
+    "copyright": "(c) 2024 acme", "lang": "ja", "version_badge": "v1", "favicon_letter": "L", "favicon_color": "#2b6cb0",
+}
+
+
+def write_legacy_brand(t, **over):
+    """旧 brand.toml（#53 より前のテンプレートと同じ構造: コメント行 + [brand] + 8 キー）を合成値で書く。None で行ごと消す。"""
+    vals = dict(LEGACY_BRAND_LINES, **over)
+    body = "# 旧構成のブランド設定（合成）\n[brand]\n" + "".join(
+        f'{k} = "{v}"\n' for k, v in vals.items() if v is not None)
+    p = t / "tools/docs-site-gen/brand.toml"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def strip_site_brand_keys(t):
+    """nav.toml の [site] から brand 系のキーを落とし、title・base_path だけ残す（旧構成の nav.toml）。"""
+    nav = t / "site/nav.toml"
+    keep = ("brand_mark", "brand_color", "brand ", "repository_url", "tagline", "copyright", "version_badge", "lang")
+    nav.write_text("".join(l + "\n" for l in nav.read_text().splitlines()
+                           if not any(l.startswith(k) for k in keep)))
+    return nav
+
+
+class LegacyBrandMigrationTest(unittest.TestCase):
+    """旧 brand.toml から nav.toml `[site]` への移行案（#54）。案を出すだけで、利用者ファイルは書かない・消さない。"""
+
+    ARGS = ScaffoldUpdateTest.ARGS
+    SENTINEL = "SENTINEL-VALUE-XYZ"
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.t = self.base / "repo"
+        self.t.mkdir()
+        r = self.sc(args=self.ARGS)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def sc(self, *extra, args=()):
+        return run("scaffold.py", "--target", self.t, *args, *extra)
+
+    def old_repo(self, **over):
+        make_old_layout(self.t)
+        write_legacy_brand(self.t, **over)
+        return strip_site_brand_keys(self.t)
+
+    def sm(self, r):
+        return json.loads(r.stdout)["site_migration"]
+
+    def test_t1_proposal_and_deprecated_without_touching_user_files(self):
+        nav = self.old_repo()
+        brand = self.t / "tools/docs-site-gen/brand.toml"
+        before = (nav.read_bytes(), brand.read_bytes())
+        r = self.sc("--json")
+        self.assertEqual(r.returncode, 4, r.stderr)
+        sm = self.sm(r)
+        self.assertEqual(sm["status"], "proposal")
+        self.assertFalse(sm["applied"])
+        self.assertIn('repository_url = "https://github.com/acme/r"', sm["block"])
+        self.assertIn('brand_mark = "L"', sm["block"])
+        self.assertNotIn("title", sm["block"])
+        dep = {d["path"]: d for d in json.loads(r.stdout)["deprecated"]}
+        self.assertIn("note", dep["tools/docs-site-gen/brand.toml"])
+        self.assertEqual((nav.read_bytes(), brand.read_bytes()), before)
+
+    def test_t2_human_output_keeps_lines_separate(self):
+        self.old_repo()
+        r = self.sc()
+        self.assertEqual(r.returncode, 4)
+        self.assertNotIn("\\u000a", r.stderr)
+        lines = r.stderr.splitlines()
+        self.assertIn("[site]", lines)
+        self.assertIn('repository_url = "https://github.com/acme/r"', lines)
+        self.assertIn('brand_mark = "L"', lines)
+
+    def test_t3_invalid_old_values_stop_without_echoing_values(self):
+        cases = {
+            "brand": ("brand", "B" * 65), "version_badge": ("version_badge", "v" * 33),
+            "repository_url": ("repository", "http://github.com/acme/r"),
+        }
+        for key, (old_key, bad) in cases.items():
+            with self.subTest(key=key):
+                nav = self.old_repo(**{old_key: bad + self.SENTINEL if key != "repository_url" else bad})
+                before = nav.read_bytes()
+                r = self.sc("--json")
+                self.assertEqual(r.returncode, 4, r.stderr)
+                sm = self.sm(r)
+                self.assertEqual(sm["status"], "invalid")
+                self.assertIsNone(sm["block"])
+                self.assertTrue(any(f"`{key}`" in p for p in sm["problems"]), sm["problems"])
+                self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
+                self.assertEqual(nav.read_bytes(), before)
+
+    def _set_nav_site(self, nav, lines):
+        nav.write_text(nav.read_text().replace("[site]\n", "[site]\n" + "".join(l + "\n" for l in lines), 1))
+
+    def test_t3b_invalid_existing_nav_value_is_proposed_as_replace(self):
+        nav = self.old_repo()
+        self._set_nav_site(nav, ['brand = ""', 'repository_url = "https://github.com/acme/r"', 'tagline = "Old tag"',
+                                 'copyright = "(c) 2024 acme"', 'version_badge = "v1"'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "proposal")
+        ent = {e["key"]: e for e in sm["entries"]}
+        self.assertEqual(ent["brand"]["state"], "replace")
+        self.assertEqual(ent["brand_mark"]["state"], "add")
+        self.assertIn('brand = "Legacy Docs"', sm["block"])
+        self.assertIn("置き換える", sm["block"])
+        self.assertIn('brand_mark = "L"', sm["block"])
+
+    def test_t3c_unrelated_old_invalid_value_does_not_block_proposal(self):
+        nav = self.old_repo(brand="B" * 65, lang="not a lang!", mystery="x")
+        self._set_nav_site(nav, ['brand = "Kept Brand"', 'repository_url = "https://github.com/acme/r"',
+                                 'tagline = "Old tag"', 'copyright = "(c) 2024 acme"', 'version_badge = "v1"',
+                                 'lang = "ja"'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "proposal", sm["problems"])
+        self.assertIn('brand_mark = "L"', sm["block"])
+        self.assertNotIn("brand =", sm["block"])
+
+    def test_t4_blank_tagline_needs_input_without_default(self):
+        for tag in ("", "   ", None):
+            with self.subTest(tag=tag):
+                self.old_repo(tagline=tag)
+                r = self.sc("--json")
+                sm = self.sm(r)
+                self.assertEqual(sm["status"], "needs_input")
+                self.assertEqual(sm["needs_input"], ["tagline"])
+                ent = {e["key"]: e for e in sm["entries"]}
+                self.assertIsNone(ent["tagline"]["value"])
+                self.assertEqual(ent["tagline"]["state"], "needs_input")
+                tag_lines = [l for l in sm["block"].splitlines() if l.startswith("tagline")]
+                self.assertEqual(len(tag_lines), 1)
+                self.assertIn("__SGP_TAGLINE__", tag_lines[0])
+                self.assertIn("要入力", tag_lines[0])
+                self.assertIn("旧挙動", tag_lines[0])
+                self.assertNotIn("Legacy Docs", tag_lines[0])   # brand 由来などの既定値を補わない
+
+    def test_t4b_blank_old_tagline_with_invalid_nav_tagline_says_replace(self):
+        nav = self.old_repo(tagline="")
+        self._set_nav_site(nav, ['tagline = ""'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "needs_input")
+        tag_lines = [l for l in sm["block"].splitlines() if l.startswith("tagline")]
+        self.assertEqual(len(tag_lines), 1)
+        self.assertIn("置き換える", tag_lines[0])
+
+    def test_t3d_nav_leftover_without_old_source_does_not_discard_other_keys(self):
+        nav = self.old_repo(lang=None, favicon_color=None)
+        self._set_nav_site(nav, ['lang = "not a lang!"', 'brand_color = "zzz"'])
+        sm = self.sm(self.sc("--json"))
+        self.assertEqual(sm["status"], "proposal", sm["problems"])
+        self.assertIn('brand_mark = "L"', sm["block"])
+        self.assertTrue(any("`lang`" in p for p in sm["problems"]), sm["problems"])
+
+    def test_t3e_invalid_optional_old_value_keeps_required_proposal(self):
+        for old_key, key, bad in (("lang", "lang", "not a lang!"), ("favicon_color", "brand_color", "zzz")):
+            with self.subTest(key=key):
+                nav = self.old_repo(**{old_key: bad + self.SENTINEL})
+                before = nav.read_bytes()
+                r = self.sc("--json")
+                self.assertEqual(r.returncode, 4, r.stderr)
+                sm = self.sm(r)
+                self.assertEqual(sm["status"], "proposal", sm["problems"])
+                self.assertIn('brand_mark = "L"', sm["block"])
+                self.assertIn('repository_url = "https://github.com/acme/r"', sm["block"])
+                self.assertNotIn(f"{key} =", sm["block"])
+                self.assertTrue(any(f"`{key}`" in p for p in sm["problems"]), sm["problems"])
+                self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
+                self.assertEqual(nav.read_bytes(), before)
+
+    def test_t5_pasted_needs_input_block_still_fails_check_site(self):
+        nav = self.old_repo(tagline="")
+        sm = self.sm(self.sc("--json"))
+        nav.write_text(nav.read_text().replace("[site]\n", sm["block"] + "\n", 1))
+        r = run("check_site.py", "--root", self.t)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("__SGP_TAGLINE__", r.stderr)
+
+    def test_t6_migrated_site_keeps_old_brand_as_deprecated_only(self):
+        write_legacy_brand(self.t, brand="Other Name")
+        r = self.sc("--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sm = self.sm(r)
+        self.assertEqual(sm["status"], "migrated")
+        self.assertTrue(any("tools/docs-site-gen/brand.toml" == d["path"] for d in json.loads(r.stdout)["deprecated"]))
+        self.assertTrue(any("`brand`" in p for p in sm["problems"]))
+        self.assertTrue(any(e["key"] == "brand" and e["state"] == "differs" for e in sm["entries"]))
+        self.assertNotIn("brand =", sm["block"] or "")
+
+    def test_t7_unreadable_brand_toml_is_reported_not_leaked(self):
+        secret = self.base / "secret.txt"
+        secret.write_text(f'[brand]\nbrand = "{self.SENTINEL}"\n')
+        cases = {
+            "symlink": lambda p: p.symlink_to(secret),
+            "no-brand-table": lambda p: p.write_text(f'name = "{self.SENTINEL}"\n'),
+            "not-utf8": lambda p: p.write_bytes(b"\xff\xfe[brand]\n"),
+        }
+        for name, make in cases.items():
+            with self.subTest(case=name):
+                nav = self.old_repo()
+                p = self.t / "tools/docs-site-gen/brand.toml"
+                p.unlink()
+                make(p)
+                r = self.sc("--json")
+                self.assertEqual(r.returncode, 4, r.stderr)
+                self.assertEqual(self.sm(r)["status"], "unreadable")
+                self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
+
+    def test_t8_legacy_artifacts_are_guided_not_deleted(self):
+        self.old_repo()
+        gen = self.t / "tools/docs-site-gen"
+        (self.t / "_ff").mkdir()
+        (gen / "Cargo.lock").write_text("# lock\n")
+        (gen / "target/debug").mkdir(parents=True)
+        r = self.sc("--json")
+        data = json.loads(r.stdout)
+        paths = {a["path"]: a for a in data["legacy_artifacts"]}
+        self.assertEqual(set(paths), {"_ff", "tools/docs-site-gen/Cargo.lock", "tools/docs-site-gen/target"})
+        self.assertIn("docs-site-install", paths["tools/docs-site-gen/target"]["note"])
+        self.assertFalse({d["path"] for d in data["deprecated"]} & set(paths))
+        self.assertTrue((self.t / "_ff").is_dir() and (gen / "Cargo.lock").is_file() and (gen / "target/debug").is_dir())
+        self.assertFalse(any("配置していない" in w for w in data["warnings"]), data["warnings"])
+        human = self.sc()
+        self.assertIn("旧構成の生成物", human.stdout)
+
+    def test_t8b_current_install_only_target_is_not_legacy(self):
+        self.old_repo()
+        (self.t / "tools/docs-site-gen/target/docs-site-install").mkdir(parents=True)
+        data = json.loads(self.sc("--json").stdout)
+        self.assertNotIn("tools/docs-site-gen/target", {a["path"] for a in data["legacy_artifacts"]})
+
+    def test_t8c_empty_target_is_still_legacy(self):
+        self.old_repo()
+        (self.t / "tools/docs-site-gen/target").mkdir(parents=True)
+        data = json.loads(self.sc("--json").stdout)
+        self.assertIn("tools/docs-site-gen/target", {a["path"] for a in data["legacy_artifacts"]})
+
+    def test_t9_idempotent(self):
+        self.old_repo()
+        first = json.loads(self.sc("--json").stdout)
+        second = json.loads(self.sc("--json").stdout)
+        self.assertEqual((second["created"], second["updated"]), ([], []))
+        self.assertEqual(first["site_migration"], second["site_migration"])
+        self.assertEqual(first["legacy_artifacts"], second["legacy_artifacts"])
+
+    def test_no_brand_toml_means_null_and_new_mode_skips(self):
+        data = json.loads(self.sc("--json").stdout)
+        self.assertIsNone(data["site_migration"])
+        self.assertEqual(data["legacy_artifacts"], [])
+
+    def test_t10_check_site_points_to_update_mode_without_reading_brand_toml(self):
+        strip_site_brand_keys(self.t)
+        gen = self.t / "tools/docs-site-gen"
+        brand = gen / "brand.toml"
+        r = run("check_site.py", "--root", self.t)
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("更新モード", r.stderr)   # brand.toml が無ければ案内しない
+        brand.write_text(f"壊れた {self.SENTINEL}")
+        r = run("check_site.py", "--root", self.t)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("更新モード", r.stderr)
+        self.assertIn("移行案", r.stderr)
+        self.assertNotIn(self.SENTINEL, r.stderr + r.stdout)
+        brand.unlink()
+        secret = self.base / "secret.txt"
+        secret.write_text(self.SENTINEL)
+        brand.symlink_to(secret)
+        r = run("check_site.py", "--root", self.t)
+        self.assertIn("更新モード", r.stderr)
+        self.assertNotIn(self.SENTINEL, r.stderr + r.stdout)
+
+    def test_t11_build_local_stops_before_install_with_guidance(self):
+        strip_site_brand_keys(self.t)
+        write_legacy_brand(self.t)
+        log = self.base / "calls.log"
+        bindir = self.base / "stubs"
+        bindir.mkdir()
+        for name in ("cargo", "curl"):
+            stub = bindir / name
+            stub.write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\nexit 97\n')
+            stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+        r = subprocess.run(["bash", str(self.t / "tools/docs-site-gen/build-local.sh"), "--out", str(self.base / "out")],
+                           capture_output=True, text=True, cwd=self.t, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("移行案", r.stderr)
+        self.assertFalse(log.exists() and log.read_text(), "install より前の check_site で止まる")
+
+    def test_t12_deprecated_files_are_outside_snapshot_allowlist(self):
+        lp = json.loads(run("scaffold.py", "--target", self.t, "--list-paths").stdout)
+        listed = set(lp["owned"]) | set(lp["user"]) | {lp["manifest"]} | set(lp["extra"])
+        sys.path.append(str(SCRIPTS))
+        import scaffold
+        self.assertFalse(set(scaffold.DEPRECATED_OWNED) & listed)
 
 
 class VerifyAttributionTest(unittest.TestCase):

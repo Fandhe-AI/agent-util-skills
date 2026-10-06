@@ -106,13 +106,13 @@
 - **決定**: 更新モードの scaffold は旧 `brand.toml` を読み、`[site]` ブロックの**案**を JSON と人間向け出力の両方に出す。`nav.toml` も `brand.toml` も書き換えない・削除しない
   1. 利用者がブロックを確認する
   2. 合意したら、SKILL.md の更新フローの手順で `nav.toml` の `[site]` へ反映する
-  3. 旧 `brand.toml` と `_ff/`・`target/`・`Cargo.lock` は削除候補として案内する。自動削除はしない
+  3. 旧 `brand.toml` は削除候補（`deprecated`）として案内する。`_ff/`・`target/`・`Cargo.lock` はスキル所有ファイルではないので削除候補にせず、別キー `legacy_artifacts` で利用者向けの案内だけを出す（`target/docs-site-install` は新構成でも使うため丸ごとは消さない）。自動削除はしない
   - 案は `check_site.py` の新 `[site]` 規則を通す。通らない旧値は、どのキーか（値は載せない）を示して停止する
   - 自動運転（非対話）では適用しない。案を出して「要対応」として報告する
   - 適用前にビルドしても、決定 1 の必須キー欠落で `check_site.py` が fail-closed になるので、上流の既定文言が黙って公開されることはない
 - **理由**: 更新モードは利用者編集ファイルを書き換えない不変条件を守る。`nav.toml` はコメントを含む利用者編集物で自動編集は事故が起きやすい。一方、8 キーの検証規則と TOML エスケープは人手だと間違えやすく、決定的な案の生成が要る
 - **非採用**: 完全に人手の移行。キーごとの規則が多く誤りやすい
-- **影響**: #54 の方式を上記に確定する。`Brand`・`load_brand`・`BRAND_REQUIRED_KEYS` は `rebrand_site.py` と一緒に #51 で削除済み。#54 の旧 `brand.toml` 読み取りは自己完結した関数（既存の TOML 部分集合パーサを使う）とする
+- **影響**: #54 の方式を上記に確定し、#54 で反映済み（`site_migration`・`legacy_artifacts`。旧 `tagline = ""` は案の tagline を「要入力」の目印にし、既定値は補わない）。`Brand`・`load_brand`・`BRAND_REQUIRED_KEYS` は `rebrand_site.py` と一緒に #51 で削除済み。#54 の旧 `brand.toml` 読み取りは自己完結した関数（既存の TOML 部分集合パーサを使う）とする
 
 ### 決定を覆す条件
 
