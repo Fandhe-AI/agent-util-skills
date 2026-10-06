@@ -1528,6 +1528,18 @@ class ScaffoldUpdateTest(unittest.TestCase):
         self.assertEqual(nav.read_text(), before, "nav.toml を書き換えてはいけない")
         self.assertTrue((self.t / "tools/docs-site-gen/brand.toml").exists())
 
+    def test_legacy_brand_toml_without_favicon_letter_derives_brand_mark(self):
+        self.init()
+        nav = self.t / "site/nav.toml"
+        nav.write_text("".join(l + "\n" for l in nav.read_text().splitlines() if not l.startswith("brand_mark")))
+        (self.t / "tools/docs-site-gen/brand.toml").write_text(
+            '[brand]\nbrand = "legacy docs"\nrepository = "https://github.com/acme/r"\ntagline = "Old tag"\n'
+            'copyright = "(c) 2024 acme"\nlang = "ja"\n')
+        r = self.sc(args=())
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertIn("移行案", r.stderr)
+        self.assertIn('brand_mark = "L"', r.stderr)
+
     def test_tagline_and_copyright_accept_site_text_limit(self):
         long = "あ" * 200
         r = subprocess.run([sys.executable, str(SCRIPTS / "scaffold.py"), "--target", str(self.t),
@@ -4717,6 +4729,10 @@ class VerifyAttributionTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         (self.dist / "x").mkdir()
         (self.dist / "x" / "index.html").write_text("<html><body>plain</body></html>")
+        self.assertEqual(self.verify().returncode, 1)
+        # refresh の文字列が任意の場所にあるだけの chrome なしページは免除しない
+        (self.dist / "x" / "index.html").write_text(
+            '<html><body><p>plain</p><!-- <meta http-equiv="refresh" content="0"> --></body></html>')
         self.assertEqual(self.verify().returncode, 1)
         (self.dist / "x" / "index.html").unlink()
         (self.dist / "x").rmdir()

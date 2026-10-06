@@ -254,6 +254,12 @@ def legacy_brand_site_proposal(root_real: Path) -> dict | None:
     old = tables[0].values
     site = {_LEGACY_BRAND_MAP[k]: v for k, v in old.items() if k in _LEGACY_BRAND_MAP}
     site.setdefault("version_badge", "")
+    # 旧設定で任意だったキーの既定値を補う（nav.toml では brand_mark が必須）。旧 favicon_letter が無ければ
+    # ブランド名の最初の ASCII 英数字（大文字化）を使う。導出できなければ検証側が不足として案内する
+    if "brand_mark" not in site:
+        first = next((c for c in str(site.get("brand", "")) if c.isascii() and c.isalnum()), "")
+        if first:
+            site["brand_mark"] = first.upper()
     unknown = sorted(set(old) - set(_LEGACY_BRAND_MAP))
     if "tagline" not in site or not site["tagline"].strip():
         site.pop("tagline", None)

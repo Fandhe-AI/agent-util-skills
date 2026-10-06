@@ -395,7 +395,7 @@ fi
 # 第 2 引数は利用者の nav.toml（`[site]` の文言に含まれる上流名を許容するために読む。省略時は許容なし）。
 # 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
 verify_attribution() {
-  local dist="$1" nav="${2:-}" up pat list links f rel rc n=0 has_chrome has_refresh
+  local dist="$1" nav="${2:-}" up pat list links f rel rc n=0 has_chrome
   up='https://github\.com/Fandhe-AI/fandhe-frontend'
   pat="Built with <a [^>]*href=\"${up}\"[^>]*>fandhe-frontend docs-site</a> \\(<a [^>]*href=\"${up}/blob/main/LICENSE-MIT\"[^>]*>MIT</a> OR <a [^>]*href=\"${up}/blob/main/LICENSE-APACHE\"[^>]*>Apache-2\\.0</a>\\)"
 
@@ -440,11 +440,30 @@ for line in sys.stdin.read().split("\n"):
       case "${rel}" in
         index.html|404.html) echo "エラー: ${rel} にサイトのヘッダー（class=\"docs-header\"）が無い" >&2; return 1 ;;
       esac
-      rc=0; grep -qF -- 'http-equiv="refresh"' "${f}" || rc=$?
-      [[ "${rc}" -le 1 ]] || { echo "エラー: ${rel} の検査（grep）が失敗した（exit ${rc}）" >&2; return 1; }
-      has_refresh=$(( rc == 0 ? 1 : 0 ))
-      # リダイレクト案内はサイトのクロームを持たないため対象外。クロームも refresh も無い未知の構造は fail-closed
-      if [[ "${has_refresh}" -eq 1 ]]; then continue; fi
+      # リダイレクト案内はサイトのクロームを持たないため対象外。ただし refresh の文字列がどこかにあるだけでは
+      # 免除しない。上流 redirect.rs の生成物と同じ形（head に meta refresh だけ・body は案内の <p> 1 つ）に
+      # ファイル全体が一致するときに限る。それ以外の chrome なしページは fail-closed
+      rc=0
+      python3 -I -B -c '
+import re, sys
+from pathlib import Path
+try:
+    t = Path(sys.argv[1]).read_text(encoding="utf-8")
+except (OSError, ValueError):
+    sys.exit(3)
+shape = (
+    r"\s*<!DOCTYPE html>\s*<html(?: lang=\"[A-Za-z0-9-]{1,35}\")?>\s*<head>"
+    r"(?:<meta charset=\"utf-8\">)?"
+    r"<meta http-equiv=\"refresh\" content=\"[^\"<>]*\">"
+    r"(?:<link rel=\"canonical\" href=\"[^\"<>]*\">)?"
+    r"(?:<meta name=\"robots\" content=\"[^\"<>]*\">)?"
+    r"(?:<title>[^<>]*</title>)?"
+    r"</head>\s*<body>\s*<p>[^<>]*(?:<a href=\"[^\"<>]*\">[^<>]*</a>)?</p>\s*</body>\s*</html>\s*"
+)
+sys.exit(0 if re.fullmatch(shape, t) else 1)
+' "${f}" || rc=$?
+      [[ "${rc}" -le 1 ]] || { echo "エラー: ${rel} の検査（リダイレクト判定）が失敗した（exit ${rc}）" >&2; return 1; }
+      if [[ "${rc}" -eq 0 ]]; then continue; fi
     fi
     # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
     # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
