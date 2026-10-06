@@ -411,7 +411,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 
 | 問題 | 回避策 |
 |------|--------|
-| `cargo install --git` が認証失敗する | 上流は submodule 非依存化済みで、匿名の `cargo install --git` が通る。`build-local.sh` は `GIT_TERMINAL_PROMPT=0` で認証待ちを避けて即時に失敗させる。ネットワーク・`FF_REV` の commit が上流に存在するかを確認し、まず再試行する |
+| `cargo install --git` が認証失敗する | 上流は submodule 非依存化済みで、匿名の `cargo install --git` が通る。`build-local.sh` は `GIT_TERMINAL_PROMPT=0` で認証待ちを避けて即時に失敗させる。まず `git config --get-regexp '^url\..*\.insteadof$'` で `url."git@github.com:".insteadOf "https://github.com/"` のような書き換えが無いか確認する。あると cargo が ssh で取得しようとし、ssh-agent 認証ができず `failed to authenticate` で止まる。回避策は `CARGO_NET_GIT_FETCH_WITH_CLI=true` を付けて `build-local.sh` を実行すること（git CLI も書き換えに従うため、ssh の認証が通る環境が前提）。`build-local.sh` は失敗時にこの案内を stderr へ出すが、環境変数は匿名取得の前提を変えないため自動では付けない。GitHub ホステッドランナーの CI では起きない。書き換えが無ければネットワーク・`FF_REV` の commit が上流に存在するかを確認し、再試行する |
 | deploy ジョブが永久に pending | reusable workflow の `runner-label` 既定は `self-hosted`。`pages.yml` では必ず `runner-label: ubuntu-latest` を明示する（テンプレートは設定済み。消さない） |
 | `site/assets/` に `site.css` 等を置いてビルドエラー | 予約アセット名（`references/site-format.md`）を避ける。`check_site.py` が具体名を報告する |
 | リンク切れで生成が失敗し `_site/` に何も出力されない | fail-closed 仕様。出力されたエラーの 1 件ずつを直す（存在しない `#anchor`・nav 未登録の `.md`・存在しない絶対パス） |
@@ -425,7 +425,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "${URL}"              # 200
 | `scaffold.py` の更新が exit 2（既定ブランチを決められない） | 既存の `pages.yml` から `branches` を読めない（編集済み）。`--branch <既定ブランチ>` を付ける |
 | `scaffold.py` が exit 4（check_site 失敗） | 利用者編集ファイル（nav.toml）の不備。`[site]` の必須キーが無い場合は、不足キーと追記例が表示されるので追記する（旧 brand.toml からの読み替えは Step U の exit 4 を参照） |
 | `build-local.sh` が「シンボリックリンクのため、書き込み・削除をしない」「対象リポジトリの外へ解決される」で止まる | `target`・`target/docs-site-install`・`THIRD-PARTY-LICENSES`・出力先のいずれかが symlink（または親が外を指す）。通常のファイル・ディレクトリに置き換える |
-| `build-local.sh` が「`docs-site` が生成されていない」「`cargo install` が失敗」で止まる | ネットワーク・`rust-toolchain.toml`・`.cargo/` の設定を確認して再試行する。初回は上流のビルドに時間がかかる |
+| `build-local.sh` が「`docs-site` が生成されていない」「`cargo install` が失敗」で止まる | ネットワーク・`rust-toolchain.toml`・`.cargo/` の設定を確認して再試行する（認証失敗なら上の `cargo install --git` の行を参照）。初回は上流のビルドに時間がかかる |
 | `build-local.sh` が「出力先が既に存在し空ではない」で止まる | `--clean` を付ける（既定の `_site/` のみ削除対象） |
 | build は成功するが deploy だけ失敗する | Pages の Source が「GitHub Actions」でない。Step N4 を実行する（更新フローでは自動で実行せず、利用者の了承を取る） |
 | `${{ }}` を `run:` に書き足してしまう | env 経由で渡す（式の直書きはインジェクション経路になる） |

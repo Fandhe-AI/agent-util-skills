@@ -154,6 +154,16 @@ test('build-local.sh の install 省略判定は台帳と FF_REV を照合し、
   assert.match(code.slice(guard, install), /fandhe-frontend-docs-site/)
 })
 
+test('build-local.sh は cargo install の失敗コードを保持して案内し、環境変数を自動付与しない', () => {
+  const code = read('scripts/build-local.sh').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  const install = code.indexOf('GIT_TERMINAL_PROMPT=0 cargo install')
+  const hint = code.indexOf('    hint_git_rewrite\n', install)
+  const exit = code.indexOf('exit "${install_rc}"', install)
+  assert.ok(install >= 0 && hint > install && exit > hint, 'install → 案内 → 失敗コードで終了 の順でない')
+  assert.match(code.slice(install, hint), /\|\| install_rc=\$\?/)
+  assert.doesNotMatch(code, /export\s+CARGO_NET_GIT_FETCH_WITH_CLI|CARGO_NET_GIT_FETCH_WITH_CLI=\S+\s+(GIT_TERMINAL_PROMPT=0\s+)?cargo/)
+})
+
 test('pages.yml の action は SHA 固定（Fandhe-AI/actions の reusable のみ @latest）', () => {
   const y = read('templates/pages.yml')
   const uses = [...y.matchAll(/^\s*(?:-\s+)?uses:\s+(\S+)/gm)].map((m) => m[1])
