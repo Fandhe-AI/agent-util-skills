@@ -4278,13 +4278,36 @@ class VerifyAttributionTest(unittest.TestCase):
         self.mutate("index.html", dup)
         self.assertEqual(self.verify().returncode, 1)
 
-    def test_upstream_name_outside_attribution_is_not_rejected(self):
-        # 帰属表記以外の上流名は検査しない（利用者が `[site]` に書いた値を、置換も拒否もしないため）
+    def verify_nav(self, nav_text):
+        nav = self.base / "nav.toml"
+        nav.write_text(nav_text, encoding="utf-8")
+        script = (f"set -euo pipefail\nSCRIPT_DIR={SCRIPTS}\n" + self.func
+                  + '\nverify_attribution "$1" "$2" || exit 1\n')
+        return subprocess.run(["bash", "-c", script, "_", str(self.dist), str(nav)], capture_output=True, text=True)
+
+    def test_upstream_name_or_url_outside_attribution_fails(self):
+        injections = {
+            "名前": "<span>fandhe-frontend</span>",
+            "URL": f'<a href="{self.UP}">x</a>',
+            "URL サブパス": f'<a href="{self.UP}/issues">x</a>',
+        }
+        good = (self.dist / "index.html").read_text(encoding="utf-8")
+        for label, inj in injections.items():
+            (self.dist / "index.html").write_text(good, encoding="utf-8")
+            self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
+                        '<header class="docs-header">' + inj, 1))
+            r = self.verify()
+            self.assertEqual(r.returncode, 1, label)
+            self.assertIn("index.html", r.stderr, label)
+            self.assertNotIn("fandhe-frontend)", r.stderr)
+
+    def test_upstream_name_in_site_values_is_tolerated(self):
         self.mutate("index.html", lambda t: t.replace('<header class="docs-header">',
-                    '<header class="docs-header"><span>fandhe-frontend</span>'
-                    f'<a href="{self.UP}">x</a>', 1))
-        r = self.verify()
+                    '<header class="docs-header"><span>fandhe-frontend</span>', 1))
+        r = self.verify_nav('[site]\ntitle = "fandhe-frontend docs"\n')
         self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.verify_nav('[site]\ntitle = "Mini"\n')
+        self.assertEqual(r.returncode, 1)
 
     def test_oversized_html_stops_the_check(self):
         (self.dist / "big").mkdir()

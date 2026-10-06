@@ -392,10 +392,13 @@ fi
 # 出力する。これは MIT / Apache-2.0 の通知義務を担う部分のため、上流の DOM が変わっても黙って
 # 消えないよう、文言とリンクが 1 つの連続した並びとして存在することを見る（FF_REV 更新時に実出力で再確認する）。
 # 読むだけで書かない。エラーには dist からの相対パスだけを出し、ファイルの内容は出さない。
-# 生成物の中の上流名の残存は検査しない（利用者が `[site]` に上流名を書いてよいため。`check_site.py` が必須キーを強制する）。
+# 帰属表記（フッターの 1 件）を除いた残りに、上流名（fandhe-frontend）・上流 URL（github.com/Fandhe-AI/fandhe-frontend）が
+# 残っていれば失敗にする（上流の既定ブランド・リンクの混入を止める）。ただし利用者が `[site]` の値に上流名を
+# 書いている場合（第 2 引数の nav.toml を読んで判定）は、その意図を尊重して残存検査を省く。
+# 上流名に続く `-docs` など別名（リポジトリ名 fandhe-frontend-docs 等）は上流名とみなさない。
 # 呼び出し側は `|| exit 1` で受けるため関数内の set -e は効かない。失敗は明示的に return 1 する。
 verify_attribution() {
-  local dist="$1" up pat list links f rel rc n=0 has_chrome
+  local dist="$1" nav="${2:-}" up pat list links f rel rc n=0 has_chrome
   up='https://github\.com/Fandhe-AI/fandhe-frontend'
   pat="Built with <a [^>]*href=\"${up}\"[^>]*>fandhe-frontend docs-site</a> \\(<a [^>]*href=\"${up}/blob/main/LICENSE-MIT\"[^>]*>MIT</a> OR <a [^>]*href=\"${up}/blob/main/LICENSE-APACHE\"[^>]*>Apache-2\\.0</a>\\)"
 
@@ -468,12 +471,12 @@ sys.exit(0 if re.fullmatch(shape, t) else 1)
     # 帰属表記は `<footer class="docs-footer">` の中にちょうど 1 件あることを要求する（本文の同じ並びでは満たさない）。
     # python3 の終了コード: 0=一致、1=フッターが 1 つでない・並びが 1 件でない、それ以外=検査自体の失敗。
     rc=0
-    SGP_PAT="${pat}" SGP_SCRIPTS="${SCRIPT_DIR}" python3 -I -B -c '
+    SGP_PAT="${pat}" SGP_SCRIPTS="${SCRIPT_DIR}" SGP_NAV="${nav}" python3 -I -B -c '
 import os, re, sys
 from pathlib import Path
 # 末尾に足す: 先頭だと対象リポジトリ由来の同名ファイルより先にスキル側が読まれるが、標準ライブラリを隠せない位置に置く
 sys.path.append(os.environ["SGP_SCRIPTS"])
-from _common import read_bounded_text
+from _common import parse_nav, read_bounded_text
 # 読み取り上限は上の事前検査（ファイルごと 8 MiB）と同値。超過・UTF-8 不正は検査自体の失敗（exit 3）
 try:
     t = read_bounded_text(Path(sys.argv[1]), 8 * 1024 * 1024)
@@ -482,10 +485,32 @@ except (OSError, ValueError):
 foots = re.findall(r"<footer class=\"docs-footer\">.*?</footer>", t, re.S)
 if len(foots) != 1:
     sys.exit(1)
-sys.exit(0 if len(re.findall(os.environ["SGP_PAT"], foots[0])) == 1 else 1)
+attrs = re.findall(os.environ["SGP_PAT"], foots[0])
+if len(attrs) != 1:
+    sys.exit(1)
+# 帰属表記 1 件を除いた残りに上流名・上流 URL があれば残存（exit 4）。[site] に上流名を書いた利用者は許容する
+rest = t.replace(re.search(os.environ["SGP_PAT"], foots[0]).group(0), "", 1)
+tok = r"(?<![A-Za-z0-9_-])fandhe-frontend(?![A-Za-z0-9_-])"
+if re.search(tok, rest, re.I) or re.search(r"github\.com/Fandhe-AI/fandhe-frontend(?![A-Za-z0-9_-])", rest, re.I):
+    allowed = False
+    nav = os.environ.get("SGP_NAV", "")
+    if nav:
+        try:
+            for tb in parse_nav(read_bounded_text(Path(nav), 1024 * 1024)):
+                if tb.header == "site" and any("fandhe-frontend" in v.lower() for v in tb.values.values()):
+                    allowed = True
+        except (OSError, ValueError):
+            sys.exit(3)
+    if not allowed:
+        sys.exit(4)
+sys.exit(0)
 ' "${f}" || rc=$?
     if [[ "${rc}" -eq 1 ]]; then
       echo "エラー: ${rel} のフッター（docs-footer）に帰属表記（Built with … docs-site と MIT / Apache-2.0 のライセンスリンク）がちょうど 1 件ない" >&2
+      return 1
+    fi
+    if [[ "${rc}" -eq 4 ]]; then
+      echo "エラー: ${rel} に上流名・上流 URL（fandhe-frontend）が帰属表記以外に残っている（[site] で指定した値は除く）" >&2
       return 1
     fi
     if [[ "${rc}" -eq 3 ]]; then
@@ -508,6 +533,6 @@ step "verify"
 for f in index.html 404.html assets/site.css assets/site.js assets/search-index.json; do
   test -s "${OUT}/${f}" || { echo "エラー: ${f} が無い、または空" >&2; exit 1; }
 done
-verify_attribution "${OUT}" || exit 1
+verify_attribution "${OUT}" "${ROOT}/site/nav.toml" || exit 1
 
 step "完了: ${OUT}"
