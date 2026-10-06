@@ -4,19 +4,20 @@
 # 役割・境界
 
 `build-local.sh`（ローカルと CI 共通）の最初の工程として呼ばれ、生成器（fandhe-frontend
-docs-site）に渡す前に「生成器は通すが公開物として壊れる / 他サイトのショーケースが混入する」
+docs-site）に渡す前に「生成器は通すが公開物として壊れる」
 入力を止める。生成器自身の検査（リンク検査・nav スキーマ検査）と重複させず、生成器が
-検知できない次の 5 点を担う（`[site]` のブランド値の検証は上流の規則と揃えた `_common.check_site_values`）。
+検知できない次の 3 点を担う（`[site]` のブランド値の検証は上流の規則と揃えた `_common.check_site_values`）。
 
-1. 予約パス: nav の path が `/themes/` `/primitives/` `/blocks/` `/wireframes/` で始まると、
-   registry を空にしていても fandhe-frontend のショーケースが混入する（実測）。全面禁止。
-2. `[site]` のブランド値と base_path: 必須 6 キーの欠落（未指定だと上流の既定表示が公開される）と
+1. `[site]` のブランド値と base_path: 必須 6 キーの欠落（未指定だと上流の既定表示が公開される）と
    上流が拒否する値を止める。GitHub Pages のプロジェクトサイトは `/<repo>/` 配下で配信されるため、
    base_path が repository_url から導出した値と一致しないと、全アセットと内部リンクが 404 になる。
-3. 予約アセット名: `site/assets/` に生成物と同名のファイルがあると生成器がビルドエラーにする。
+2. 予約アセット名: `site/assets/` に生成物と同名のファイルがあると生成器がビルドエラーにする。
    エラー文が分かりにくいため事前に具体名で報告する。
-4. 未置換プレースホルダー（`__SGP_*__`）の残存。
-5. nav の title に上流名 `fandhe-frontend` が含まれる（#52 で撤去予定の暫定規則）。
+3. 未置換プレースホルダー（`__SGP_*__`）の残存。
+
+nav の path が `/themes/` 等の上流ショーケースの接頭辞で始まっても検査しない。`build-local.sh` は
+常に `--no-page-sections` を付けて生成し、上流がその指定でショーケースの注入を止めるため。
+このフラグを外す変更をする場合は、予約パス検査の復活が要る（`tests/rev-pin.test.mjs` が欠落を検出する）。
 
 警告のみ（終了コードに影響しない）: Markdown の画像記法（上流は画像非対応）、base_path を
 含まない絶対パスリンク、THIRD-PARTY-LICENSES の欠落。
@@ -37,11 +38,8 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     PLACEHOLDER_RE, SubsetError, check_site_values, parse_nav, parse_repository_url, pages_base_path,
-    read_bounded_text, resolves_inside, sanitize, title_problem,
+    read_bounded_text, resolves_inside, sanitize,
 )
-
-# 上流のショーケース生成パス。nav の path がここから始まると部品ページ等が混入する。
-RESERVED_PATH_PREFIXES = ("/themes/", "/primitives/", "/blocks/", "/wireframes/")
 
 # build.rs の RESERVED_ASSET_NAMES と同一（FF_REV 更新時に再確認する。SKILL.md 参照）。
 RESERVED_ASSET_NAMES = {
@@ -119,25 +117,10 @@ def check(root: Path) -> tuple[list[str], list[str]]:
             f"公開パスは `{pages_base_path(*parsed)}`（User/Org サイトは空、プロジェクトサイトは /<repo>）"
         )
 
-    # 2. 予約パス（page.path / section.index_path / menu.index_path）
-    sources: list[str] = []
-    for t in tables:
-        for key in ("path", "index_path"):
-            p = t.values.get(key)
-            if p is not None and p.startswith(RESERVED_PATH_PREFIXES):
-                errors.append(
-                    f"site/nav.toml line {t.line}: {key} `{p}` は予約パス"
-                    "（/themes/ /primitives/ /blocks/ /wireframes/ は上流のショーケースと衝突する）"
-                )
-        s = t.values.get("source")
-        if s is not None:
-            sources.append(s)
-        title = t.values.get("title")
-        why = title_problem(title) if title is not None else None
-        if why:
-            errors.append(f"site/nav.toml line {t.line}: {why}")   # 規則の撤去は #52
+    # nav が参照する Markdown（プレースホルダー検査と警告の対象）
+    sources = [t.values["source"] for t in tables if "source" in t.values]
 
-    # 3. 予約アセット名
+    # 2. 予約アセット名
     assets = root / "site" / "assets"
     if resolves_inside(root, assets) and assets.is_dir():   # 実体の検証が先（is_dir は親 symlink を辿って外を見る）
         for child in sorted(assets.iterdir()):
@@ -146,7 +129,7 @@ def check(root: Path) -> tuple[list[str], list[str]]:
             elif child.name in RESERVED_ASSET_NAMES:
                 errors.append(f"site/assets/{child.name} は予約アセット名（生成物と衝突しビルドエラーになる）")
 
-    # 4. プレースホルダー残存（nav・nav が参照する Markdown・workflow）
+    # 3. プレースホルダー残存（nav・nav が参照する Markdown・workflow）
     scan = [nav_path, root / ".github" / "workflows" / "pages.yml"]
     scan += [root / s for s in sources if not Path(s).is_absolute() and ".." not in Path(s).parts]
     for f in scan:

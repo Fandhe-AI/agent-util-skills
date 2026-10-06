@@ -88,6 +88,13 @@ test('build-local.sh は固定 URL・固定 rev・--locked の匿名 cargo insta
   assert.doesNotMatch(code, /templates\/docs-site-gen|Cargo\.toml|main\.rs/, 'wrapper を参照している')
 })
 
+test('build-local.sh の docs-site 実行行はすべて --no-page-sections を持つ（予約パス検査の代わりにショーケース混入を防ぐ）', () => {
+  const sh = read('scripts/build-local.sh')
+  const calls = sh.split('\n').filter((l) => /^\s*"\$\{INSTALL_ROOT\}\/bin\/docs-site"\s/.test(l))
+  assert.equal(calls.length, 1, `docs-site の実行行が 1 行でない: ${calls.length}`)
+  for (const l of calls) assert.ok(/\s--no-page-sections(\s|$)/.test(l), `--no-page-sections の無い実行行: ${l}`)
+})
+
 test('build-local.sh のライセンス取得は固定 URL・https 限定・リダイレクト非追従・時間とサイズ上限付き', () => {
   const sh = read('scripts/build-local.sh')
   const code = sh.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')

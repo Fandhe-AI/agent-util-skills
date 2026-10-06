@@ -33,20 +33,19 @@
 | `[[menu]]` | `title`, `index_path`, `source` | 複数セクションを束ねるヘッダーメニューと集約ページ。`index_path` はどの `page.path` とも衝突不可。`[[menu]]` の後に `[[section.*]]` を続けるには新しい `[[section]]` が必要 |
 | `[[menu.item]]` | `section`, `description` | `section` は束ねる既存セクションの `index_path`、`description` は 1 行（空・改行不可）。メンバーは 1 件以上で、直前の `[[menu]]` または `[[menu.item]]` の直後にだけ置ける |
 
-`title`（セクション・ページ・メニュー）に上流名 `fandhe-frontend` を独立した語として含められない（ヘッダー・サイドバー・フッターに出るため、rebrand 後の残存検査と区別できない。`fandhe-frontend-docs` のような別の語の一部は可。`check_site.py` が事前に拒否する）。
+`title`（セクション・ページ・メニュー）の上流名 `fandhe-frontend` は、`check_site.py`・scaffold は拒否しない。ただし生成後の `verify_attribution` が `[site]` の値以外に出る上流名を止めるため、現状は含めないほうがよい（この検証の撤去は #51）。
 
 `path` は `/` 始まり・`/` 終わりで、セグメントは英数字・`-`・`_` のみ。サイト全体で一意。
 `source` は相対パスで、`..`・絶対パス・`\` は禁止、ファイルが実在すること。リポジトリ内のどこにあってもよい
 （`docs/guide/x.md` や `README.md` も指定できる。ただし `pages.yml` の利用者区間（`sgp:user-paths:begin` と `end` の間）に `      - "docs/**"` の形で監視パスも追加する。区間の外を編集すると、スキルの更新が競合する）。
 
-### 予約パス（全面禁止）
+### `/themes/` 等の path
 
-`path` / `index_path` が次のいずれかで始まるページは作らない。registry を空にしても
-fandhe-frontend のショーケース（部品ページ等）が混入することを実測済み。
-
-`/themes/` `/primitives/` `/blocks/` `/wireframes/`
-
-`check_site.py` が検出して失敗にする。
+`/themes/` `/primitives/` `/blocks/` `/wireframes/` は上流がショーケースを生成する接頭辞だが、
+`build-local.sh` は常に `--no-page-sections` で生成し、上流がその指定でショーケースの注入と
+専用アセットの出力を止めるため、通常のページとして使える。`check_site.py` も検査しない。
+`--no-page-sections` を外すとショーケースが混入するため外さない（`tests/rev-pin.test.mjs` が検出する）。
+正は上流ガイド `docs/guides/docs-site-external-repos.md`。
 
 ### 予約アセット名
 
