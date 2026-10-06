@@ -27,11 +27,11 @@ TOML が壊れる・注入される）ため、値は `scaffold.py` が検証・
 
 | 種別 | 対象 | 状態 | 扱い |
 |------|------|------|------|
-| スキル所有 | `tools/docs-site-gen/{Cargo.toml,src/main.rs,FF_REV,build-local.sh,check_site.py,_common.py}`、`.github/workflows/pages.yml` | 存在しない | 作成 |
+| スキル所有 | `tools/docs-site-gen/{FF_REV,build-local.sh,check_site.py,_common.py}`、`.github/workflows/pages.yml` | 存在しない | 作成 |
 | | | 生成予定と一致 | 変更なし（冪等） |
 | | | 不一致で、ハッシュがマニフェストと一致（配置後に未編集） | **自動で更新**（`--update` 不要） |
 | | | 不一致で、編集あり／マニフェストなし | **競合**。何も書かず exit 3 |
-| 利用者編集 | `tools/docs-site-gen/brand.toml`、`site/{nav.toml,index.md}`、`rust-toolchain.toml` | 既存 | **保持**。書き換えない |
+| 利用者編集 | `site/{nav.toml,index.md}`、`rust-toolchain.toml` | 既存 | **保持**。書き換えない |
 | | | 欠落（更新モード） | **再作成しない**。`欠落` として報告（必要かどうかは配置後の検証が判定する）。再作成は 4 つの引数が揃っているときだけ |
 
 ### `kind=unrelated`（`mode=foreign`）の通常実行
@@ -114,7 +114,7 @@ TOML が壊れる・注入される）ため、値は `scaffold.py` が検証・
 | `ff_rev` | `old` / `new` / `changed` |
 | `created` / `updated` / `same` / `kept` / `missing` | 作成・更新（`path` と `reason`）・一致・保持・欠落 |
 | `conflicts` | `path` / `kind` / `reason` |
-| `deprecated` | 削除候補（`path` と `edited`） |
+| `deprecated` | 削除候補（`path` と `edited`。`brand.toml` のみ `note` を持つ）。`--detect --json` も、`mode=update` のときに同じキーで返す |
 | `gitignore_added` | 追記した `.gitignore` の行 |
 | `manifest_written` / `manifest_recreated` | マニフェストを書いたか／無くて再作成したか（旧版からの移行） |
 | `warnings` | 警告（マニフェストの無視・`--branch` の食い違い・想定外ファイル・引き継がなかった paths など） |

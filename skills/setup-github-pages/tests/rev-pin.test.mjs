@@ -212,8 +212,23 @@ test('pages.yml の必須設定（runner-label・permissions・concurrency・art
 test('scaffold.py が配置するテンプレート・スクリプトがすべて実在する', () => {
   const py = read('scripts/scaffold.py')
   const srcs = [...py.matchAll(/^\s*\("((?:templates|scripts)\/[^"]+)",/gm)].map((m) => m[1])
-  assert.ok(srcs.length >= 10)
+  // 配置物は 8 件。wrapper（Cargo.toml・src/main.rs）・brand.toml・置換スクリプトは配置しない（旧構成の削除候補として案内するだけ）
+  assert.deepEqual(srcs.sort(), [
+    'scripts/_common.py',
+    'scripts/build-local.sh',
+    'scripts/check_site.py',
+    'templates/docs-site-gen/FF_REV',
+    'templates/index.md',
+    'templates/nav.toml',
+    'templates/pages.yml',
+    'templates/rust-toolchain.toml',
+  ])
   for (const s of srcs) assert.doesNotThrow(() => statSync(join(SKILL_DIR, s)), `${s} が存在しない`)
+  for (const gone of ['templates/brand.toml', 'templates/docs-site-gen/Cargo.toml', 'templates/docs-site-gen/src/main.rs']) {
+    assert.throws(() => statSync(join(SKILL_DIR, gone)), `${gone} は削除済みのはず`)
+  }
+  const filesBlock = py.slice(py.indexOf('FILES = ['), py.indexOf('\n]\n', py.indexOf('FILES = [')))
+  assert.doesNotMatch(filesBlock, /Cargo\.toml|main\.rs|brand\.toml/)
 })
 
 test('SKILL.md の frontmatter（name・model・user-invocable・description 長）', () => {
