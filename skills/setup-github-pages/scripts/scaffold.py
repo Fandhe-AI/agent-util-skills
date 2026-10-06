@@ -399,15 +399,19 @@ LEGACY_ARTIFACTS: tuple[tuple[str, str], ...] = (
 )
 
 
-def only_current_install(p: Path) -> bool:
-    """target が現行構成の docs-site-install だけを含む実ディレクトリか（直下の名前だけを見る。辿らない）。"""
-    if p.is_symlink() or not p.is_dir():
+def only_current_install(root_real: Path, p: Path) -> bool:
+    """target が現行構成の docs-site-install だけを含む実ディレクトリか（直下の名前だけを見る。辿らない）。
+
+    親の symlink 経由でリポジトリ外を一覧しないよう、is_dir・listdir より先に resolves_inside を検査する。
+    空ディレクトリは現行構成の成果物を含まないため False（旧構成の残置として案内する）。
+    """
+    if not resolves_inside(root_real, p.parent) or p.is_symlink() or not p.is_dir():
         return False
     try:
         names = os.listdir(p)
     except OSError:
         return False
-    return all(n == "docs-site-install" for n in names)
+    return bool(names) and all(n == "docs-site-install" for n in names)
 
 
 def legacy_artifacts(root_real: Path) -> list[dict]:
@@ -418,7 +422,7 @@ def legacy_artifacts(root_real: Path) -> list[dict]:
     found = []
     for rel, note in LEGACY_ARTIFACTS:
         p = root_real / rel
-        if rel.endswith("/target") and only_current_install(p):
+        if rel.endswith("/target") and only_current_install(root_real, p):
             continue
         if resolves_inside(root_real, p.parent) and os.path.lexists(p):
             found.append({"path": rel, "note": note, "symlink": p.is_symlink()})
@@ -435,7 +439,8 @@ def print_site_migration(sm: dict, *, err: bool) -> None:
     elif status == "invalid":
         out(f"旧 {sm['source']} の値が検証を通らず移行案を作れない。直してから nav.toml の [site] へ追記する:", err=err)
     else:
-        out(f"旧 {sm['source']} からの [site] 移行案（下のキーだけを nav.toml の既存 [site] へ追加する。"
+        out(f"旧 {sm['source']} からの [site] 移行案（下のキーだけを nav.toml の既存 [site] へ反映する。"
+            "state が add のキーは追記、replace のキーは既存の行を置き換える（同名キーを重複させない）。"
             "[site] を丸ごと置き換えない — 既存の title・base_path 等は残す。自動では書き換えない）:", err=err)
         for line in (sm["block"] or "").split("\n"):
             out(line, err=err)

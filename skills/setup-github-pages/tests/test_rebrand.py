@@ -4585,6 +4585,12 @@ class LegacyBrandMigrationTest(unittest.TestCase):
         data = json.loads(self.sc("--json").stdout)
         self.assertNotIn("tools/docs-site-gen/target", {a["path"] for a in data["legacy_artifacts"]})
 
+    def test_t8c_empty_target_is_still_legacy(self):
+        self.old_repo()
+        (self.t / "tools/docs-site-gen/target").mkdir(parents=True)
+        data = json.loads(self.sc("--json").stdout)
+        self.assertIn("tools/docs-site-gen/target", {a["path"] for a in data["legacy_artifacts"]})
+
     def test_t9_idempotent(self):
         self.old_repo()
         first = json.loads(self.sc("--json").stdout)
