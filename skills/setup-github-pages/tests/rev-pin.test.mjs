@@ -306,3 +306,23 @@ test('update-snapshot.sh は構文が正しく、対象リポジトリへは配�
   assert.match(sh, /git hash-object --no-filters/)
   assert.doesNotMatch(sh, /\beval\b/)
 })
+
+test('SKILL.md と references の scripts/ 実行例は python3 -I -B で起動する', () => {
+  // __pycache__ をスキルのディレクトリへ残さず、利用者の PYTHON* 環境変数や user site の影響も受けない
+  const refs = readdirSync(join(SKILL_DIR, 'references'))
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => `references/${f}`)
+  let seen = 0
+  for (const f of ['SKILL.md', ...refs]) {
+    const lines = read(f).split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      if (!/python3\s/.test(lines[i])) continue
+      // 行継続（末尾 \）の場合は次行までを 1 コマンドとして判定する
+      const cmd = /\\\s*$/.test(lines[i]) ? `${lines[i]} ${lines[i + 1] ?? ''}` : lines[i]
+      if (!/scripts\//.test(cmd)) continue
+      seen++
+      assert.match(cmd, /python3 -I -B /, `${f}:${i + 1} に -I -B が無い: ${lines[i].trim()}`)
+    }
+  }
+  assert.ok(seen >= 4, `scripts/ 実行例が 4 箇所に満たない（検査の空振り）: ${seen}`)
+})
