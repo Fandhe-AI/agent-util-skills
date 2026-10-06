@@ -383,7 +383,7 @@ hint_git_rewrite() {
   while IFS= read -r line; do
     value="${line#* }"
     [[ -n "${value}" ]] || continue
-    if [[ "${FF_URL}/" == "${value}"* ]]; then
+    if [[ "${FF_URL}" == "${value}"* ]]; then
       matched=1
       break
     fi

@@ -496,6 +496,11 @@ class InstallFailureHintTest(unittest.TestCase):
         self.assertEqual(r.returncode, 97, r.stderr)
         self.assertIn(self.HINT, r.stderr)
 
+    def test_hint_for_rule_exactly_matching_ff_url(self):
+        r = self.build('[url "git@github.com:Fandhe-AI/fandhe-frontend"]\n\tinsteadOf = https://github.com/Fandhe-AI/fandhe-frontend\n')
+        self.assertEqual(r.returncode, 97, r.stderr)
+        self.assertIn(self.HINT, r.stderr)
+
     def test_no_hint_without_rules(self):
         r = self.build("")
         self.assertEqual(r.returncode, 97, r.stderr)
