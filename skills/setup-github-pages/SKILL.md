@@ -114,7 +114,7 @@ gh repo view "${REPO}" --json nameWithOwner,defaultBranchRef,visibility,viewerPe
 以降の作業は対象リポジトリのクローンのルートで行う。② モードを判定する（書き込みなし）。判定は `scaffold.py` が持ち、SKILL.md は **`kind` で分岐する**（根拠の文字列では分岐しない）。
 
 ```bash
-python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --detect --json
+python3 -I -B "${SKILL_DIR}/scripts/scaffold.py" --target . --detect --json
 # {"mode": "new|update|foreign", "kind": "...", "reasons": [...]}
 ```
 
@@ -165,7 +165,7 @@ git -c core.fsmonitor=false -c core.hooksPath=/dev/null switch -c "${NAME}" "${B
 ```bash
 SNAP="$(mktemp)"; RESULT="$(mktemp)"     # 作業ツリーの外のファイル。値を控える（別シェルでは渡し直す）
 bash "${SKILL_DIR}/scripts/update-snapshot.sh" guard "${SNAP}"   # scaffold の直前（HEAD を記録し、利用者が触ったパスに印を付ける。再実行の前にも毎回呼ぶ）
-python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<Step 1 で解決した既定ブランチ>" --json > "${RESULT}"; echo "exit=$?"
+python3 -I -B "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<Step 1 で解決した既定ブランチ>" --json > "${RESULT}"; echo "exit=$?"
 cat "${RESULT}"
 # 書き込み直後の内容のハッシュを記録する（更新の取り消しで「書いたまま変わっていないか」を比べる基準。書き込みが無い実行は何も記録しない）
 bash "${SKILL_DIR}/scripts/update-snapshot.sh" record-json "${SNAP}" < "${RESULT}"
@@ -183,7 +183,7 @@ bash "${SKILL_DIR}/scripts/update-snapshot.sh" record-json "${SNAP}" < "${RESULT
 - **exit 3（競合）**: **勝手に `--update` を付けない**。競合ごとに差分を確認して利用者に見せ、判断を仰ぐ。
 
   ```bash
-  python3 "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<既定ブランチ>" --show-diff
+  python3 -I -B "${SKILL_DIR}/scripts/scaffold.py" --target . --branch "<既定ブランチ>" --show-diff
   git log -p -n 3 --no-color --no-ext-diff --no-textconv -- <競合したファイルのパス> | head -200 | cat -v
   ```
 
@@ -236,7 +236,7 @@ gh api "repos/${REPO}/pages" --jq '.build_type'    # workflow であること
 #### Step N1: テンプレートを配置する
 
 ```bash
-python3 "${SKILL_DIR}/scripts/scaffold.py" \
+python3 -I -B "${SKILL_DIR}/scripts/scaffold.py" \
   --target . \
   --owner "<owner>" --repo "<repo>" --branch "<既定ブランチ>" \
   --title "<サイト title>" --brand "<ブランド名>" \
