@@ -42,7 +42,7 @@ BIDI_RE = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 # 実装（Python / Rust / TOML 系パーサ）で食い違う文字を、表示値へ入れさせない。
 CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
-# GitHub の命名規則を 1 箇所で定義する（scaffold.py・check_repo（SKILL.md）・brand.toml 検証が共有）。
+# GitHub の命名規則を 1 箇所で定義する（scaffold.py・check_repo（SKILL.md）が共有）。
 # owner: 英数字とハイフン、先頭・末尾ハイフン不可、連続ハイフン不可、39 文字以内。
 # repo: 英数字・`-`・`_`・`.`、100 文字以内。`.` / `..` 単独と `.git` 終端は不可
 # （`_example` `.github` `a..b` は有効な名前）。
