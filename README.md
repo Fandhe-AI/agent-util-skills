@@ -68,7 +68,7 @@ UX/UI デザイナーの専門家として、アイデア・要件文書から U
 fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub Pages ドキュメントサイトを構築・更新する。任意のリポジトリ（新規・既存）へ Rust 製 SSG・Markdown 管理・Actions 自動デプロイ・ブランド設定（nav.toml の [site]）までを一括で構築、または構築済みサイトのデザインとビルドの仕組みをスキルの最新版へ更新できる。「GitHub Pages で公開したい」「docs サイト作って」「Pages サイトを更新して」「デザインを最新にして」などで使用する。
 
 - [fandhe-frontend の公式サイト](https://fandhe-ai.github.io/fandhe-frontend/)のデザイン・構成・機能（テーマ切替・検索・アクセシビリティ）をそのまま再利用
-- 新規構築: Rust 製 SSG（fandhe-frontend の `crates/docs-site`）をラッパーで呼ぶため、ビルド・生成・デプロイすべてをローカル・CI の同じ入口で実行
+- 新規構築: Rust 製 SSG（fandhe-frontend の `crates/docs-site`）を固定 commit（`FF_REV`）の `cargo install --git` で導入して呼ぶため、ビルド・生成・デプロイすべてをローカル・CI の同じ入口で実行
 - 構築済みサイトの更新: 構築済みのリポジトリでスキルを再実行すると、スキルの最新構成（生成器の固定 commit `FF_REV`・スクリプト・`pages.yml`）へ更新する。利用者のファイル（`site/`・`pages.yml` の追加 `paths`）は保持し、配置後に手を加えたスキル所有ファイルは上書きせず競合として止まる。Pages の設定は変更しない
 - ブランド名・GitHub リンク・著作権・favicon などは `nav.toml` の `[site]` に記述する。旧 `brand.toml` が残る既存サイトの更新では、scaffold が `[site]` の移行案を表示するだけで `nav.toml` は自動編集しないため、案を確認して手動で `nav.toml` へ反映する
 - `Fandhe-AI/actions` の共通 reusable workflow で GitHub Pages へ自動デプロイ

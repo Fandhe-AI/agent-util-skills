@@ -1,6 +1,6 @@
 <!-- source: https://github.com/Fandhe-AI/fandhe-frontend/tree/b3e31ef663a98b6080feb98c84ade238d1074a08/crates/docs-site/src (nav.rs, markdown.rs, highlight.rs, linkcheck.rs, redirect.rs, build.rs) -->
-<!-- 最終確認日: 2026-10-05 -->
-<!-- 取得状況: ✅ 取得済み（旧 rev cf5edb9 → 現 rev b3e31ef の nav.rs・build.rs・redirect.rs の差分と上流の外部利用ガイドを本書の各節と突き合わせ、現 rev で scaffold → build-local.sh（匿名 fetch・build・生成・verify）の通過を実測。redirects.toml の生成は旧 rev で実測済みで、現 rev では未再実測） -->
+<!-- 最終確認日: 2026-10-06 -->
+<!-- 取得状況: ✅ 取得済み（旧 rev cf5edb9 → 現 rev b3e31ef の nav.rs・build.rs・redirect.rs の差分と上流の外部利用ガイドを本書の各節と突き合わせ、現 rev で scaffold → build-local.sh（匿名 cargo install・生成・verify・生成・verify）の通過を実測。redirects.toml の生成は旧 rev で実測済みで、現 rev では未再実測） -->
 
 # docs サイトのファイル書式（nav.toml / redirects.toml / Markdown）
 
@@ -24,7 +24,7 @@
 | テーブル | キー | 制約 |
 |----------|------|------|
 | `[site]` | `title` | `<title>`・サイドバー等の表示名 |
-| `[site]` | `brand` `repository_url` `tagline` `copyright` `version_badge` `brand_mark`（必須 6 キー）、`lang` `brand_color`（任意） | ブランド表示（ヘッダー・フッター・favicon・`<html lang>`）。必須 6 キーが欠けると `check_site.py` が止める（`version_badge` は空文字で非表示）。`repository_url` は `https://github.com/<owner>/<repo>` のみで `base_path` の導出元。許容値の正は上流ガイド `docs/guides/docs-site-external-repos.md`（キー表は書き写さない） |
+| `[site]` | `brand` `repository_url` `tagline` `copyright` `version_badge` `brand_mark`（必須 6 キー）、`lang` `brand_color`（任意） | ブランド表示（ヘッダー・フッター・favicon・`<html lang>`）。必須 6 キーが欠けると `check_site.py` が止める（`version_badge` は空文字で非表示）。`repository_url` は `https://github.com/<owner>/<repo>` のみで `base_path` の導出元。許容値の正は[上流ガイド](https://github.com/Fandhe-AI/fandhe-frontend/blob/b3e31ef663a98b6080feb98c84ade238d1074a08/docs/guides/docs-site-external-repos.md)（キー表は書き写さない） |
 | `[site]` | `base_path` | `""` か `/` 始まりで末尾 `/` なし。プロジェクトサイトは `/<リポジトリ名>` |
 | `[[section]]` | `title`, `index_path` | `index_path` は配下の `page.path` と完全一致。ページが 0 件のセクションは不可 |
 | `[[section.page]]` | `title`, `source`, `path` | `section` の直後に置く |
@@ -37,18 +37,11 @@
 `source` は相対パスで、`..`・絶対パス・`\` は禁止、ファイルが実在すること。リポジトリ内のどこにあってもよい
 （`docs/guide/x.md` や `README.md` も指定できる。ただし `pages.yml` の利用者区間（`sgp:user-paths:begin` と `end` の間）に `      - "docs/**"` の形で監視パスも追加する。区間の外を編集すると、スキルの更新が競合する）。
 
-### `/themes/` 等の path
-
-`/themes/` `/primitives/` `/blocks/` `/wireframes/` は上流がショーケースを生成する接頭辞だが、
-`build-local.sh` は常に `--no-page-sections` で生成し、上流がその指定でショーケースの注入と
-専用アセットの出力を止めるため、通常のページとして使える。`check_site.py` も検査しない。
-`--no-page-sections` を外すとショーケースが混入するため外さない（`tests/rev-pin.test.mjs` が検出する）。
-正は上流ガイド `docs/guides/docs-site-external-repos.md`。
-
 ### 予約アセット名
 
 `site/assets/` の直下に次の名前を置くと生成器がビルドエラーにする（生成物と衝突）。
-`search-index/` ディレクトリも同様。静的ファイルは `site/assets/` へ置くと `assets/` にコピーされる。
+`search-index/` ディレクトリも同様。
+`/themes/` 等の path 接頭辞は、`build-local.sh` が常に `--no-page-sections` で生成するため制約にならない（`tests/rev-pin.test.mjs` が検出する。正は[上流ガイド](https://github.com/Fandhe-AI/fandhe-frontend/blob/b3e31ef663a98b6080feb98c84ade238d1074a08/docs/guides/docs-site-external-repos.md)）。静的ファイルは `site/assets/` へ置くと `assets/` にコピーされる。
 
 ```text
 site.css  site-primitives.css  skip-nav.css  pre-styled-ui.css  primitives-showcase.css
@@ -101,5 +94,5 @@ to = "/usage/"
 
 ## トップページ
 
-registry を空にして呼ぶため、トップはヒーロー・カードグリッドを持たない通常の Docs レイアウトになる
+`--no-page-sections` で生成するため、トップはヒーロー・カードグリッドを持たない通常の Docs レイアウトになる
 （fandhe-frontend 本家のランディングは再現できない）。

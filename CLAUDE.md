@@ -31,7 +31,7 @@ skills/                               -- 本リポジトリが上流ソースと
     references/                       -- site-format.md（nav.toml スキーマ・予約アセット名・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）、update-recovery.md（更新失敗時の復旧手順）
     templates/                        -- FF_REV・pages.yml・nav.toml・index.md・rust-toolchain.toml 雛形
     scripts/                          -- build-local.sh（固定 rev の匿名 cargo install → 生成 → 帰属表記の存在確認）、check_repo.sh（owner/repo 検証）、update-snapshot.sh（更新の記録・復旧）、check_site.py（検証）、scaffold.py（モード判定・配置・更新・競合差分）、_common.py（検証・無害化）
-    tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、rebrand.test.mjs（Node.js ブリッジ）、test_rebrand.py（rebrand/check_site/scaffold 回帰テスト）、fixtures/
+    tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、rebrand.test.mjs（Node.js ブリッジ。名前は旧構成の名残）、test_rebrand.py（check_site・scaffold・verify_attribution・update-snapshot の回帰テスト。名前は旧構成の名残）、fixtures/
 .agents/skills/                       -- vendored スキル（消費専用。npx skills update で同期・直接編集しない）
   comment-code/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/
   implement-issue/ implement-issue-tree/ implement-review/ implement-review-pr/ init-claude/

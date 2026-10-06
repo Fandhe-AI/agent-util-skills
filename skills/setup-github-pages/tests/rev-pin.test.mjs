@@ -246,7 +246,7 @@ test('SKILL.md の frontmatter（name・model・user-invocable・description 長
 test('SKILL.md は新規構築と更新の両方を案内し、更新の発火語・モード判定・非破壊の方針を含む', () => {
   const md = read('SKILL.md')
   const desc = md.match(/^description:\s*(.+)$/m)[1]
-  for (const w of ['Rust 製 SSG', 'Markdown 管理', 'Actions 自動デプロイ', 'ブランド置換', 'Pages サイトを更新して', 'デザインを最新にして', 'GitHub Pages で公開したい', 'docs サイト作って', 'fandhe-frontend と同じデザイン', 'setup-firebase-hosting', 'create-html-report']) {
+  for (const w of ['Rust 製 SSG', 'Markdown 管理', 'Actions 自動デプロイ', 'ブランド設定', 'Pages サイトを更新して', 'デザインを最新にして', 'GitHub Pages で公開したい', 'docs サイト作って', 'fandhe-frontend と同じデザイン', 'setup-firebase-hosting', 'create-html-report']) {
     assert.ok(desc.includes(w), `description に発火語「${w}」が無い`)
   }
   assert.ok(!/\s#/.test(desc) && !desc.includes(': '), 'description に YAML の落とし穴（` #`・`: `）がある')

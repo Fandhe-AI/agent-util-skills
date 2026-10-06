@@ -1,5 +1,5 @@
 <!-- source: skills/setup-github-pages（このスキル自身の保守手順。上流は https://github.com/Fandhe-AI/fandhe-frontend） -->
-<!-- 最終確認日: 2026-10-05 -->
+<!-- 最終確認日: 2026-10-06 -->
 <!-- 取得状況: ✅ 実装とテストで確認済み（FF_REV b3e31ef663a98b6080feb98c84ade238d1074a08 で匿名ビルド・生成・帰属表記の確認を実測） -->
 
 # スキル保守者向けの手順（FF_REV の更新・上流改修の追跡）
@@ -21,7 +21,7 @@
 1. 上流の新しい commit を確認する（`gh api repos/Fandhe-AI/fandhe-frontend/commits/main --jq .sha`）。**固定値は 40 桁の
    commit SHA のみ**。ブランチ名・タグは使わない
 2. `FF_REV` を書き換える。このスキル内では `templates/docs-site-gen/FF_REV` と本節の「現在の固定値」を同時に更新する
-   （`tests/rev-pin.test.mjs` が不一致を検出する）。対象リポジトリ側への反映は保守者の作業ではなく、利用者が更新フローで
+   （`tests/rev-pin.test.mjs` が不一致を検出する）。SKILL.md・references の上流ガイドへの固定リンク（`blob/<FF_REV>/…`）も同時に書き換える（40 桁 hex の一致テストが不一致を検出する）。対象リポジトリ側への反映は保守者の作業ではなく、利用者が更新フローで
    取り込む（`scaffold.py` を通さず対象リポジトリの `FF_REV` だけ手で書き換えると、次回の更新は「利用者が編集した」競合として止まる）
 3. 模擬の対象リポジトリ（`scaffold.py` で配置したもの。更新の確認は旧版を配置してから新版で `scaffold.py --target .`
    を再実行する）で `bash tools/docs-site-gen/build-local.sh --clean --write-third-party` を実行する。匿名・隔離環境（`GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` と使い捨ての `CARGO_HOME`）で `cargo install --git ... --locked` が通ることを実測する。
@@ -34,13 +34,13 @@
 5. 帰属表記の件数を再確認する。1 ページのサイトで `grep -o -i fandhe-frontend _site/index.html | wc -l` が 4（帰属リンクの href と
    リンク文言、LICENSE リンク 2 件）のままであること。増減していれば上流がフッターを変えている
 6. `references/site-format.md` の制約（nav.toml の書式・予約アセット・Markdown 対応範囲）が変わっていないか上流
-   ソースで再確認し、`scripts/check_site.py` の `RESERVED_ASSET_NAMES`（上流 `build.rs` の `RESERVED_ASSET_NAMES`）を更新する
+   ソースで再確認し、`scripts/check_site.py` の `RESERVED_ASSET_NAMES`（上流 `build.rs` の `RESERVED_ASSET_NAMES`）を更新する。上流ガイド（`docs/guides/docs-site-external-repos.md`・`docs/design/docs-site-external-use.md`）の差分も確認する
 7. `tests/fixtures/site-keys/`・`tests/fixtures/redirect/` を新 rev の生成物で作り直し、`node --test "tests/*.test.mjs"` を通す
 
 ## 上流改修の追跡
 
-本スキルの wrapper と後処理は、上流 fandhe-frontend の次の制約を回避するための**暫定措置**である。上流は外部利用に対応済み
-（PR #3728〜#3737 がマージ済み）で、スキル側の回避策は #49〜#53 で削除する（#49 は反映済み）。表の「上流の対応」は上流側の状態を指し、
+本スキルは、上流 fandhe-frontend の次の制約を回避するために wrapper と後処理を暫定措置として持っていた。上流は外部利用に対応済み
+（PR #3728〜#3737 がマージ済み）で、スキル側の回避策は #49〜#55 ですべて削除済みである。表の「上流の対応」は上流側の状態を指し、
 スキル側の回避策は行ごとの記載のとおり。
 
 | 回避している制約 | 上流の対応（Issue → PR） | スキル側の削除（イシュー） |
@@ -53,7 +53,7 @@
 追跡 Issue: [https://github.com/Fandhe-AI/fandhe-frontend/issues/3713](https://github.com/Fandhe-AI/fandhe-frontend/issues/3713)（トラッキング。2026-10-05 時点で open）
 
 - 未完了: [#3723](https://github.com/Fandhe-AI/fandhe-frontend/issues/3723) と [#3727](https://github.com/Fandhe-AI/fandhe-frontend/issues/3727)（試行用リポジトリでの CI デプロイ確認。スキル側 #57・#58 に対応）
-- 未取り込み: [#3739](https://github.com/Fandhe-AI/fandhe-frontend/issues/3739)（lang 別クローム文言・リポジトリリンク表示・`--help`）は main に未取り込み。#48 の FF_REV 更新時に取り込み済みか確認する
+- 未取り込み: [#3739](https://github.com/Fandhe-AI/fandhe-frontend/issues/3739)（lang 別クローム文言・リポジトリリンク表示・`--help`）は現 FF_REV `b3e31ef` には未取り込み（マージコミット `65242a4` は 1 コミット先）。次回の FF_REV 更新時に取り込み、SKILL.md の「UI 文言は日本語固定」を再確認する
 - 各 Issue の状態は `gh issue view <n> -R Fandhe-AI/fandhe-frontend` で再確認する。FF_REV 更新時は上流の `crates/docs-site/src/` の変更も見比べる
 
 ## 簡素化の設計判断（決定記録・2026-10-05）
