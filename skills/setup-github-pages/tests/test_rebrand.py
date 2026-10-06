@@ -490,6 +490,8 @@ class InstallFailureHintTest(unittest.TestCase):
         self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
         # 案内する確認コマンドは出力を捨てる形に限る（生の設定キーを端末へ出させない）
         self.assertIn("--get-regexp '^url\\..*\\.insteadof$' >/dev/null", r.stderr)
+        # 書き換え先のプロトコルは判定しないため、ssh 前提の断定文言を出さない
+        self.assertNotIn("ssh", r.stderr)
 
     def test_hint_for_ssh_rewrite(self):
         r = self.build('[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n')

@@ -371,8 +371,8 @@ sys.exit(1)
   NEED_INSTALL=0
 fi
 # cargo install 失敗時の案内（助言のみ。成否は cargo の終了コードで決まり、ここでは変えない）。
-# 利用者の git 設定に `url.<ssh 形式>.insteadOf = https://github.com/` があると、cargo（libgit2）が書き換えに
-# 従って ssh で取得しようとし、ssh-agent 認証ができず失敗する。FF_URL へ実際に適用される規則がある場合だけ、
+# 利用者の git 設定に `url.<書き換え先>.insteadOf = https://github.com/` があると、cargo（libgit2）が書き換えに
+# 従って書き換え先（ssh 等）で取得しようとし、認証ができず失敗し得る。書き換え先の種類は判定も表示もしない。FF_URL へ実際に適用される規則がある場合だけ、
 # 回避策（CARGO_NET_GIT_FETCH_WITH_CLI=true）を stderr へ案内する。この環境変数は「匿名取得」の前提を黙って
 # 変えないため自動では付けない。規則の値・書き換え先は認証情報（user:token@）を含み得るので出力しない。
 # `-C /` はリポジトリのローカル設定（信頼できない場合がある）を避け、cargo も読む global / system 設定だけを見る。
@@ -390,11 +390,11 @@ hint_git_rewrite() {
   done <<< "${rules}"
   if [[ "${matched}" -eq 1 ]]; then
     {
-      echo "ヒント: git の insteadOf 設定で https://github.com/ が別プロトコル（ssh 等）へ書き換えられており、"
-      echo "  cargo の取得が認証失敗した可能性がある（有無だけ確認: git -C / config --get-regexp '^url\\..*\\.insteadof\$' >/dev/null && echo あり）。"
+      echo "ヒント: git の insteadOf 設定で https://github.com/ が別の URL へ書き換えられており、"
+      echo "  cargo の取得が書き換え後の URL の認証で失敗した可能性がある（書き換え先の種類は判定しない。有無だけ確認: git -C / config --get-regexp '^url\\..*\\.insteadof\$' >/dev/null && echo あり）。"
       echo "  出力すると設定キーの認証情報が端末に残るため、必ず >/dev/null で捨てる。"
       echo "  環境変数 CARGO_NET_GIT_FETCH_WITH_CLI を true にして build-local.sh を再実行すると通る場合がある。"
-      echo "  ただし git CLI も書き換えに従うため、ssh の認証が通る環境が前提。"
+      echo "  ただし git CLI も書き換えに従うため、書き換え先の認証が通る環境が前提。"
       echo "  このスクリプトは匿名取得の前提を変えないため、この環境変数は自動では付けない。"
     } >&2
   fi
