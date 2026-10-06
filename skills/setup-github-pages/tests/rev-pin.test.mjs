@@ -139,7 +139,11 @@ test('pages.yml の cache は cargo install の出力先だけを対象とし、
   assert.doesNotMatch(build.split('- name: Upload')[0], /^\s*if:/m, 'build ステップに if: がある')
   const order = ['id: rustc', 'actions/cache@', 'build-local.sh --out'].map((k) => y.indexOf(k))
   assert.ok(order.every((n) => n >= 0) && order[0] < order[1] && order[1] < order[2], 'rustc → cache → build の順でない')
-  for (const m of y.matchAll(/^\s*- name: (.*)$/gm)) assert.doesNotMatch(m[1], /rebrand|wrapper|fetch/i, `旧工程名: ${m[1]}`)
+  // ステップ名（`- name:`）に加えジョブ名（`name:`）も検査する。ジョブ名は required check の context になる
+  const names = [...y.matchAll(/^\s*(?:-\s+)?name:\s*(.*)$/gm)].map((m) => m[1])
+  assert.ok(names.length >= 3, `name の検出数が少ない: ${names.length}`)
+  assert.match(y, /^ {2}build:\n {4}name: .+$/m, 'build ジョブ名が検出できない')
+  for (const n of names) assert.doesNotMatch(n, /rebrand|wrapper|fetch/i, `旧工程名: ${n}`)
 })
 
 test('build-local.sh の install 省略判定は台帳と FF_REV を照合し、cargo install より前にある', () => {

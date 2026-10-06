@@ -212,6 +212,7 @@ Step U1 の JSON をもとに、次を利用者へ報告する。
 - 更新したファイルと理由（`updated`）、保持したファイル（`kept`）、欠落（`missing`）、競合と解決（`conflicts`）、削除候補（`deprecated`）、旧構成の生成物の案内（`legacy_artifacts`）、`[site]` 移行案の状態（`site_migration`）、警告（`warnings`）
 - `manifest_recreated` が true なら、旧版（マニフェストなし）からの移行であり、以後は未編集の所有ファイルが自動更新になること
 - ローカルビルドの結果（Step U2 の終了コードと `verify ok`）
+- 更新で `pages.yml` の build ジョブ名が `build: docs site (SSG + linkcheck)` に変わる（旧名は末尾が `+ rebrand)`）。旧名を required status check に登録しているリポジトリでは check 名が変わり、更新 PR が「Expected」のまま待ち続けるため、ruleset と classic branch protection の両方を確認し、旧名が登録されている側の required status check を新名へ更新するよう案内する（ruleset は `required_status_checks` の `context`、branch protection は `required_status_checks.checks` の `context`）。スキルは ruleset・branch protection を変更しない。利用者が PUT で更新する場合は、ruleset は `integration_id`、branch protection は `app_id` の束縛を保持する
 
 #### Step U4: コミットして PR にする
 
