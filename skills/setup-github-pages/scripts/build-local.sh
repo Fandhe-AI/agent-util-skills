@@ -391,7 +391,8 @@ hint_git_rewrite() {
   if [[ "${matched}" -eq 1 ]]; then
     {
       echo "ヒント: git の insteadOf 設定で https://github.com/ が別プロトコル（ssh 等）へ書き換えられており、"
-      echo "  cargo の取得が認証失敗した可能性がある（確認: git config --get-regexp '^url\\..*\\.insteadof\$'）。"
+      echo "  cargo の取得が認証失敗した可能性がある（有無だけ確認: git -C / config --get-regexp '^url\\..*\\.insteadof\$' >/dev/null && echo あり）。"
+      echo "  出力すると設定キーの認証情報が端末に残るため、必ず >/dev/null で捨てる。"
       echo "  環境変数 CARGO_NET_GIT_FETCH_WITH_CLI を true にして build-local.sh を再実行すると通る場合がある。"
       echo "  ただし git CLI も書き換えに従うため、ssh の認証が通る環境が前提。"
       echo "  このスクリプトは匿名取得の前提を変えないため、この環境変数は自動では付けない。"
