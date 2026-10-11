@@ -71,6 +71,7 @@ skills-lock.json                      -- vendored スキルの source・skillPat
     code-comment-style.md             -- コード内コメント・ドキュメンテーションコメント規約
     verification.md                   -- 完了ゲート規約（証拠なき完了宣言の禁止・5段階検証）
     debugging.md                      -- 根本原因デバッグ規約（修正前の原因調査・3回失敗でエスカレーション）
+    github-actions.md                 -- GitHub Actions のキャッシュ方針（保存は main だけ・ルートの lockfile だけをハッシュ）
   skills/                             -- skills/ と .agents/skills/ へのシンボリックリンク集約
     create-html-report                -- 自前スキル（symlink: ../../skills/create-html-report）
     setup-firebase-hosting            -- 自前スキル（symlink: ../../skills/setup-firebase-hosting）
@@ -169,6 +170,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `verification.md` | skill 修正・レビュー作業全般 | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
 | `debugging.md` | skill 修正作業 / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
 | `ruleset-policy.md` | setup-repo-guards / implement-issue-tree / ruleset を変更する全作業 | ブランチ ruleset 方針（`strict_required_status_checks_policy` は必ず false・required check の `integration_id` 束縛・条件付きチェックを required にしない・一括更新後の 3 軸 + classic BP 検証） |
+| `github-actions.md` | `.github/workflows/` を変更する作業 / `skills/` の lockfile を変更する作業 | GitHub Actions のキャッシュ方針（容量上限と課金の前提・効果測定・保存は main への push だけ・ルートの lockfile だけをハッシュ・PR チェックリスト・配布物の lockfile が利用側のキャッシュキーに与える影響） |
 
 ## Current Skills
 
