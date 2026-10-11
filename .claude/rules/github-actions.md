@@ -88,8 +88,11 @@ paths:
   成果物に exact hit し続け、exact hit では再保存されないため毎回全再ビルドになる（fandhe-db で
   依存 135 crate を毎回再ビルドしていた）。配布テンプレート
   `skills/setup-github-pages/templates/pages.yml` の `Cache docs-site install` ステップは、rustc の
-  commit-hash と対象ファイルを列挙した `hashFiles(...)` をキーにし、デフォルトブランチへの push
-  でだけ動く。この形が手本になる。
+  commit-hash と対象ファイルを列挙した `hashFiles(...)` をキーにしており、キー設計の手本になる。
+  ただし保存条件は手本ではない。この workflow はデフォルトブランチへの push に加えて
+  `workflow_dispatch` でも動き、一体型の `actions/cache` に `if` が無いため、手動実行でも
+  （実行したブランチのスコープへ）保存し得る。保存を main への push に限る形は 3 の
+  restore / save 分割を使う。
 - `restore-keys` で前方一致を許し、キーが変わっても cold にならないようにする。ただし別の版の
   成果物を復元すると不整合になるものは完全一致だけにする。
 
