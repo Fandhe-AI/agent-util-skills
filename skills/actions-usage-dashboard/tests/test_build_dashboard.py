@@ -73,7 +73,8 @@ class CreateTests(unittest.TestCase):
             self.assertTrue(ID_RE.match(w["collection"]) and ID_RE.match(w["doc_id"]))
             self.assertTrue(os.path.isabs(w["file_path"]))
             self.assertTrue(w["file_path"].startswith(os.path.realpath(self.out)))
-            self.assertIsInstance(json.load(open(w["file_path"], encoding="utf-8")), dict)
+            with open(w["file_path"], encoding="utf-8") as f:
+                self.assertIsInstance(json.load(f), dict)
 
     def test_t2_billing_only(self):
         rc, _, err = self.stage2(rows=(BILLING,))
@@ -289,7 +290,8 @@ class ValidationTests(unittest.TestCase):
         self.fails(base(self.out, (big,)))
 
     def test_t13_no_network_imports(self):
-        src = open(SCRIPT, encoding="utf-8").read()
+        with open(SCRIPT, encoding="utf-8") as f:
+            src = f.read()
         for m in ("subprocess", "urllib", "socket", "http"):
             self.assertIsNone(re.search(r"^\s*(import|from)\s+%s\b" % m, src, re.M), m)
 
@@ -311,7 +313,8 @@ class CommonParityTest(unittest.TestCase):
                          inspect.getsource(cm.atomic_write_json))
 
     def test_does_not_import_common(self):
-        src = open(SCRIPT, encoding="utf-8").read()
+        with open(SCRIPT, encoding="utf-8") as f:
+            src = f.read()
         self.assertIsNone(re.search(r"^\s*(import|from)\s+_common\b", src, re.M))
 
 
