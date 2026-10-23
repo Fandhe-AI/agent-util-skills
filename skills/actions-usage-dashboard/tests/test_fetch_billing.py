@@ -138,6 +138,21 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(zero[0]["charge_class"], "included")
         self.assertEqual(zero[0]["minutes"], 0)
 
+    def test_mixed_unit_prices_keep_paid_minutes(self):
+        # 単価の異なる明細は元明細ごとに有料分を求める（平均単価で割ると 6.67 分に狂う）
+        pay = {"2026-07": {"usageItems": [
+            item("2026-07-01", "priv-api", "Actions Linux", 10, 0.008, 0.08, 0.08),
+            item("2026-07-01", "priv-api", "Actions Linux", 10, 0.016, 0.16, 0.0),
+        ]}}
+        rows, _ = fb.build_rows(pay, VISIBILITY, ORG)
+        by = {r["charge_class"]: r for r in rows}
+        self.assertEqual(by["paid"]["minutes"], 10)
+        self.assertEqual(by["paid"]["billable_minutes"], 10)
+        self.assertEqual(by["paid"]["net_usd"], 0.08)
+        self.assertEqual(by["included"]["minutes"], 10)
+        self.assertEqual(by["included"]["billable_minutes"], 0)
+        self.assertEqual(round(by["paid"]["gross_usd"] + by["included"]["gross_usd"], 6), 0.24)
+
     def test_excluded_and_deterministic_order(self):
         self.assertFalse([r for r in self.rows if r["sku"] in ("Actions storage", "Copilot premium")])
         keys = [(r["day"], r["repo"], r["sku"], fb.CHARGE_ORDER[r["charge_class"]]) for r in self.rows]

@@ -1,0 +1,55 @@
+---
+name: actions-usage-dashboard
+description: >
+  org の GitHub Actions 利用分数ダッシュボード用データ取得スキル。「Actions の使用量を集計して」
+  「課金分数を日次で出して」「billing usage を取得して」で使用。billing usage API から
+  GitHub ホストランナーの日 x リポジトリ x SKU x 料金区分（paid / included / public_free）の行を
+  JSON へ書く。fetch_billing.py を提供。ダッシュボード HTML 化は create-html-report も参照。
+user-invocable: true
+---
+
+# actions-usage-dashboard
+
+org の Actions 利用分数を billing usage API から取得し、日次の行データ（JSON）へ正規化する。現状は最初のデータ源 `scripts/fetch_billing.py` のみを提供する。
+
+## 使い方
+
+```bash
+python3 skills/actions-usage-dashboard/scripts/fetch_billing.py \
+  --org <org> --since YYYY-MM [--until YYYY-MM] --out <出力 JSON>
+```
+
+- `--until` の既定は UTC の当月。`--since <= --until <= 当月` を満たすこと
+- 前提: `gh` が認証済みで、org の billing 閲覧権限があること
+
+## フロー
+
+### Step 1: 引数の確認
+
+org 名と期間を確認する。`--out` の親ディレクトリは存在している必要がある。
+
+### Step 2: 取得
+
+上記コマンドを実行する。月ごとに取得し、いずれかの月で失敗した場合は部分ファイルを書かず非 0 で終了する（既存の出力も壊さない）。
+
+### Step 3: 出力の確認
+
+標準出力の要約（行数・区分別分数・月別合計）を確認する。出力 JSON は `schema_version: 1` で、行は `day / repo / visibility / sku / runner_type / charge_class / minutes / quota_minutes / billable_minutes / gross_usd / discount_usd / net_usd` を持つ。
+
+- 有料分は公開範囲ではなく元明細ごとの `netAmount / pricePerUnit` から求める（単価の異なる明細を平均して割らない）
+- `quota_minutes` は Linux 単価（前月引き継ぎ）で換算した含有枠消費分
+- セルフホストランナーは対象外（jobs 側で扱う）
+
+## 検証
+
+```bash
+python3 -m pytest -q skills/actions-usage-dashboard/tests
+```
+
+全件パス・失敗 0 件であることを確認する。
+
+## 注意事項
+
+- このスキルはネットワーク越しの GitHub 操作（`gh api`）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する（`docs/skill-network-requirements.md` 参照）。ネットワーク遮断を解除できない環境では実行できない
+- トークンは扱わない。`gh api` 経由のみで、標準ライブラリだけで動く
+- コミット・PR は `.claude/rules/conventional-commits.md` に従う

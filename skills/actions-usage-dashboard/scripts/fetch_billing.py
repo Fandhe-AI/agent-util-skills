@@ -150,8 +150,15 @@ def select_items(payload, month, org):
         d, n = _num(it, "discountAmount", False), _num(it, "netAmount")
         p = _num(it, "pricePerUnit")
         key = (day.isoformat(), normalize_repo(it.get("repositoryName"), org), sku)
-        u = units.setdefault(key, {"q": 0.0, "g": 0.0, "d": 0.0, "n": 0.0, "price": p, "mixed": False})
-        u["mixed"] = u["mixed"] or u["price"] != p
+        u = units.setdefault(key, {"q": 0.0, "g": 0.0, "d": 0.0, "n": 0.0, "price": 0.0,
+                                   "paid": 0.0, "gpaid": 0.0})
+        # 単価が異なる明細を平均単価で割ると有料分数が狂うため、元明細ごとに有料分と
+        # その按分 gross を求めてから集約する。
+        paid_i = min(max(n / p, 0.0), q) if p > 0 else 0.0
+        u["paid"] += paid_i
+        u["gpaid"] += g * paid_i / q if q > 0 else 0.0
+        if u["price"] <= 0:
+            u["price"] = p
         u["q"] += q
         u["g"] += g
         u["d"] += d
@@ -184,10 +191,7 @@ def build_rows(month_payloads, visibility, org):
             vis = vis_map.get(repo.lower(), "unknown") if repo != UNATTRIBUTED else "unknown"
             public = vis == "public"
             minutes, gross, net = u["q"], u["g"], u["n"]
-            unit_price = u["price"]
-            if u["mixed"] and minutes > 0:
-                unit_price = gross / minutes
-            paid = min(max(net / unit_price, 0.0), minutes) if unit_price > 0 else 0.0
+            paid, gpaid = u["paid"], u["gpaid"]
             if public or gross == 0:
                 quota = 0.0
             elif price is None:
@@ -203,8 +207,12 @@ def build_rows(month_payloads, visibility, org):
                 parts.append((rest_cls, max(rest, 0.0)))
             for cls, m in parts:
                 share = (m / minutes) if minutes > 0 else 1.0
-                net_c = net if cls == parts[0][0] else 0.0
-                gross_c = gross * share
+                if cls == "paid":
+                    net_c, gross_c = net, gpaid
+                else:
+                    # 有料分が無い行（minutes == 0 を含む）は金額をそのまま持たせる
+                    net_c = net if paid <= 0 else 0.0
+                    gross_c = gross if paid <= 0 else max(gross - gpaid, 0.0)
                 rows.append({
                     "day": day, "repo": repo, "visibility": vis, "sku": sku,
                     "runner_type": runner_type_for(sku), "charge_class": cls,
