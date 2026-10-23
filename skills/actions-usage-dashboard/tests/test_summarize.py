@@ -31,8 +31,13 @@ def row(day, repo, cls, minutes, quota=0.0, usd=0.0, vis="private", rt="ubuntu")
             "quota_minutes": quota, "net_usd": usd}
 
 
-def doc(source, rows, org=ORG):
-    return {"schema_version": 1, "source": source, "org": org, "rows": rows}
+def doc(source, rows, org=ORG, since=None, until=None):
+    if source == "billing":
+        since, until = since or "2026-09", until or "2026-10"
+    else:
+        since, until = since or "2026-09-01", until or "2026-10-31"
+    return {"schema_version": 1, "source": source, "org": org, "since": since,
+            "until": until, "rows": rows}
 
 
 BILLING = [
@@ -199,10 +204,50 @@ class WarningAndMissingBillingTests(Base):
         self.assertIsNone(s["breakdown"]["paid"])
         self.assertIsNone(s["breakdown"]["included"])
         text = "\n".join(sm.render_text(s))
-        self.assertIn("データなし（billing 未入力）", text)
+        self.assertIn("データなし（billing 未入力", text)
         self.assertIn("残量は不明", text)
         self.assertNotIn("残り", text)
         self.assertTrue(any("billing 未入力" in x for x in s["warnings"]))
+
+
+class CoverageTests(Base):
+    def build(self, billing_until, jobs_since, month="2026-10", jobs_until="2026-10-31"):
+        paths = [self.write("b.json", doc("billing", [row("2026-09-02", "r", "paid", 5, usd=1)],
+                                          since="2026-09", until=billing_until)),
+                 self.write("j.json", doc("jobs", [row("2026-10-08", "s", "self_hosted", 40)],
+                                          since=jobs_since, until=jobs_until))]
+        org, rows, src, _w = sm.load_rows(paths)
+        return sm.build_summary(org, rows, src, month, "team", None, "repo", 5)
+
+    def test_month_outside_billing_is_unknown_not_zero(self):
+        s = self.build("2026-09", "2026-10-01")
+        bd = s["breakdown"]
+        self.assertIsNone(bd["paid"])
+        self.assertIsNone(bd["included"])
+        self.assertEqual(bd["self_hosted"], {"minutes": 40.0, "available": True})
+        text = "\n".join(sm.render_text(s))
+        self.assertNotIn("残り", text)
+        self.assertTrue(any("取得期間" in w and "billing" in w for w in s["warnings"]))
+
+    def test_month_outside_jobs_is_unavailable(self):
+        s = self.build("2026-10", "2026-11-01", jobs_until="2026-11-30")
+        self.assertFalse(s["breakdown"]["self_hosted"]["available"])
+        self.assertTrue(any("jobs" in w and "取得期間" in w for w in s["warnings"]))
+
+    def test_partial_month_warns(self):
+        s = self.build("2026-10", "2026-10-10")
+        self.assertTrue(s["breakdown"]["self_hosted"]["available"])
+        self.assertTrue(any("途中から" in w for w in s["warnings"]))
+
+    def test_missing_or_bad_range_rejected(self):
+        for src, since, until in (("billing", "2026-9", "2026-10"), ("billing", "2026-10", "2026-09"),
+                                  ("jobs", "2026-10", "2026-10-20"), ("jobs", "2026-10-20", "2026-10-01")):
+            with self.assertRaises(sm.FetchError):
+                sm.load_rows([self.write("x.json", doc(src, [], since=since, until=until))])
+        d = doc("billing", [])
+        del d["since"]
+        with self.assertRaises(sm.FetchError):
+            sm.load_rows([self.write("y.json", d)])
 
 
 class CliTests(Base):

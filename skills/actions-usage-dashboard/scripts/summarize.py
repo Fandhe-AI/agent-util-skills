@@ -8,7 +8,8 @@
   読み取り専用で、ファイルは書かない。集計の取得は行わない（取得は fetch_*.py の責務）。
 
 呼び出し元: SKILL.md の check モード。入力は fetch_billing.py（source: billing）と
-  fetch_jobs.py（source: jobs）が書く rows JSON（schema_version 1）。列名や区分を変える
+  fetch_jobs.py（source: jobs）が書く rows JSON（schema_version 1）。since / until は必須で、
+  対象月が取得期間外の取得元は 0 ではなく「不明」として扱う。列名や区分を変える
   ときは両 fetch スクリプトと揃える。
 
 プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
@@ -21,6 +22,7 @@ helper の複製: FetchError / gh_api / ORG_RE / MONTH_RE / _num は fetch_billi
 アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
 """
 import argparse
+import calendar
 import json
 import math
 import re
@@ -77,12 +79,42 @@ def safe(s):
     return s if len(s) <= MAX_NAME_LEN else s[:MAX_NAME_LEN - 1] + "…"
 
 
+def _coverage(src, data, p):
+    """取得期間 (since, until) を日付文字列の組へ正規化する。billing は月粒度、jobs は日粒度。
+
+    期間がない・不正な入力は、範囲外の月を 0 と誤読させないため fail-closed で拒否する。
+    """
+    since, until = data.get("since"), data.get("until")
+    if src == "billing":
+        ms, mu = (MONTH_RE.match(v) if isinstance(v, str) else None for v in (since, until))
+        if not ms or not mu:
+            raise FetchError("rows の since / until が YYYY-MM 形式ではない: %s" % safe(p))
+        first = since + "-01"
+        last = "%s-%02d" % (until, calendar.monthrange(int(mu.group(1)), int(mu.group(2)))[1])
+    else:
+        if not all(isinstance(v, str) and DAY_RE.match(v) for v in (since, until)):
+            raise FetchError("rows の since / until が YYYY-MM-DD 形式ではない: %s" % safe(p))
+        first, last = since, until
+    if first > last:
+        raise FetchError("rows の since が until より後: %s" % safe(p))
+    return first, last
+
+
+def month_overlap(cov, month):
+    """取得期間が対象月と重なるか。(重なり, 月初から取れているか) を返す。"""
+    if cov is None:
+        return False, False
+    m_first = month + "-01"
+    m_last = "%s-%02d" % (month, calendar.monthrange(int(month[:4]), int(month[5:]))[1])
+    return cov[0] <= m_last and cov[1] >= m_first, cov[0] <= m_first
+
+
 def load_rows(paths):
     """rows ファイルを検証して (org, rows, sources, warnings) を返す。非信頼入力として fail-closed。
 
     warnings は取得元（fetch_*.py）が記録した欠損・取得時点の警告で、出力へ引き継ぐ。
     """
-    org, rows, sources, warnings = None, [], set(), []
+    org, rows, sources, warnings = None, [], {}, []
     for p in paths:
         try:
             with open(p, encoding="utf-8") as f:
@@ -98,7 +130,7 @@ def load_rows(paths):
             raise FetchError("rows の source が不正: %s" % safe(p))
         if src in sources:
             raise FetchError("同じ source（%s）の rows が重複している" % src)
-        sources.add(src)
+        sources[src] = _coverage(src, data, p)
         o = data.get("org")
         if not isinstance(o, str) or not ORG_RE.match(o):
             raise FetchError("rows の org が不正: %s" % safe(p))
@@ -229,14 +261,24 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
     mrows = select_month(rows, month)
     inc_min = included_for(plan)
     warnings = list(src_warnings)
-    has_billing = "billing" in sources
-    if not has_billing:
+    has_billing, b_full = month_overlap(sources.get("billing"), month)
+    has_jobs, j_full = month_overlap(sources.get("jobs"), month)
+    if "billing" not in sources:
         warnings.append("billing 未入力のため有料・含有枠・公開無料の内訳と残量は不明（fetch_billing.py の出力を --rows に渡す）")
+    elif not has_billing:
+        warnings.append("対象月 %s は billing の取得期間（%s..%s）外のため有料・含有枠・公開無料の内訳と残量は不明"
+                        % (month, *sources["billing"]))
+    if "jobs" in sources and not has_jobs:
+        warnings.append("対象月 %s は jobs の取得期間（%s..%s）外のためセルフホストは不明" % (month, *sources["jobs"]))
+    for name, ok, full in (("billing", has_billing, b_full), ("jobs", has_jobs, j_full)):
+        if ok and not full:
+            warnings.append("%s の取得期間（%s..%s）が対象月の途中から始まるため月初分が欠ける"
+                            % (name, *sources[name]))
     if plan_warning:
         warnings.append(plan_warning)
     elif inc_min is None:
         warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
-    bd = breakdown(mrows, inc_min, "jobs" in sources, has_billing)
+    bd = breakdown(mrows, inc_min, has_jobs, has_billing)
     if has_billing and bd["unknown"]["minutes"] > 0:
         warnings.append("区分不明あり。含有枠の消費は過小。期間中に公開範囲が変わっていないと保証できる場合だけ、"
                         "fetch_billing.py に --assume-current-visibility を付けると現在の公開範囲で分類できる"
@@ -258,7 +300,7 @@ def render_text(s):
         safe(s["org"]), s["month"], safe(s["plan"]["name"] or "不明"),
         "%d 分" % pm if pm else "不明")]
     if bd["paid"] is None:
-        out.append("有料: データなし（billing 未入力）")
+        out.append("有料: データなし（billing 未入力または対象月が取得期間外）")
         out.append("含有枠: データなし（残量は不明）")
         out.append("公開リポの無料: データなし")
         return _render_tail(s, out)
