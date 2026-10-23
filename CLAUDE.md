@@ -74,6 +74,7 @@ skills-lock.json                      -- vendored スキルの source・skillPat
     debugging.md                      -- 根本原因デバッグ規約（修正前の原因調査・3回失敗でエスカレーション）
     out-of-scope-tracking.md          -- スコープ外事項の追跡規約（承認前の自動 Issue 化禁止）
     ruleset-policy.md                 -- ブランチ ruleset 方針（strict=false・integration_id 束縛・一括更新後の検証）
+    github-actions.md                 -- GitHub Actions のキャッシュ方針（保存は main だけ・ルートの lockfile だけをハッシュ）
   workflows/
     implement-issue-tree.js           -- symlink: ../skills/implement-issue-tree/scripts/implement-issue-tree.js
   skills/                             -- skills/ と .agents/skills/ へのシンボリックリンク集約
@@ -176,6 +177,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `debugging.md` | skill 修正作業 / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
 | `out-of-scope-tracking.md` | 実装系 Agent / implement-issue-tree | スコープ外事項の追跡（承認前に自動 Issue 化しない） |
 | `ruleset-policy.md` | setup-repo-guards / implement-issue-tree / ruleset を変更する全作業 | ブランチ ruleset 方針（`strict_required_status_checks_policy` は必ず false・required check の `integration_id` 束縛・条件付きチェックを required にしない・一括更新後の 3 軸 + classic BP 検証） |
+| `github-actions.md` | `.github/workflows/` を変更する作業 / `skills/` の lockfile を変更する作業 | GitHub Actions のキャッシュ方針（容量上限と課金の前提・効果測定・保存は main への push だけ・ルートの lockfile だけをハッシュ・PR チェックリスト・配布物の lockfile が利用側のキャッシュキーに与える影響） |
 
 ## Current Skills
 
