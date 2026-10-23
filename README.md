@@ -93,7 +93,7 @@ org の GitHub Actions 利用分数（使用時間）を日次で集計し、cla
 
 ## vendored スキルの扱い
 
-`.agents/skills/` 配下と `skills-lock.json` は [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills)（開発ワークフロースキル 20 件）と [Fandhe-AI/agent-reference-skills](https://github.com/Fandhe-AI/agent-reference-skills)（`github-docs` / `anthropic-claude-code` / `anthropic-claude-code-extend`）からの **消費専用の取り込みコピー**である。`.github/workflows/update-external.yml` が日次で上流の変更を取り込み、`skills-lock.json` の `computedHash` を同期する。
+`.agents/skills/` 配下と `skills-lock.json` は [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills)（開発ワークフロースキル 24 件）と [Fandhe-AI/agent-reference-skills](https://github.com/Fandhe-AI/agent-reference-skills)（`github-docs` / `anthropic-claude-code` / `anthropic-claude-code-extend`）からの **消費専用の取り込みコピー**である。`.github/workflows/update-external.yml` が日次で上流の変更を取り込み、`skills-lock.json` の `computedHash` を同期する。
 
 - 本リポジトリ側で `.agents/skills/` を直接編集しない。修正は上流リポジトリへ行う
 - 上流の `source` を持つ vendored スキルへ手元で修正を加えた場合の PR 作成・upstream 反映は `contribute-skill` スキル（vendored 側に含まれる）を使う
