@@ -255,14 +255,12 @@ class Cli(unittest.TestCase):
     def test_rerun_pending_excluded_and_invalid_job_skipped(self):
         self.assertEqual(self.run_cli().returncode, 0)
         before = sum(x["minutes"] for x in self.rows())
-        # run 1 が再実行中（attempt 増・未完了）: 旧 attempt の分を集計から外し警告する
+        # run 1 が再実行中（attempt 増・未完了）: 完了済みの旧 attempt の分は集計に残す
         self.cfg["runs"]["pub-site"][0]["run_attempt"] = 2
         self.cfg["runs"]["pub-site"][0]["status"] = "in_progress"
         self.write_cfg()
         self.assertEqual(self.run_cli().returncode, 0)
-        self.assertEqual(sum(x["minutes"] for x in self.rows()), before - 10)
-        with open(self.out) as f:
-            self.assertTrue(any("旧 attempt" in w for w in json.load(f)["warnings"]))
+        self.assertEqual(sum(x["minutes"] for x in self.rows()), before)
         # 不正な job を含む run はスキップし、全体は成功する
         self.cfg["runs"]["pub-site"][0]["status"] = "completed"
         self.cfg["jobs"]["1"] = [{"id": "bad", "labels": []}]
@@ -295,11 +293,11 @@ class Cli(unittest.TestCase):
             self.assertFalse(any("/runs/%s/jobs" % rid in c for c in self.calls()))
         self.assertEqual(self.rows(), self.rows(ref_out))
 
-    def test_jobs_requested_with_latest_filter(self):
+    def test_jobs_requested_with_all_filter(self):
         self.assertEqual(self.run_cli().returncode, 0)
         jobs_calls = [c for c in self.calls() if "/jobs" in c]
         self.assertTrue(jobs_calls)
-        self.assertTrue(all("filter=latest" in c for c in jobs_calls))
+        self.assertTrue(all("filter=all" in c for c in jobs_calls))
 
     def test_cache_keeps_run_with_in_period_job(self):
         # 期間前（10/09）に作られた run が、期間内（10/10）開始の job を持つ
@@ -346,7 +344,10 @@ class Cli(unittest.TestCase):
         r = self.run_cli(["--rate-check-every", "1"])
         self.assertEqual(r.returncode, 0, r.stderr)
         for repo in done:
-            self.assertFalse(any("repos/%s/%s/actions/runs " % (ORG, repo) in c for c in self.calls()))
+            had_pending = any(i["status"] != "completed" for i in saved["listing"]["repos"][repo])
+            relisted = any("repos/%s/%s/actions/runs " % (ORG, repo) in c for c in self.calls())
+            # 未完了 run を含むリポジトリだけ一覧を取り直し、完了済みのみなら再利用する
+            self.assertEqual(relisted, had_pending)
         with open(os.path.join(self.cache, "jobs-cache-%s.json" % ORG)) as f:
             self.assertNotIn("listing", json.load(f))
 

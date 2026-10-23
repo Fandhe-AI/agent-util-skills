@@ -23,7 +23,8 @@
   {schema_version, org, runs: {"<run_id>": {repo, attempt, created_at, agg: [{day, runner_group, minutes}]}}}
   jobs を全ページ取り終えた「完了済み run」だけを run 単位で登録する。未完了の run は
   後から job が完了するため登録せず、次回の一覧で再び候補にする。run_attempt が増えた
-  （再実行）ときは取り直す。キャッシュは非信頼入力として検証し、壊れていれば止まる。
+  （再実行）ときは全 attempt の jobs（filter=all）を job id で重複除去して取り直す。再実行中は
+  完了済みの旧 attempt の分をキャッシュから残す。キャッシュは非信頼入力として検証し、壊れていれば止まる。
 
 終了コード: 0 成功 / 1 失敗 / 3 レート制限の残量不足で中断（キャッシュ保存済み。
   同じコマンドで再実行すると続きから取る。中断時と失敗時は --out を書かない）。
@@ -34,9 +35,11 @@
 
 一覧の再開: cache の "listing"（{since, day, repos: {repo: [run...]}, truncated}）に、取り終えた
   リポジトリ単位の run 一覧を保存する。同じ --since・同じ UTC 日の再実行では保存済みの一覧を使い
-  続きのリポジトリから取る。全処理が成功したら listing を捨てる。
+  続きのリポジトリから取る。ただし未完了 run を含むリポジトリは再取得する（待機中に完了し得るため）。
+  再利用した場合は listed_at（取得時点）を warnings に出す。待機中に作られた run は次回実行で反映される。
+  全処理が成功したら listing を捨てる。
 出力対象: 今回の一覧に無い run（GitHub 側で削除・1,000 件上限で欠落）でも、対象リポジトリの
-  キャッシュ済み履歴は集計に残す。除外するのは再実行中などで無効化した run だけ。
+  キャッシュ済み履歴は集計に残す。
 
 helper の複製: gh_api / atomic_write_json / ORG_RE / FetchError は fetch_billing.py と
   同じ実装を複製している（python3 -I 起動ではスクリプト隣接の import ができず、各スクリプトを
@@ -301,7 +304,7 @@ class GhClient:
         jobs = []
         for page in range(1, MAX_JOB_PAGES + 1):
             text = self._call("jobs", ["-X", "GET", "repos/%s/%s/actions/runs/%d/jobs" % (org, repo, run_id),
-                                       "-f", "filter=latest", "-f", "per_page=%d" % PER_PAGE,
+                                       "-f", "filter=all", "-f", "per_page=%d" % PER_PAGE,
                                        "-f", "page=%d" % page])
             d = _json(text, "jobs")
             lst = d.get("jobs") if isinstance(d, dict) else None
@@ -425,7 +428,8 @@ def main(argv=None):
     today = now.date()
     stats = {"hosted": 0, "unfinished": 0, "listed": 0, "fetched": 0, "cached": 0, "pending": 0,
              "archived": 0, "badname": 0}
-    truncated, skipped, stale, cache, cache_path, client = [], [], [], None, None, None
+    truncated, skipped, cache, cache_path, client = [], [], None, None, None
+    resumed_at = None
     until_s = today.isoformat()
 
     def lines(rows=None, note=None):
@@ -444,8 +448,8 @@ def main(argv=None):
             out.append("警告: 1,000 件上限で欠けた可能性のある区間 %d" % len(truncated))
         if skipped:
             out.append("警告: 不正な job でスキップした run %d" % len(skipped))
-        if stale:
-            out.append("警告: 再実行中などで旧 attempt を集計から除外した run %d" % len(stale))
+        if resumed_at:
+            out.append("警告: run 一覧は中断前（%s）の取得を再利用している。以後に作られた run は次回の実行で反映される" % resumed_at)
         if note:
             out.append(note)
         return out
@@ -494,8 +498,16 @@ def main(argv=None):
         stats["targets"] = len(targets)
         ls = cache.get("listing")
         if not ls or ls["since"] != a.since or ls["day"] != until_s:
-            ls = {"since": a.since, "day": until_s, "repos": {}, "truncated": []}
+            ls = {"since": a.since, "day": until_s, "repos": {}, "truncated": [],
+                  "listed_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
             cache["listing"] = ls
+        else:
+            # 再開: 待機中に状態が変わり得る未完了 run を含むリポジトリは一覧を取り直す
+            for repo in [r for r, its in ls["repos"].items() if any(i["status"] != "completed" for i in its)]:
+                del ls["repos"][repo]
+                ls["truncated"] = [t for t in ls["truncated"] if not t.startswith("%s/%s " % (a.org, repo))]
+            if ls["repos"]:
+                resumed_at = ls.get("listed_at") if isinstance(ls.get("listed_at"), str) else "不明"
         for repo in targets:
             if repo not in ls["repos"]:
                 client.check_rate()
@@ -519,10 +531,8 @@ def main(argv=None):
                 stats["cached"] += 1
                 continue
             if run.get("status") != "completed":
+                # 再実行中でも、キャッシュ済みの旧 attempt の分は実際に消費された時間なので集計に残す
                 stats["pending"] += 1
-                if ent is not None:
-                    # 再実行中: 旧 attempt の分を集計に残すと古い値になるため、完了まで集計から外す
-                    stale.append(str(rid))
                 continue
             client.check_rate()
             jobs = client.list_jobs(repo, a.org, rid)
@@ -530,8 +540,6 @@ def main(argv=None):
                 agg, hosted, unfinished = aggregate_jobs(jobs)
             except InvalidJob as e:
                 skipped.append("%s/%s run %d: %s" % (a.org, repo, rid, e))
-                if ent is not None:
-                    stale.append(str(rid))
                 continue
             created = run.get("created_at") if isinstance(run.get("created_at"), str) else ""
             cache["runs"][str(rid)] = {"repo": repo, "attempt": att, "created_at": created, "agg": agg}
@@ -539,7 +547,7 @@ def main(argv=None):
             stats["hosted"] += hosted
             stats["unfinished"] += unfinished
         # 一覧に無い run（削除・1,000 件上限の欠落）も、対象リポジトリのキャッシュ済み履歴として残す
-        entries = [e for k, e in cache["runs"].items() if e["repo"] in visibility and k not in stale]
+        entries = [e for k, e in cache["runs"].items() if e["repo"] in visibility]
         # --since より前に作られた run はこの期間では再参照されないため、キャッシュの無制限な増加を防ぐ
         # ただし期間内の day を持つ agg が残る run（期間内に開始した job を含む）は履歴として保持する
         for k in [k for k, e in cache["runs"].items()
@@ -555,7 +563,8 @@ def main(argv=None):
             "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "warnings": (["1,000 件上限で欠けた可能性: %s" % t for t in truncated]
                          + ["不正な job を含むため run をスキップ: %s" % t for t in skipped]
-                         + ["再実行中または再取得できず旧 attempt を集計から除外: run %s" % t for t in stale]),
+                         + (["run 一覧は %s 時点の取得を再利用（以後に作られた run は含まない）" % resumed_at]
+                            if resumed_at else [])),
             "rows": rows,
         })
     except RateLimited as e:
