@@ -131,6 +131,11 @@ class TrailingNewlineTest(unittest.TestCase):
 
 
 class Pure(unittest.TestCase):
+    def test_relist_window_covers_official_rerun_period(self):
+        # 公式の再実行期間は初回実行から 30 日（references/data-sources.md の出典節）。UTC の日単位の
+        # 境界 1 日を足した 31 日を下回ると、settled 後の再実行（run_attempt 増）を取りこぼして分数が過少になる
+        self.assertGreaterEqual(fj.RELIST_WINDOW_DAYS, 31)
+
     def test_is_self_hosted(self):
         f = fj.is_self_hosted
         self.assertTrue(f({"labels": ["self-hosted", "linux"], "runner_group_name": "GitHub Actions"}))

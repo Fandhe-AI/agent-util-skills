@@ -55,8 +55,8 @@ RUNNER_TYPE_RULES = (
     (("windows",), "windows"),
 )
 SUMMARY_MONTHS_MAX = 12
-# 取得期間の上限（月数）。同梱 docs の同系エンドポイントの保持期間（過去 24 か月）に合わせた値。
-# usage 本体の保持期間は未確認。`--since 0001-01` のような入力で gh を大量に呼ばないための多層防御。
+# 取得期間の上限（月数）。同系エンドポイント（usage/summary 等）の公式記載「過去 24 か月のみ」に合わせた値。
+# usage 本体のページ（https://docs.github.com/en/rest/billing/usage ）に保持期間の記載は無く未確認（2026-10-24）。`--since 0001-01` のような入力で gh を大量に呼ばないための多層防御。
 MAX_MONTHS = 24
 
 

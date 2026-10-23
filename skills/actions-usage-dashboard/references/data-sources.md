@@ -1,6 +1,6 @@
-<!-- source: skills/actions-usage-dashboard/scripts（fetch_billing.py / fetch_jobs.py の実装）と .agents/skills/github-docs/references/rest-api/（billing/usage.md・overview/rate-limits.md・overview/permissions.md）。公式: https://docs.github.com/en/rest/billing/usage 、https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens 、https://docs.github.com/en/billing/reference/billing-reports 、https://docs.github.com/en/billing/concepts/product-billing/github-actions -->
-<!-- 最終確認日: 2026-10-23 -->
-<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる） / ⚠️ 未確認: Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか -->
+<!-- source: skills/actions-usage-dashboard/scripts（fetch_billing.py / fetch_jobs.py の実装）と .agents/skills/github-docs/references/rest-api/（billing/usage.md・overview/rate-limits.md・overview/permissions.md）。公式: https://docs.github.com/en/rest/billing/usage 、https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens 、https://docs.github.com/en/billing/reference/billing-reports 、https://docs.github.com/en/billing/concepts/product-billing/github-actions 、https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs 、https://docs.github.com/en/rest/orgs/orgs -->
+<!-- 最終確認日: 2026-10-24 -->
+<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる）・run の再実行期間（初回実行から 30 日）・orgs/<org> でプランを含む全詳細を見る条件（owner。classic は admin:org、GitHub App は Organization plan 権限） / ⚠️ 未確認: billing usage の保持期間（本体ページに記載なし）、orgs/<org> の fine-grained PAT 用の権限、Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか -->
 
 # データ源と換算式
 
@@ -32,7 +32,7 @@
 - billing の `day` は明細の `date` を UTC に直した日。対象月でない明細は捨てる
 - jobs の `day` は job の `started_at` の UTC 日
 - 期間の指定は billing が `--since` / `--until`（`YYYY-MM`、`--until` の上限は UTC の当月）、jobs が `--since`（`YYYY-MM-DD`）
-- billing の期間は最大 24 か月（since から until まで）。超えると gh を呼ばずに終了コード 1 で終わる。24 は同梱 docs の同系エンドポイントの保持期間に合わせた値で、usage 本体の保持期間は未確認
+- billing の期間は最大 24 か月（since から until まで）。超えると gh を呼ばずに終了コード 1 で終わる。24 は同系エンドポイント（ai_credit / premium_request / usage/summary）の公式記載「過去 24 か月のみ」に合わせた値である。usage 本体のページ（rest/billing/usage）には保持期間の記載が無く、**未確認**（確認日 2026-10-24）。billing-reports の「集計レポートは最大 1 年・詳細レポートは最大 31 日」は Web UI のレポート期間で、API の保持期間ではない
 - summarize.py の rows 入力は 8 MB 以下（build_dashboard.py と同じ。超えると終了コード 1）。グラフは 744 日（24 か月 x 31 日）を超えると描画せず警告を出す
 
 ## billing usage API
@@ -119,7 +119,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - 対象はアーカイブを除く org の全リポジトリ
 - run は `created>=since` で絞る。`--since` より前に作られた run を再実行した分は取れない（更新日での絞り込みが無い）
 - runs の検索結果は 1,000 件が上限。超えたときは期間を二分して取り直し、1 日でも超えるときは出力の `warnings` に載る
-- 2 回目以降の runs 一覧は、リポジトリごとに `created>=from` から取る。`from` は「実行日 - 45 日」「処理後も未登録の run（未完了・再実行中・不正 job）の作成日」「1,000 件上限で欠けた日」の最小値。45 日は run を再実行できる期間（公式文書では初回実行から 30 日と認識しているが、一次情報は未確認）に余裕を持たせた値で、窓内の再実行を取りこぼさない。`--since` を前回より過去にしたときと、cursor が無いリポジトリは全期間を一覧する。一覧から外れた古い run も、出力はキャッシュ済みの履歴から作るので集計に残る
+- 2 回目以降の runs 一覧は、リポジトリごとに `created>=from` から取る。`from` は「実行日 - 45 日」「処理後も未登録の run（未完了・再実行中・不正 job）の作成日」「1,000 件上限で欠けた日」の最小値。45 日は run を再実行できる期間（公式: 初回実行から 30 日まで。出典節）に余裕を持たせた値で、窓内の再実行を取りこぼさない。30 日や 31 日に絞らない理由は、公式の起点が「初回実行」で、一覧の絞り込みに使う作成日より遅れ得るため（セルフホストのキュー待ち・fork PR の承認待ちなど）。作成から開始までの遅れが「窓 - 30 日」を超えると、settled 後の再実行を取りこぼして分数が過少になる。`test_fetch_jobs.py` が 31 日未満への縮小を検出する。`--since` を前回より過去にしたときと、cursor が無いリポジトリは全期間を一覧する。一覧から外れた古い run も、出力はキャッシュ済みの履歴から作るので集計に残る
 - リポジトリ数の上限オプションは設けない。一部のリポジトリを黙って落とした rows が「org 全体」として読まれるため。短くしたいときは `--since` を使う
 - jobs は `filter=all` で全 attempt を取り、job id で重複を除く。1 run あたり 100 ページまで
 
@@ -155,18 +155,21 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 
 | 用途 | 必要な権限 |
 |---|---|
-| billing usage（`organizations/<org>/settings/billing/usage`） | 公式は org の administrator を要求する（出典: rest/billing/usage）。billing manager で呼べるかは**未確認**。fine-grained token は使わない。公式の使用状況レポートのチュートリアルは、これらの課金エンドポイントが fine-grained token に対応しないとしており、対応する権限名も公式文書で確認できていない（権限名は創作しない）。動作確認済みの経路は classic token の `admin:org` だけで、org 設定の書き込みを含む広いスコープである。公式文書で classic のより狭いスコープを確認できるまで、これ以外は推奨しない。使い終わったらトークンを失効させるか、有効期限の短いトークンを使う |
+| billing usage（`organizations/<org>/settings/billing/usage`） | 公式は org の administrator を要求する（出典: rest/billing/usage）。billing manager で呼べるかは**未確認**。公式文書の記述は食い違う。rest/billing/usage の本体ページと permissions-required ページは、fine-grained token（GitHub App の user / installation access token・fine-grained PAT）で "Administration" の Organization permissions（read）があれば呼べるとする（確認日 2026-10-24）。一方、使用状況レポートのチュートリアルは課金エンドポイントが fine-grained token に対応しないとする（この確認日にチュートリアルの URL は特定できず再確認していない）。実機で確かめていないため fine-grained token は使わない。動作確認済みの経路は classic token の `admin:org` だけで、org 設定の書き込みを含む広いスコープである。公式文書で classic のより狭いスコープを確認できるまで、これ以外は推奨しない。使い終わったらトークンを失効させるか、有効期限の短いトークンを使う |
 | jobs（runs / jobs / リポジトリ一覧） | リポジトリ一覧 `orgs/<org>/repos` は Repository permissions の "Metadata"（read）、`actions/runs` と `runs/<id>/jobs` は Repository permissions の "Actions"（read）（出典: permissions-required ページ）。`fetch_billing.py` も visibility の取得に `orgs/<org>/repos` を呼ぶため、"Metadata"（read）が要る。実機は未検証 |
+| プラン名（`orgs/<org>`。summarize.py が含有分の引き当てに呼ぶ。`--plan` を指定すれば呼ばない） | 公式: 全詳細を見るには org の owner であること。classic PAT / OAuth app token は `admin:org` scope、GitHub App は Organization plan 権限が要る（出典: rest/orgs/orgs）。`plan` が全詳細に含まれるとは明記されていない。fine-grained PAT 用の権限は permissions-required ページに `GET /orgs/{org}` が載っておらず、**未確認**（権限名は創作しない）。取得に失敗（権限不足を含む）すると警告を出し、含有分は「不明」のまま続行する（summarize.py の実装）。最小権限にしたいときは `--plan` で明示する |
 | `rate_limit` | 権限不要 |
 
 ## 出典
 
-確認日は 2026-10-23。
+確認日は 2026-10-24。
 
-- https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens : `orgs/<org>/repos` は Repository "Metadata"（read）、runs / jobs は Repository "Actions"（read）。billing usage の fine-grained 権限は載っていない（公式文書で要確認）
-- https://docs.github.com/en/rest/billing/usage : 呼び出せるのは organization の administrator。billing manager の記載は無い
-- 使用状況レポートのチュートリアル（公式）: 課金系エンドポイントは fine-grained token 非対応
-- https://docs.github.com/en/billing/reference/billing-reports : 利用はすべて UTC で記録される。詳細レポートは Web UI 専用で、REST API は集計済みの情報だけを返す
+- https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens : `orgs/<org>/repos` は Repository "Metadata"（read）、runs / jobs は Repository "Actions"（read）。`organizations/<org>/settings/billing/usage` は Organization "Administration"（read）。`GET /orgs/{org}` は載っていない
+- https://docs.github.com/en/rest/billing/usage : 呼び出せるのは organization の administrator。billing manager の記載は無い。fine-grained token は "Administration" organization（read）で対応と記載。「過去 24 か月のみ」の注記は ai_credit / premium_request / usage/summary にあり、`/settings/billing/usage` 本体には保持期間の記載が無い（未確認）
+- https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs : workflow run・失敗した job・個別の job は初回実行から 30 日まで再実行できる（同梱 docs の `actions/limits.md` に再実行 50 回の上限もある）
+- https://docs.github.com/en/rest/orgs/orgs : `GET /orgs/{org}` の全詳細は org owner のみ。OAuth app token と classic PAT は `admin:org`、GitHub App は Organization plan 権限
+- 使用状況レポートのチュートリアル（公式。URL は特定できておらず 2026-10-24 は未再確認）: 課金系エンドポイントは fine-grained token 非対応とする記述（上の rest/billing/usage と食い違う）
+- https://docs.github.com/en/billing/reference/billing-reports : 利用はすべて UTC で記録される。集計レポートは最大 1 年・詳細レポートは最大 31 日（Web UI のレポート期間で、API の保持期間ではない）。詳細レポートは Web UI 専用で、REST API は集計済みの情報だけを返す
 - https://docs.github.com/en/billing/concepts/product-billing/github-actions : artifact storage の使用量は 6〜12 時間以内に更新される（minutes の記載ではない）
 - 未確認: Actions の分数について請求画面と API の更新間隔・時差（https://docs.github.com/en/billing/how-tos/products/view-productlicense-use を含め、上記のどのページにも記載が無い）
 

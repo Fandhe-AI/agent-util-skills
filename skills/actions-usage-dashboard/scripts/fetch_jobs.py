@@ -93,10 +93,12 @@ DEFAULT_RATE_CHECK_EVERY = 25
 EXIT_RATE_LIMITED = 3
 EXIT_TIME_BUDGET = 4
 DEFAULT_PROGRESS_INTERVAL = 30
-# GitHub の run を再実行できる期間（公式文書では初回実行から 30 日と認識しているが、この環境では
-# 一次情報を確認できていない）に余裕を持たせた値。一覧の下限を「前回実行日 - この日数」より新しく
-# しないことで、窓内の再実行（run_attempt 増）を取りこぼさない。CLI 引数にはしない（小さくすると
-# 取りこぼしで分数が減るため、利用者が触る値ではない）
+# GitHub の run を再実行できる期間（公式: 初回実行から 30 日まで。
+# https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs ）に
+# 余裕を持たせた値。公式の起点は作成日ではなく初回実行で、一覧の絞り込み（created>=）より遅れ得る
+# （セルフホストのキュー待ち・fork PR の承認待ち）。settled 後の再実行を取りこぼさないよう 30 や 31 には
+# 絞らない。一覧の下限を「前回実行日 - この日数」より新しくしないことで、窓内の再実行（run_attempt 増）を
+# 取りこぼさない。CLI 引数にはしない（小さくすると取りこぼしで分数が減るため、利用者が触る値ではない）
 RELIST_WINDOW_DAYS = 45
 ZERO_COLS = ("quota_minutes", "billable_minutes", "gross_usd", "discount_usd", "net_usd")
 
