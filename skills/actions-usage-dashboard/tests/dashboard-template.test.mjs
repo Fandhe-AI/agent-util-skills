@@ -159,6 +159,6 @@ test('T10 サイズと契約', () => {
   assert.ok(Buffer.byteLength(HTML) < 256 * 1024, '256 KB 未満')
   const ids = new Set()
   for (const m of HTML.matchAll(/data-source="([^"]+)"/g)) m[1].split(/\s+/).forEach((i) => ids.add(i))
-  for (const id of ids) assert.ok(['billing', 'jobs', 'facts', 'totals', 'by_axis'].includes(id), id)
+  for (const id of ids) assert.ok(['billing', 'jobs', 'warnings', 'facts', 'totals', 'by_axis'].includes(id), id)
   assert.equal((HTML.match(/dash\.calc\(/g) || []).length, 3)
 })

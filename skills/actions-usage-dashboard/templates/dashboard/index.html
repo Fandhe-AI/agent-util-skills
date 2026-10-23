@@ -63,6 +63,7 @@
     <p class="aud-note">日付はすべて UTC。<span id="aud-partial">最新日は集計途中の可能性がある。</span></p>
     <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
     <p class="aud-note" id="aud-invalid" hidden></p>
+    <ul class="aud-note" id="aud-warnings" data-source="warnings" aria-label="取得元の警告" hidden></ul>
     <p class="aud-note" data-source="billing jobs">データ源: billing usage API（GitHub ホスト）と Actions jobs API（セルフホスト）。</p>
   </header>
 
@@ -509,6 +510,22 @@ function paintTotals(rows, sel, period, jobsOk) {
   $('#aud-remaining').textContent = remaining;
 }
 
+// 取得元（fetch_*.py）の warnings（1,000 件上限による欠損など）をそのまま見せる。
+// 取得漏れがあるのに通常の合計だけが出ないよう、warnings dataset が届いたときに表示する。
+function paintWarnings() {
+  const el = $('#aud-warnings');
+  const w = dash.data('warnings');
+  const items = w && w.status === 'ok' && Array.isArray(w.data)
+    ? w.data.filter((x) => typeof x === 'string' && x !== '').slice(0, 20)
+    : [];
+  el.replaceChildren(...items.map((t) => {
+    const li = document.createElement('li');
+    li.textContent = '注意: ' + t.slice(0, 300);
+    return li;
+  }));
+  el.hidden = items.length === 0;
+}
+
 function drawMessage(host, text) {
   d3.select(host).selectAll('*').remove();
   d3.select(host).append('div').attr('class', 'aud-empty').text(text);
@@ -652,6 +669,7 @@ function render() {
   const inv = $('#aud-invalid');
   inv.hidden = invalid === 0;
   inv.textContent = '不正な値を含む行があり、0 として扱った（' + invalid + ' 件）。';
+  paintWarnings();
   const latest = facts.reduce((m, r) => (r.day > m && /^\d{4}-/.test(r.day) ? r.day : m), '');
   $('#aud-partial').textContent = latest ? '最新日（' + latest + '）は集計途中の可能性がある。' : '最新日は集計途中の可能性がある。';
   const chart = document.getElementById('aud-chart');
