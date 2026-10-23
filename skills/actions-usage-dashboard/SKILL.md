@@ -64,6 +64,21 @@ python3 <skill-root>/scripts/summarize.py --rows <billing.json> [--rows <jobs.js
 - 区分不明（unknown）の利用がある範囲は、含有枠の消費を下限として「以上」と表示し、残量は不明にする
 - 集計関数の回帰テストは `tests/dashboard-template.test.mjs`
 
+Artifact の store へ書く文書と batch.json は `scripts/build_dashboard.py` が一括で作る（雛形も rows も読まずに済む）。
+
+```bash
+python3 <skill-root>/scripts/build_dashboard.py --org <org> --rows <billing.json> [--rows <jobs.json>] --out-dir <dir>
+# 返った /_blob/ の url を --rows と同じ順で渡して再実行（batch.json が完成）
+python3 <skill-root>/scripts/build_dashboard.py ... --asset-url <url1> [--asset-url <url2>]
+# 更新: dataset の source と updated だけを書き換える
+python3 <skill-root>/scripts/build_dashboard.py ... --update --asset-url <url> --if-version billing=<N> [--if-version jobs=<N>]
+```
+
+- 出力は `--out-dir` 直下の `dash-meta.json`・`dash-params.json`・`dataset-<id>.json`・`index.json`・`batch.json`。`batch.json` を ArtifactData batch の `writes` にそのまま渡す
+- 1 段目（`--asset-url` なし）はアップロードするファイルの一覧だけを出す。`--asset-url` は `/_blob/<id>` 形式のみ受け付ける
+- 各文書は 256 KB 未満、rows は 8 MB 以下。超えたら何も書かず非 0 で終了する
+- 添付した rows ファイルは、ダッシュボードを開ける全員が読める
+
 ## フロー
 
 ### Step 1: 引数の確認
@@ -89,6 +104,7 @@ org 名と期間を確認する。`--out` の親ディレクトリは存在し�
 python3 -I -B <skill-root>/tests/test_fetch_billing.py
 python3 -I -B <skill-root>/tests/test_fetch_jobs.py
 python3 -I -B <skill-root>/tests/test_summarize.py
+python3 -I -B <skill-root>/tests/test_build_dashboard.py
 ```
 
 全件パス・失敗 0 件であることを確認する。
