@@ -108,6 +108,16 @@ def base_cfg():
     }
 
 
+class TrailingNewlineTest(unittest.TestCase):
+    """Python の `$` は末尾の改行の手前にも一致する。検証用の正規表現は `\\Z` で終端する。"""
+
+    def test_org_repo_date_reject_trailing_newline(self):
+        for name, ok in (("ORG_RE", "acme-synth"), ("REPO_RE", "repo.name_1"), ("DATE_RE", "2026-09-01")):
+            rx = getattr(fj, name)
+            self.assertIsNotNone(rx.match(ok), name)
+            self.assertIsNone(rx.match(ok + "\n"), name)
+
+
 class Pure(unittest.TestCase):
     def test_is_self_hosted(self):
         f = fj.is_self_hosted

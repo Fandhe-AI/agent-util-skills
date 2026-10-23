@@ -313,6 +313,16 @@ class DayValidationTests(Base):
                 sm.load_rows([self.write("d.json", doc("billing", [row(day, "r", "paid", 1.0)]))])
 
 
+class TrailingNewlineTests(Base):
+    """Python の `$` は末尾の改行の手前にも一致する。検証用の正規表現は `\\Z` で終端する。"""
+
+    def test_org_month_day_reject_trailing_newline(self):
+        for name, ok in (("ORG_RE", "acme-synth"), ("MONTH_RE", "2026-09"), ("DAY_RE", "2026-09-01")):
+            rx = getattr(sm, name)
+            self.assertIsNotNone(rx.match(ok), name)
+            self.assertIsNone(rx.match(ok + "\n"), name)
+
+
 class CliTests(Base):
     def test_text_within_20_lines_worst_case(self):
         rows = []

@@ -255,6 +255,16 @@ class FloatEdgeTest(unittest.TestCase):
             self.assertAlmostEqual(rows[0]["minutes"], qty)
 
 
+class TrailingNewlineTest(unittest.TestCase):
+    """Python の `$` は末尾の改行の手前にも一致する。検証用の正規表現は `\\Z` で終端する。"""
+
+    def test_org_and_month_reject_trailing_newline(self):
+        self.assertIsNotNone(fb.ORG_RE.match("acme-synth"))
+        self.assertIsNone(fb.ORG_RE.match("acme-synth\n"))
+        self.assertIsNotNone(fb.MONTH_RE.match("2026-09"))
+        self.assertIsNone(fb.MONTH_RE.match("2026-09\n"))
+
+
 class CliStubTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

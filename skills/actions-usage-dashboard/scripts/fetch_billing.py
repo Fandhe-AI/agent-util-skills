@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 SCHEMA_VERSION = 1
 GH_TIMEOUT = 120
 ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
-MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])\Z")
 LINUX_PRICE_SKU = "actions linux"
 UNATTRIBUTED = "(unattributed)"
 # 区分の並び順（行の決定的ソートにも使う）

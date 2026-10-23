@@ -15,9 +15,11 @@
 プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
   gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
 
-helper の複製: FetchError / gh_api / ORG_RE / MONTH_RE / _num は fetch_billing.py と同じ実装を
-  複製している。python3 -I 起動ではスクリプトの隣のモジュールを import できないため。
-  直すときは fetch_billing.py / fetch_jobs.py と揃える。
+helper の複製: FetchError / gh_api / ORG_RE / MONTH_RE は fetch_billing.py と同じ実装を複製している。
+  _num は判定を同じにし、例外メッセージだけ入力の違いに合わせて変えている（API ではなく rows）。
+  python3 -I 起動ではスクリプトの隣のモジュールを import できないため。
+  直すときは fetch_billing.py / fetch_jobs.py と揃える。DAY_RE は本スクリプト固有。
+  検証用の正規表現の終端は `\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
 """
@@ -32,9 +34,9 @@ from datetime import date, datetime, timezone
 
 SCHEMA_VERSION = 1
 GH_TIMEOUT = 120
-ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
-MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
-DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
+MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])\Z")
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 # プランごとの月間含有分（Linux 換算の分）。別名は同じ定数ブロックで持つ。
 PLAN_INCLUDED_MINUTES = {"free": 2000, "team": 3000, "enterprise": 50000}
 PLAN_ALIASES = {"business": "enterprise"}
