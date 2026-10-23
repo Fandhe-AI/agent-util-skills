@@ -5,7 +5,7 @@
 `create-html-report` / `setup-firebase-hosting` の判定は移設元
 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) の
 `docs/sandbox-tls.md` に記載された値を引き継ぐ。`create-pitch-deck` / `create-design-doc` /
-`setup-github-pages` は本リポジトリで新規に作成したスキルのため、継承元を持たず本ファイルが判定の正典となる。
+`setup-github-pages` / `actions-usage-dashboard` は本リポジトリで新規に作成したスキルのため、継承元を持たず本ファイルが判定の正典となる。
 
 ## 判定一覧
 
@@ -55,6 +55,16 @@
 - ネットワークを要するのは初回セットアップの `pip install playwright` と `playwright install chromium`（ブラウザ本体ダウンロード）のみ。導入済みであれば2回目以降はネットワーク不要
 - 既定の出力先は `design/`（ワークスペース内）。`--output` / `--brief` にワークスペース外を指すパスを指定した場合はワークスペース外へも書き込み得る
 - SKILL.md 側の詳細は [../skills/create-design-doc/SKILL.md](../skills/create-design-doc/SKILL.md) の「sandbox 環境での実行」節を参照
+
+### actions-usage-dashboard
+
+- `scripts/fetch_billing.py` は `gh api`（billing usage API と org のリポジトリ一覧）、`scripts/fetch_jobs.py` は `gh api`（`orgs/{org}/repos`・`repos/{o}/{r}/actions/runs`・`.../runs/{id}/jobs`・`rate_limit`）で github.com へのアクセスを必須とする。書き込み先は `--out` / `--cache` の指定先
+- `scripts/summarize.py` は `--plan` を省くと `gh api orgs/<org>` を呼ぶためネットワークが必要（`--plan` 指定時は不要）。ファイルは書かない
+- `scripts/build_dashboard.py` は Python 標準ライブラリのみで、ネットワークを使わない。書き込み先は `--out-dir` だけ
+- Artifact / ArtifactData はツール呼び出しであり、Bash の sandbox の対象外
+- ネットワークを使うコマンドだけをコマンド単位で sandbox 無効にして実行する。遮断を解除できない環境では実行できない
+- 作業用ディレクトリ（rows・キャッシュ・`--out-dir`）は `mktemp -d` など作業ツリーの外に置く
+- SKILL.md 側の詳細は [../skills/actions-usage-dashboard/SKILL.md](../skills/actions-usage-dashboard/SKILL.md) の「注意事項」節を参照
 
 ### setup-github-pages
 
