@@ -78,7 +78,7 @@ fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub
 
 org の GitHub Actions 利用分数を billing usage API から取得し、日 x リポジトリ x SKU x 料金区分（paid / included / public_free）の行データ（JSON）へ正規化する。「Actions の使用量を集計して」「課金分数を日次で出して」「billing usage を取得して」などで使用する。
 
-- GitHub ホストランナーのみが対象（セルフホストは対象外）。`gh api` 経由のみでトークンは扱わず、Python 標準ライブラリだけで動く
+- `fetch_billing.py` は GitHub ホストランナーが対象。セルフホストは `fetch_jobs.py`（Actions jobs API、増分キャッシュ付き）で別に集計する。`gh api` 経由のみでトークンは扱わず、Python 標準ライブラリだけで動く
 - 有料分は公開範囲ではなく明細ごとの `netAmount / pricePerUnit` から判定し、`quota_minutes` は含有枠を消費した分だけを Linux 単価で換算する
 - 月の取得に失敗した場合は部分ファイルを書かず非 0 で終了する
 - 詳細は [skills/actions-usage-dashboard/SKILL.md](skills/actions-usage-dashboard/SKILL.md) を参照

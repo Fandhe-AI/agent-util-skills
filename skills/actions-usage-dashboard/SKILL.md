@@ -4,13 +4,14 @@ description: >
   org の GitHub Actions 利用分数ダッシュボード用データ取得スキル。「Actions の使用量を集計して」
   「課金分数を日次で出して」「billing usage を取得して」で使用。billing usage API から
   GitHub ホストランナーの日 x リポジトリ x SKU x 料金区分（paid / included / public_free / unknown）の行を
-  JSON へ書く。fetch_billing.py を提供。ダッシュボード HTML 化は create-html-report も参照。
+  JSON へ書く。「セルフホストの実行時間を集計して」で jobs API から日 x リポジトリ x ランナーグループの行も作る。
+  fetch_billing.py と fetch_jobs.py を提供。ダッシュボード HTML 化は create-html-report も参照。
 user-invocable: true
 ---
 
 # actions-usage-dashboard
 
-org の Actions 利用分数を billing usage API から取得し、日次の行データ（JSON）へ正規化する。現状は最初のデータ源 `scripts/fetch_billing.py` のみを提供する。
+org の Actions 利用分数を billing usage API から取得し、日次の行データ（JSON）へ正規化する。GitHub ホスト分は `scripts/fetch_billing.py`、セルフホスト分は `scripts/fetch_jobs.py` が担当する。
 
 ## 使い方
 
@@ -23,6 +24,18 @@ python3 <skill-root>/scripts/fetch_billing.py \
 
 - `--until` の既定は UTC の当月。`--since <= --until <= 当月` を満たすこと
 - 前提: `gh` が認証済みで、org の billing 閲覧権限があること
+
+セルフホストランナー分（billing usage API には含まれない）は jobs API から作る。
+
+```bash
+python3 <skill-root>/scripts/fetch_jobs.py \
+  --org <org> --since YYYY-MM-DD --out <出力 JSON> --cache <キャッシュ dir>
+```
+
+- 対象は org の全リポジトリ（アーカイブ除く）。`labels` に `self-hosted` を含む、または `runner_group_name` が `GitHub Actions` 以外の完了済み job だけを `charge_class: self_hosted` の行にする（GitHub ホストは billing が正）
+- `--cache` に増分キャッシュを置く。2 回目以降は新しい run の jobs だけを取る
+- レート制限の残量が `--min-remaining`（既定 200）を下回ると、キャッシュを保存して終了コード 3 で止まる。`--out` は書かない。reset 後に同じコマンドで再実行すると続きから取る
+- 注意: GitHub ホストの larger runner を独自のランナーグループに入れている org では、セルフホストとして数えて billing と二重計上し得る
 
 ## フロー
 
@@ -41,12 +54,13 @@ org 名と期間を確認する。`--out` の親ディレクトリは存在し�
 - 有料分は公開範囲ではなく元明細ごとの `netAmount / pricePerUnit` から求める（単価の異なる明細を平均して割らない）
 - `quota_minutes` は Linux 単価（前月引き継ぎ）で換算した含有枠消費分。paid 行は 0、included 行は含有枠に対応する金額分のみを換算する
 - 非有料分は既定で `unknown`（`quota_minutes` は 0）。API が返すのは現在の公開範囲だけで、公開範囲を途中で変えたリポジトリの過去分を誤分類しないため。期間中に公開範囲が変わっていないと保証できる場合だけ `--assume-current-visibility` を付けると、現在値で `public` は `public_free`、`private` / `internal` は `included` に確定する（現在の公開範囲を引けない明細は指定時も `unknown` のまま）
-- セルフホストランナーは対象外（jobs 側で扱う）
+- `fetch_billing.py` はセルフホストランナーを対象外とする（`fetch_jobs.py` で扱う）
 
 ## 検証
 
 ```bash
-python3 -m pytest -q <skill-root>/tests
+python3 -I -B <skill-root>/tests/test_fetch_billing.py
+python3 -I -B <skill-root>/tests/test_fetch_jobs.py
 ```
 
 全件パス・失敗 0 件であることを確認する。
