@@ -154,7 +154,7 @@ class Pure(unittest.TestCase):
         self.assertEqual(rows[0]["net_usd"], 0.0)
 
     def test_validation(self):
-        with self.assertRaises(fj.FetchError):
+        with self.assertRaises(fj.InvalidJob):
             fj.aggregate_jobs([{"id": "x", "labels": []}])
         with self.assertRaises(fj.FetchError):
             fj.aggregate_jobs([{"id": 1, "labels": "self-hosted"}])
@@ -250,6 +250,26 @@ class Cli(unittest.TestCase):
         self.write_cfg()
         self.assertEqual(self.run_cli().returncode, 0)
         self.assertEqual(sum(x["minutes"] for x in self.rows()), 20 + 90 + 7 + 4)
+
+    def test_rerun_pending_excluded_and_invalid_job_skipped(self):
+        self.assertEqual(self.run_cli().returncode, 0)
+        before = sum(x["minutes"] for x in self.rows())
+        # run 1 が再実行中（attempt 増・未完了）: 旧 attempt の分を集計から外し警告する
+        self.cfg["runs"]["pub-site"][0]["run_attempt"] = 2
+        self.cfg["runs"]["pub-site"][0]["status"] = "in_progress"
+        self.write_cfg()
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertEqual(sum(x["minutes"] for x in self.rows()), before - 10)
+        with open(self.out) as f:
+            self.assertTrue(any("旧 attempt" in w for w in json.load(f)["warnings"]))
+        # 不正な job を含む run はスキップし、全体は成功する
+        self.cfg["runs"]["pub-site"][0]["status"] = "completed"
+        self.cfg["jobs"]["1"] = [{"id": "bad", "labels": []}]
+        self.write_cfg()
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.out) as f:
+            self.assertTrue(any("スキップ" in w for w in json.load(f)["warnings"]))
 
     def test_rate_limit_resume_matches_uninterrupted(self):
         # 比較用: 中断なし

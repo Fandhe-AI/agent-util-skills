@@ -69,6 +69,10 @@ class FetchError(Exception):
     """取得・検証の失敗。main が日本語 1 行にして終了コード 1 で終える。"""
 
 
+class InvalidJob(FetchError):
+    """job の要素が不正。main は該当 run だけ警告してスキップする（全体は止めない）。"""
+
+
 class RateLimited(Exception):
     """レート制限の残量が閾値を下回った。main が保存して終了コード 3 で終える。"""
 
@@ -111,13 +115,13 @@ def job_window(job):
 
 def validate_job(job):
     if not isinstance(job, dict):
-        raise FetchError("job の要素が不正")
+        raise InvalidJob("job の要素が不正")
     jid = job.get("id")
     if isinstance(jid, bool) or not isinstance(jid, int):
-        raise FetchError("job の id が整数ではない")
+        raise InvalidJob("job の id が整数ではない")
     labels = job.get("labels")
     if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
-        raise FetchError("job の labels が文字列の配列ではない")
+        raise InvalidJob("job の labels が文字列の配列ではない")
     return job
 
 
@@ -253,6 +257,7 @@ class GhClient:
     def _runs_pages(self, repo, org, created):
         runs, total, page = [], None, 1
         while True:
+            self.check_rate()  # 二分探索で呼び出しが増えても残量を確認する（runs 一覧は途中中断してもキャッシュを壊さない）
             text = self._call("runs", ["-X", "GET", "repos/%s/%s/actions/runs" % (org, repo),
                                        "-f", "created=%s" % created, "-f", "per_page=%d" % PER_PAGE,
                                        "-f", "page=%d" % page])
@@ -399,7 +404,7 @@ def main(argv=None):
     today = now.date()
     stats = {"hosted": 0, "unfinished": 0, "listed": 0, "fetched": 0, "cached": 0, "pending": 0,
              "archived": 0, "badname": 0}
-    truncated, cache, cache_path, client = [], None, None, None
+    truncated, skipped, stale, cache, cache_path, client = [], [], [], None, None, None
     until_s = today.isoformat()
 
     def lines(rows=None, note=None):
@@ -416,6 +421,10 @@ def main(argv=None):
                 len(rows), sum(r["minutes"] for r in rows), stats["hosted"], stats["unfinished"]))
         if truncated:
             out.append("警告: 1,000 件上限で欠けた可能性のある区間 %d" % len(truncated))
+        if skipped:
+            out.append("警告: 不正な job でスキップした run %d" % len(skipped))
+        if stale:
+            out.append("警告: 再実行中などで旧 attempt を集計から除外した run %d" % len(stale))
         if note:
             out.append(note)
         return out
@@ -476,22 +485,39 @@ def main(argv=None):
                 continue
             if run.get("status") != "completed":
                 stats["pending"] += 1
+                if ent is not None:
+                    # 再実行中: 旧 attempt の分を集計に残すと古い値になるため、完了まで集計から外す
+                    stale.append(str(rid))
                 continue
             client.check_rate()
-            agg, hosted, unfinished = aggregate_jobs(client.list_jobs(repo, a.org, rid))
+            jobs = client.list_jobs(repo, a.org, rid)
+            try:
+                agg, hosted, unfinished = aggregate_jobs(jobs)
+            except InvalidJob as e:
+                skipped.append("%s/%s run %d: %s" % (a.org, repo, rid, e))
+                if ent is not None:
+                    stale.append(str(rid))
+                continue
             created = run.get("created_at") if isinstance(run.get("created_at"), str) else ""
             cache["runs"][str(rid)] = {"repo": repo, "attempt": att, "created_at": created, "agg": agg}
             stats["fetched"] += 1
             stats["hosted"] += hosted
             stats["unfinished"] += unfinished
-        entries = [cache["runs"][str(rid)] for rid, _, _, _ in listed if str(rid) in cache["runs"]]
+        entries = [cache["runs"][str(rid)] for rid, _, _, _ in listed
+                   if str(rid) in cache["runs"] and str(rid) not in stale]
+        # --since より前に作られた run はこの期間では再参照されないため、キャッシュの無制限な増加を防ぐ
+        for k in [k for k, e in cache["runs"].items() if e["created_at"][:10] and e["created_at"][:10] < a.since]:
+            del cache["runs"][k]
         rows = build_rows(entries, visibility, a.since)
         atomic_write_json(cache_path, cache)
         atomic_write_json(a.out, {
             "schema_version": SCHEMA_VERSION, "source": "jobs", "org": a.org,
             "since": a.since, "until": until_s,
             "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "warnings": ["1,000 件上限で欠けた可能性: %s" % t for t in truncated], "rows": rows,
+            "warnings": (["1,000 件上限で欠けた可能性: %s" % t for t in truncated]
+                         + ["不正な job を含むため run をスキップ: %s" % t for t in skipped]
+                         + ["再実行中または再取得できず旧 attempt を集計から除外: run %s" % t for t in stale]),
+            "rows": rows,
         })
     except RateLimited as e:
         _save_quietly(cache_path, cache)
