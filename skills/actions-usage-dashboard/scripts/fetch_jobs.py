@@ -43,7 +43,8 @@
 
 helper の複製: gh_api / atomic_write_json / ORG_RE / FetchError は fetch_billing.py と
   同じ実装を複製している（python3 -I 起動ではスクリプト隣接の import ができず、各スクリプトを
-  自己完結にするため）。直すときは両方を直す。
+  自己完結にするため）。直すときは両方を直す。REPO_RE / DATE_RE は本スクリプト固有。
+  検証用の正規表現の終端は `\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api 経由のみ（読み取り専用）。トークンは扱わない。標準ライブラリだけで動く。
 """
@@ -59,9 +60,9 @@ from datetime import date, datetime, timedelta, timezone
 
 SCHEMA_VERSION = 1
 GH_TIMEOUT = 120
-ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
-REPO_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
+REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
 RUNS_SEARCH_CAP = 1000

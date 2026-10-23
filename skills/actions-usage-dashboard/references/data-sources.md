@@ -1,6 +1,6 @@
 <!-- source: skills/actions-usage-dashboard/scripts（fetch_billing.py / fetch_jobs.py の実装）と .agents/skills/github-docs/references/rest-api/（billing/usage.md・overview/rate-limits.md・overview/permissions.md）。公式: https://docs.github.com/en/rest/billing/usage -->
 <!-- 最終確認日: 2026-10-23 -->
-<!-- 取得状況: ✅ 実装（main 時点の 2 スクリプト）と同梱の github-docs 参照で確認済み / ⚠️ 未検証: fine-grained token の billing 用権限名、請求画面と API の更新時刻の公式仕様、classic token の admin:org で取得できる点は Issue #118 の報告どおりで本作業では再実測していない -->
+<!-- 取得状況: ✅ 実装（main 時点の 2 スクリプト）と同梱の github-docs 参照で確認済み / ✅ 動作確認済みの経路は classic token の admin:org のみ（org 設定の書き込みを含む広いスコープ。使い終えたら失効させる） / ⚠️ 未検証: fine-grained token の billing 用権限名（確認は #143）、請求画面と API の更新時刻の公式仕様 -->
 
 # データ源と換算式
 
@@ -140,11 +140,11 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 
 ## 必要な権限
 
-トークンはスクリプトが扱わず、`gh` の認証だけに頼る。付与は読み取りの最小限にする。
+トークンはスクリプトが扱わず、`gh` の認証だけに頼る。付与は billing 閲覧に必要な範囲に限る。現状は広いスコープでしか確認できていない（下表）。
 
 | 用途 | 必要な権限 |
 |---|---|
-| billing usage | org の管理者または billing manager（同梱の `billing/usage.md` は organization admin を要求）。classic token の `admin:org` で取得できると Issue #118 に報告されている。fine-grained token の権限名は未検証 |
+| billing usage | org の管理者または billing manager（同梱の `billing/usage.md` は organization admin を要求）。動作確認済みの経路は classic token の `admin:org` だけで、org 設定の書き込みを含む広いスコープである。使い終わったらトークンを失効させるか、有効期限の短いトークンを使う。fine-grained token の権限名は未確認（確認は #143）で、ここでは断定しない |
 | jobs（runs / jobs / リポジトリ一覧） | 対象リポジトリの Actions の読み取り。fine-grained token ではリポジトリ権限の `actions`（読み取り）、`metadata` は選択時に自動付与される（同梱の `overview/permissions.md`）。リポジトリ一覧のエンドポイント個別の要件は未検証 |
 | `rate_limit` | 権限不要 |
 
