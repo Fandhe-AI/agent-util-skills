@@ -32,12 +32,13 @@ python3 <skill-root>/scripts/fetch_jobs.py \
   --org <org> --since YYYY-MM-DD --out <出力 JSON> --cache <キャッシュ dir>
 ```
 
-- 対象は org の全リポジトリ（アーカイブ除く）。`labels` に `self-hosted` を含む、または `runner_group_name` が `GitHub Actions` 以外の完了済み job だけを `charge_class: self_hosted` の行にする（GitHub ホストは billing が正）
+- 対象は org の全リポジトリ（アーカイブ除く）。`labels` に `self-hosted` を含む完了済み job だけを `charge_class: self_hosted` の行にする（GitHub ホストは billing が正）
 - `--cache` に増分キャッシュを置く。2 回目以降は新しい run の jobs だけを取る
 - レート制限の残量が `--min-remaining`（既定 200）を下回ると、キャッシュを保存して終了コード 3 で止まる。`--out` は書かない。reset 後に同じコマンドで再実行すると続きから取る
 - 注意: run は作成日（`created`）で絞るため、`--since` より前に作られた run を `--since` 以降に再実行した分は取れない（API に更新日での絞り込みがない）。必要なら `--since` を遡らせる
 - 再実行中（status が completed でない）の run は、旧 attempt の分を集計から外して `warnings` に出す。不正な job を含む run は警告してスキップし、全体は止めない。`--since` より前に作られた run のキャッシュは実行時に削除する
-- 注意: GitHub ホストの larger runner を独自のランナーグループに入れている org では、セルフホストとして数えて billing と二重計上し得る
+- 独自グループに置いた GitHub ホストの larger runner は `self-hosted` ラベルを持たないためセルフホストに数えない（billing との二重計上を避ける）
+- run 一覧はリポジトリ単位でキャッシュに保存し、レート制限で中断しても同じ UTC 日の同じ `--since` なら続きから取る。削除や 1,000 件上限で一覧から消えた run も、キャッシュ済みなら集計に残す
 
 ## フロー
 

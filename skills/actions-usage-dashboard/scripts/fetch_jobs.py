@@ -28,9 +28,15 @@
 終了コード: 0 成功 / 1 失敗 / 3 レート制限の残量不足で中断（キャッシュ保存済み。
   同じコマンドで再実行すると続きから取る。中断時と失敗時は --out を書かない）。
 
-注意: GitHub ホストの larger runner が独自のランナーグループに入っている場合、判定式
-  （labels に self-hosted、または runner_group_name が GitHub Actions 以外）では
-  セルフホスト扱いになり billing と二重計上し得る。判定は is_self_hosted に集約している。
+判定: labels に self-hosted を持つ job だけをセルフホストとする（独自ランナーグループに置いた
+  GitHub ホストの larger runner は self-hosted ラベルを持たないため含めず、billing との二重計上を避ける）。
+  判定は is_self_hosted に集約している。runner_group は集計の見出しにだけ使う。
+
+一覧の再開: cache の "listing"（{since, day, repos: {repo: [run...]}, truncated}）に、取り終えた
+  リポジトリ単位の run 一覧を保存する。同じ --since・同じ UTC 日の再実行では保存済みの一覧を使い
+  続きのリポジトリから取る。全処理が成功したら listing を捨てる。
+出力対象: 今回の一覧に無い run（GitHub 側で削除・1,000 件上限で欠落）でも、対象リポジトリの
+  キャッシュ済み履歴は集計に残す。除外するのは再実行中などで無効化した run だけ。
 
 helper の複製: gh_api / atomic_write_json / ORG_RE / FetchError は fetch_billing.py と
   同じ実装を複製している（python3 -I 起動ではスクリプト隣接の import ができず、各スクリプトを
@@ -53,7 +59,6 @@ GH_TIMEOUT = 120
 ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-HOSTED_GROUP = "GitHub Actions"
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
 RUNS_SEARCH_CAP = 1000
@@ -84,11 +89,10 @@ class RateLimited(Exception):
 # ---- 純粋関数（gh に依存しない） ----
 
 def is_self_hosted(job):
+    # self-hosted ラベルだけで判定する。GitHub ホストの larger runner は独自ランナーグループに
+    # 置けるが self-hosted ラベルは持たないため、グループ名からの推定は二重計上の原因になる
     labels = job.get("labels")
-    if any(isinstance(x, str) and x.lower() == SELF_HOSTED_LABEL for x in labels):
-        return True
-    g = job.get("runner_group_name")
-    return isinstance(g, str) and g.strip() != "" and g != HOSTED_GROUP
+    return any(isinstance(x, str) and x.lower() == SELF_HOSTED_LABEL for x in labels)
 
 
 def _parse_ts(v):
@@ -338,6 +342,23 @@ def load_cache(path, org):
     if not isinstance(c, dict) or c.get("schema_version") != SCHEMA_VERSION or c.get("org") != org \
             or not isinstance(c.get("runs"), dict):
         raise bad
+    ls = c.get("listing")
+    if ls is not None:
+        if not isinstance(ls, dict) or not isinstance(ls.get("since"), str) or not isinstance(ls.get("day"), str) \
+                or not isinstance(ls.get("repos"), dict) or not isinstance(ls.get("truncated"), list) \
+                or not all(isinstance(t, str) for t in ls["truncated"]):
+            raise bad
+        for repo, items in ls["repos"].items():
+            if not REPO_RE.match(repo) or not isinstance(items, list):
+                raise bad
+            for it in items:
+                if not isinstance(it, dict) or not isinstance(it.get("status"), str) \
+                        or not isinstance(it.get("created_at"), str):
+                    raise bad
+                try:
+                    _run_key(it)
+                except FetchError:
+                    raise bad
     for rid, e in c["runs"].items():
         if not rid.isdigit() or not isinstance(e, dict) or not isinstance(e.get("repo"), str) \
                 or not REPO_RE.match(e["repo"]) or not _pos_int(e.get("attempt")) \
@@ -471,11 +492,23 @@ def main(argv=None):
             visibility[name] = vis.lower()
             targets.append(name)
         stats["targets"] = len(targets)
+        ls = cache.get("listing")
+        if not ls or ls["since"] != a.since or ls["day"] != until_s:
+            ls = {"since": a.since, "day": until_s, "repos": {}, "truncated": []}
+            cache["listing"] = ls
         for repo in targets:
-            client.check_rate()
-            for run in client.list_runs(repo, a.org, since, today, truncated):
+            if repo not in ls["repos"]:
+                client.check_rate()
+                tr = []
+                items = [{"id": r["id"], "run_attempt": _run_key(r)[1], "status": r.get("status") or "",
+                          "created_at": r.get("created_at") if isinstance(r.get("created_at"), str) else ""}
+                         for r in client.list_runs(repo, a.org, since, today, tr)]
+                ls["repos"][repo] = items
+                ls["truncated"].extend(tr)
+            for run in ls["repos"][repo]:
                 rid, att = _run_key(run)
                 listed.append((rid, att, repo, run))
+        truncated.extend(ls["truncated"])
         stats["listed"] = len(listed)
         listed.sort(key=lambda t: t[0])
         for rid, att, repo, run in listed:
@@ -503,12 +536,13 @@ def main(argv=None):
             stats["fetched"] += 1
             stats["hosted"] += hosted
             stats["unfinished"] += unfinished
-        entries = [cache["runs"][str(rid)] for rid, _, _, _ in listed
-                   if str(rid) in cache["runs"] and str(rid) not in stale]
+        # 一覧に無い run（削除・1,000 件上限の欠落）も、対象リポジトリのキャッシュ済み履歴として残す
+        entries = [e for k, e in cache["runs"].items() if e["repo"] in visibility and k not in stale]
         # --since より前に作られた run はこの期間では再参照されないため、キャッシュの無制限な増加を防ぐ
         for k in [k for k, e in cache["runs"].items() if e["created_at"][:10] and e["created_at"][:10] < a.since]:
             del cache["runs"][k]
         rows = build_rows(entries, visibility, a.since)
+        cache.pop("listing", None)
         atomic_write_json(cache_path, cache)
         atomic_write_json(a.out, {
             "schema_version": SCHEMA_VERSION, "source": "jobs", "org": a.org,

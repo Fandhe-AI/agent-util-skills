@@ -113,7 +113,8 @@ class Pure(unittest.TestCase):
         f = fj.is_self_hosted
         self.assertTrue(f({"labels": ["self-hosted", "linux"], "runner_group_name": "GitHub Actions"}))
         self.assertTrue(f({"labels": ["Self-Hosted"], "runner_group_name": None}))
-        self.assertTrue(f({"labels": ["a"], "runner_group_name": "build-farm"}))
+        # 独自グループの GitHub ホスト larger runner は self-hosted ラベルを持たず、二重計上しない
+        self.assertFalse(f({"labels": ["a"], "runner_group_name": "build-farm"}))
         self.assertFalse(f({"labels": ["ubuntu-latest"], "runner_group_name": "GitHub Actions"}))
         self.assertFalse(f({"labels": ["ubuntu-latest"], "runner_group_name": None}))
         self.assertFalse(f({"labels": ["ubuntu-latest"], "runner_group_name": ""}))
@@ -293,6 +294,33 @@ class Cli(unittest.TestCase):
         for rid in first:
             self.assertFalse(any("/runs/%s/jobs" % rid in c for c in self.calls()))
         self.assertEqual(self.rows(), self.rows(ref_out))
+
+    def test_deleted_run_stays_in_output(self):
+        self.assertEqual(self.run_cli().returncode, 0)
+        before = sum(x["minutes"] for x in self.rows())
+        self.cfg["runs"]["pub-site"] = []  # GitHub 側で run が一覧から消えた
+        self.write_cfg()
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertEqual(sum(x["minutes"] for x in self.rows()), before)
+
+    def test_listing_resumes_after_rate_limit(self):
+        self.cfg["low_after"] = 3  # repos 1 + runs 1 回の後で残量不足にする
+        self.write_cfg()
+        r = self.run_cli(["--rate-check-every", "1"])
+        self.assertEqual(r.returncode, 3, r.stderr + r.stdout)
+        with open(os.path.join(self.cache, "jobs-cache-%s.json" % ORG)) as f:
+            saved = json.load(f)
+        self.assertTrue(saved["listing"]["repos"])
+        done = list(saved["listing"]["repos"])
+        self.reset_calls()
+        self.cfg["low_after"] = None
+        self.write_cfg()
+        r = self.run_cli(["--rate-check-every", "1"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for repo in done:
+            self.assertFalse(any("repos/%s/%s/actions/runs " % (ORG, repo) in c for c in self.calls()))
+        with open(os.path.join(self.cache, "jobs-cache-%s.json" % ORG)) as f:
+            self.assertNotIn("listing", json.load(f))
 
     def test_paging(self):
         self.cfg["runs"] = {"pub-site": [run(i) for i in range(1, 121)]}
