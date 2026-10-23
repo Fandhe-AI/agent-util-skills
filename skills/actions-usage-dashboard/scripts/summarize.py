@@ -14,6 +14,7 @@
 
 プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
   gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
+  プラン名は API 由来の非信頼文字列のため、出力前に safe() で無害化する（テキスト・JSON 共通）。
 
 helper の共有: FetchError / gh_api / ORG_RE / MONTH_RE は _common.py から import する（定義は 1 か所）。
   safe / CTRL_RE は本スクリプトが正典で、build_dashboard.py が複製している（一致は tests/test_build_dashboard.py が検査）。
@@ -313,7 +314,9 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
         warnings.append("対象月の行なし")
     return {
         "schema_version": SCHEMA_VERSION, "org": org, "month": month,
-        "plan": {"name": plan, "included_minutes": inc_min},
+        # JSON でも DEL・C1 は生で出る（json.dumps は C0 しかエスケープしない）ため、
+        # テキストと同じ safe() 規則で無害化する（Issue #159）。None は null のまま残す
+        "plan": {"name": None if plan is None else safe(plan), "included_minutes": inc_min},
         "breakdown": bd, "group_by": group_top(mrows, group_by, top),
         "candidates": candidates(mrows, rows, top), "coverage": coverage, "warnings": warnings,
     }
