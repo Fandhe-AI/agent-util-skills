@@ -1,6 +1,6 @@
 # スキルのネットワーク・sandbox 実行要件
 
-本リポジトリが上流ソースとして管理する `skills/` 配下の 5 スキルについて、ネットワーク
+本リポジトリが上流ソースとして管理する `skills/` 配下の 6 スキルについて、ネットワーク
 越しの操作を要するか・sandbox（ネットワーク制限下の実行環境）で完走できるかをまとめる。
 `create-html-report` / `setup-firebase-hosting` の判定は移設元
 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) の
@@ -15,6 +15,7 @@
 | `setup-firebase-hosting` | 一部要 | `scripts/bootstrap-firebase.sh`（GCP/Firebase 認証・API 呼び出し・`gh secret set` 等）はネットワーク必須。`firebase.json` の作成やローカル検証（Step 3〜4 相当）はネットワーク不要 |
 | `create-pitch-deck` | 一部要 | 生成（`scripts/build_slides.py`）は標準ライブラリのみでネットワーク不要。検証（`scripts/validate_slides.py`）は Playwright（Chromium）を起動するローカル処理でページロード時の外部通信は行わない。初回の venv セットアップ（`pip install playwright` と `playwright install chromium` のブラウザ本体ダウンロード）のみネットワークを要する |
 | `create-design-doc` | 一部要 | 生成・検証（`scripts/capture_screenshot.py` / `scripts/check_overflow.py`）は Playwright（Chromium）を起動するローカル処理でページロード時の外部通信は行わない。初回の venv セットアップ（`pip install playwright` と `playwright install chromium` のブラウザ本体ダウンロード、100MB超）のみネットワークを要する |
+| `actions-usage-dashboard` | 要 | `scripts/fetch_billing.py` が `gh api`（billing usage API と org のリポジトリ一覧）で github.com へのネットワークアクセスを必須とする。ワークスペース外への書き込みは `--out` の指定先次第 |
 | `setup-github-pages` | 要 | `gh repo view`（既定ブランチ解決）・`cargo install --git`（github.com の fandhe-frontend の匿名取得）・`curl`（raw.githubusercontent.com の `LICENSE-MIT`）・`gh api`（Pages 設定の確認。新規構築では有効化も行う）・GitHub Actions デプロイのすべてがネットワーク必須。初期セットアップと FF_REV 更新時に github.com と raw.githubusercontent.com へのアクセスを要する |
 
 ## 判定値の意味

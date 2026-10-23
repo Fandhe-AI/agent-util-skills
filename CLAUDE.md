@@ -4,12 +4,12 @@ This file provides guidance to Claude Code（claude.ai/code）when working with 
 
 ## Overview
 
-Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）を新規開発して、合わせて 5 スキルを本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
+Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）を新規開発して、`actions-usage-dashboard`（Actions 利用分数データ取得）も加えて、合わせて 6 スキルを本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
 
 ## Repository Structure
 
 ```text
-skills/                               -- 本リポジトリが上流ソースとして管理する 5 スキル（各ディレクトリに SKILL.md）
+skills/                               -- 本リポジトリが上流ソースとして管理する 6 スキル（各ディレクトリに SKILL.md）
   create-html-report/
     references/                       -- chart 選定・レポート設計・spec schema・a11y/セキュリティ規約
     samples/                          -- report spec の JSON 例（comparison / gantt / time-series）
@@ -27,6 +27,9 @@ skills/                               -- 本リポジトリが上流ソースと
     references/                       -- design-doc-structure.md・wireframe-guidelines.md・concept-brief-schema.md（create-pitch-deck と共有）
     templates/                        -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
     scripts/                          -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
+  actions-usage-dashboard/
+    scripts/                          -- fetch_billing.py（billing usage API から GitHub ホストランナーの日次行を作る）
+    tests/                            -- test_fetch_billing.py（回帰テスト）・fetch-billing.test.mjs（Node.js ブリッジ）
   setup-github-pages/
     references/                       -- site-format.md（nav.toml スキーマ・予約アセット名・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）、update-recovery.md（更新失敗時の復旧手順）
     templates/                        -- FF_REV・pages.yml・nav.toml・index.md・rust-toolchain.toml 雛形
@@ -83,6 +86,7 @@ skills-lock.json                      -- vendored スキルの source・skillPat
     create-pitch-deck                 -- 自前スキル（symlink: ../../skills/create-pitch-deck）
     create-design-doc                 -- 自前スキル（symlink: ../../skills/create-design-doc）
     setup-github-pages                -- 自前スキル（symlink: ../../skills/setup-github-pages）
+    actions-usage-dashboard           -- 自前スキル（symlink: ../../skills/actions-usage-dashboard）
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
     (他 create-commit / contribute-skill 等は .agents/skills/ への symlink)
@@ -181,9 +185,9 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 
 ## Current Skills
 
-### 自前管理スキル（5件・skills/ に配置）
+### 自前管理スキル（6件・skills/ に配置）
 
-create-html-report, setup-firebase-hosting, create-pitch-deck, create-design-doc, setup-github-pages
+create-html-report, setup-firebase-hosting, create-pitch-deck, create-design-doc, setup-github-pages, actions-usage-dashboard
 
 ### リポジトリ管理スキル（.claude/skills/ に配置）
 
@@ -212,7 +216,7 @@ vendored スキルは `.github/workflows/update-external.yml` の日次同期で
 
 ### セキュリティレビュー
 
-`skills/create-html-report`・`skills/setup-firebase-hosting`・`skills/create-pitch-deck`・`skills/create-design-doc`・`skills/setup-github-pages` の修正時は OWASP Top 10・ハードコードされた秘密情報・XSS・コマンドインジェクション・入力バリデーションを必須チェックする。セキュリティ問題がある場合はマージをブロックする。
+`skills/create-html-report`・`skills/setup-firebase-hosting`・`skills/create-pitch-deck`・`skills/create-design-doc`・`skills/setup-github-pages`・`skills/actions-usage-dashboard` の修正時は OWASP Top 10・ハードコードされた秘密情報・XSS・コマンドインジェクション・入力バリデーションを必須チェックする。セキュリティ問題がある場合はマージをブロックする。
 
 ### 日本語出力
 
