@@ -1,0 +1,823 @@
+<!--
+  actions-usage-dashboard の Dashboard 型ページ雛形（files/index.html にそのまま入れる単一ファイル）。
+
+  役割: build_dashboard.py（呼び出し元）がこのファイルを無加工で埋め込み、datasets/billing
+  （必須）と datasets/jobs（任意。どちらも fetch 出力の JSON 全体 {since, until, rows}。取得期間の照合に使う）、dash/params の既定値を添える。ページは数値を持たず、
+  集計は usage-agg ブロックの自己完結関数（dash.calc に直接渡す）が行う。
+  契約: dataset id = billing / jobs。params = group_by / include_free / period /
+  runner_type / repo / plan_included_minutes。詳細は references/data-sources.md と
+  tests/dashboard-template.test.mjs（集計関数の回帰テスト）を参照。
+-->
+<style>
+  .aud-page { font-family: var(--font-anthropic-sans); color: var(--color-fg); }
+  .aud-head { margin-bottom: 16px; }
+  .aud-title { margin: 0 0 8px; font-family: var(--font-anthropic-serif); font-size: 1.5rem; }
+  .aud-lead { margin: 0 0 8px; line-height: 1.8; }
+  .aud-lead b { font-family: var(--font-anthropic-serif); font-size: 1.1em; }
+  .aud-alert { color: var(--cds-chart-status-critical); }
+  .aud-note { margin: 4px 0; font-size: 0.8rem; color: var(--color-fg-muted); }
+  .aud-controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 12px 0; }
+  .aud-controls label { font-size: 0.85rem; color: var(--color-fg-muted); display: inline-flex; gap: 6px; align-items: center; }
+  .aud-page select, .aud-page button { font: inherit; color: var(--color-fg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: 6px; padding: 4px 8px; }
+  .aud-axes { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .aud-page button[aria-pressed="true"] { border-color: var(--color-fg); font-weight: 600; }
+  .aud-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .aud-tile { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: 8px; padding: 10px 12px; }
+  .aud-tile-alert { border-color: var(--cds-chart-status-critical); }
+  .aud-tile-label { font-size: 0.8rem; color: var(--color-fg-muted); }
+  .aud-tile-value { font-family: var(--font-anthropic-serif); font-size: 1.5rem; }
+  .aud-tile-note { font-size: 0.75rem; color: var(--color-fg-muted); }
+  .aud-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: 8px; padding: 12px; margin-bottom: 16px; }
+  .aud-card h2 { margin: 0 0 8px; font-size: 1rem; }
+  .aud-chart { position: relative; min-height: 280px; }
+  .aud-axis-text { font-size: 11px; fill: var(--color-fg-muted); }
+  .aud-grid { stroke: var(--color-border-line); stroke-width: 1; }
+  .aud-empty { color: var(--color-fg-muted); padding: 24px 0; text-align: center; }
+  .aud-legend { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 8px; }
+  .aud-legend button { display: inline-flex; gap: 6px; align-items: center; font-size: 0.8rem; }
+  .aud-legend button[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
+  .aud-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  .aud-tip { position: absolute; top: 8px; pointer-events: none; background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: 6px; padding: 6px 8px; font-size: 0.8rem; max-width: 260px; }
+  .aud-tip-row { display: flex; gap: 6px; align-items: center; }
+  .aud-tip[hidden] { display: none; }
+  .aud-tablewrap { overflow-x: auto; }
+  .aud-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  .aud-table th, .aud-table td { padding: 4px 8px; border-bottom: 1px solid var(--color-border-line); text-align: right; white-space: nowrap; }
+  .aud-table th:first-child, .aud-table td:first-child { text-align: left; white-space: normal; word-break: break-all; }
+  .aud-table th button { border: 0; background: none; padding: 0; font-weight: 600; }
+  .aud-page [data-dash-source-state="loading"], .aud-page [data-dash-source-state="refreshing"] { opacity: 0.55; }
+  .aud-page [data-dash-source-state="empty"] { color: var(--cds-chart-muted); }
+</style>
+
+<div class="aud-page" id="aud-page">
+  <header class="aud-head">
+    <h1 class="aud-title">GitHub Actions の利用時間</h1>
+    <p class="aud-lead" id="aud-lead">
+      有料は <b class="aud-paid" data-source="totals" data-field="paid_minutes" data-where="key=*%7C*%7C*">—</b> 分
+      （請求額 <b class="aud-paid" data-source="totals" data-field="net_usd" data-where="key=*%7C*%7C*">—</b>）。
+      含有枠の消費は <b data-source="totals" data-field="quota_minutes" data-where="key=*%7C*%7C*">—</b> 分
+      （残り <span id="aud-remaining">—</span>）、
+      公開リポの無料分は <b data-source="totals" data-field="public_free_minutes" data-where="key=*%7C*%7C*">—</b> 分、
+      セルフホストは <b data-source="totals" data-field="self_hosted_minutes" data-where="key=*%7C*%7C*">—</b> 分。
+    </p>
+    <p class="aud-note">日付はすべて UTC。<span id="aud-partial">最新日は集計途中の可能性がある。</span></p>
+    <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
+    <p class="aud-note aud-alert" id="aud-coverage" hidden></p>
+    <p class="aud-note aud-alert" id="aud-lower" hidden>区分不明の利用があるため、グラフの枠消費は下限値（「以上」）になる。</p>
+    <p class="aud-note" id="aud-invalid" hidden></p>
+    <ul class="aud-note" id="aud-warnings" data-source="warnings" aria-label="取得元の警告" hidden></ul>
+    <p class="aud-note" data-source="billing jobs">データ源: billing usage API（GitHub ホスト）と Actions jobs API（セルフホスト）。</p>
+  </header>
+
+  <div class="aud-controls">
+    <label>期間 <select id="aud-period"></select></label>
+    <label>ランナー種類 <select id="aud-runner"></select></label>
+    <label>リポジトリ <select id="aud-repo"></select></label>
+    <span class="aud-axes" role="group" aria-label="グルーピング">
+      <button type="button" data-axis="charge_class" aria-pressed="true">料金区分</button>
+      <button type="button" data-axis="repo" aria-pressed="false">リポジトリ</button>
+      <button type="button" data-axis="runner_type" aria-pressed="false">ランナー種類</button>
+      <button type="button" data-axis="visibility" aria-pressed="false">公開範囲</button>
+    </span>
+    <label><input type="checkbox" id="aud-incl" checked> 無料枠を含める</label>
+    <button type="button" id="aud-reset">リセット</button>
+  </div>
+
+  <div class="aud-tiles">
+    <div class="aud-tile" id="aud-tile-paid">
+      <div class="aud-tile-label">有料（分）</div>
+      <div class="aud-tile-value" data-source="totals" data-field="paid_minutes" data-where="key=*%7C*%7C*">—</div>
+      <div class="aud-tile-note">金額が発生した分</div>
+    </div>
+    <div class="aud-tile" id="aud-tile-net">
+      <div class="aud-tile-label">請求額（net）</div>
+      <div class="aud-tile-value" data-source="totals" data-field="net_usd" data-where="key=*%7C*%7C*">—</div>
+      <div class="aud-tile-note">割引後の金額</div>
+    </div>
+    <div class="aud-tile">
+      <div class="aud-tile-label">含有枠の消費（分）</div>
+      <div class="aud-tile-value" data-source="totals" data-field="quota_minutes" data-where="key=*%7C*%7C*">—</div>
+      <div class="aud-tile-note" id="aud-quota-note">定価を Linux 単価で割った分</div>
+    </div>
+    <div class="aud-tile">
+      <div class="aud-tile-label">公開リポの無料（分）</div>
+      <div class="aud-tile-value" data-source="totals" data-field="public_free_minutes" data-where="key=*%7C*%7C*">—</div>
+      <div class="aud-tile-note">公開リポジトリの無料分</div>
+    </div>
+    <div class="aud-tile">
+      <div class="aud-tile-label">セルフホスト（分）</div>
+      <div class="aud-tile-value" data-source="totals" data-field="self_hosted_minutes" data-where="key=*%7C*%7C*">—</div>
+      <div class="aud-tile-note">請求対象外</div>
+    </div>
+    <div class="aud-tile">
+      <div class="aud-tile-label">総分数</div>
+      <div class="aud-tile-value" data-source="totals" data-field="total_minutes" data-where="key=*%7C*%7C*">—</div>
+      <div class="aud-tile-note">全区分の合計</div>
+    </div>
+    <div class="aud-tile">
+      <div class="aud-tile-label">定価換算（gross）</div>
+      <div class="aud-tile-value" data-source="totals" data-field="gross_usd" data-where="key=*%7C*%7C*">—</div>
+      <div class="aud-tile-note">割引前の金額</div>
+    </div>
+  </div>
+
+  <section class="aud-card">
+    <h2 id="aud-chart-title">日ごとの利用時間</h2>
+    <div class="aud-chart" id="aud-chart" data-source="facts">—</div>
+    <div class="aud-legend" id="aud-legend" data-source="facts"></div>
+  </section>
+
+  <section class="aud-card">
+    <h2 id="aud-table-title">グループ別の内訳</h2>
+    <div class="aud-tablewrap">
+      <table class="aud-table" id="aud-table" data-source="by_axis" data-row-key="key">
+        <thead>
+          <tr>
+            <th data-field="group" aria-sort="none"><button type="button" data-sort="group">グループ</button></th>
+            <th data-field="minutes" aria-sort="none"><button type="button" data-sort="minutes" id="aud-th-minutes">分数</button></th>
+            <th data-field="quota_minutes" aria-sort="none"><button type="button" data-sort="quota_minutes">枠の消費</button></th>
+            <th data-field="net_usd" aria-sort="none"><button type="button" data-sort="net_usd">請求額</button></th>
+            <th data-field="last_day" aria-sort="none"><button type="button" data-sort="last_day">最終利用日</button></th>
+          </tr>
+        </thead>
+        <tbody id="aud-tbody"></tbody>
+      </table>
+    </div>
+    <p class="aud-empty" id="aud-table-empty" hidden>該当するデータがない。</p>
+  </section>
+</div>
+
+<script id="usage-agg">
+/*
+ * 集計の純関数（DOM と dash を参照しない）。window.UsageAgg として公開する。
+ * 呼び出し元: 下の描画スクリプト（dash.calc へ facts / totals / byAxis を直接渡す）と
+ * tests/dashboard-template.test.mjs（このブロックを取り出して vm で評価し検証する）。
+ * facts / totals / byAxis は読者に本文が見える calc の fn になるため、IIFE 内の
+ * 変数を参照しない自己完結の関数にしている（テストが再構築して確認する）。
+ */
+window.UsageAgg = (function () {
+  'use strict';
+
+  // 料金区分の固定順（積み上げは先頭が最下段）・表示名・色の参照値。
+  const CLASS_ORDER = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'];
+  const CLASS_META = {
+    paid: { label: '有料', css: 'var(--cds-chart-status-critical)' },
+    included: { label: '含有枠内', idx: 0 },
+    public_free: { label: '公開リポの無料', idx: 1 },
+    unknown: { label: '区分不明（公開範囲未確定）', css: 'var(--cds-chart-muted)' },
+    self_hosted: { label: 'セルフホスト', idx: 2 }
+  };
+  const AXES = ['charge_class', 'repo', 'runner_type', 'visibility'];
+  // 実データの識別子（リポジトリ名は [A-Za-z0-9._-]）と交わらないよう、制御文字を含む名前空間に置く。
+  const OTHER = '\u0000other';
+  const OTHER_LABEL = 'その他';
+  const TOP_N = 7;
+
+  function facts(billing, jobs) {
+    const CLASSES = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'];
+    const DAY = /^\d{4}-\d{2}-\d{2}$/;
+    const out = [];
+    const nonNeg = (v) => {
+      const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN);
+      return Number.isFinite(n) && n >= 0 ? n : -1;
+    };
+    const take = (rows, fromJobs) => {
+      const list = Array.isArray(rows) ? rows : (rows && Array.isArray(rows.rows) ? rows.rows : []);
+      list.forEach((r) => {
+        if (!r || typeof r !== 'object') return;
+        let invalid = 0;
+        const num = (v) => {
+          const n = nonNeg(v);
+          if (n >= 0) return n;
+          if (v !== undefined && v !== null && v !== '') invalid += 1;
+          return 0;
+        };
+        const minutes = num(r.minutes);
+        const quota = num(r.quota_minutes);
+        const billable = num(r.billable_minutes);
+        const gross = num(r.gross_usd);
+        const net = num(r.net_usd);
+        const day = String(r.day == null ? '' : r.day).slice(0, 10);
+        const ok = DAY.test(day);
+        if (!ok) invalid += 1;
+        out.push({
+          day: ok ? day : '(invalid)',
+          month: ok ? day.slice(0, 7) : '(invalid)',
+          repo: typeof r.repo === 'string' && r.repo !== '' ? r.repo : '(unattributed)',
+          visibility: typeof r.visibility === 'string' && r.visibility !== '' ? r.visibility : 'unknown',
+          runner_type: typeof r.runner_type === 'string' && r.runner_type !== '' ? r.runner_type : (fromJobs ? 'self-hosted' : 'other'),
+          charge_class: fromJobs ? 'self_hosted' : (CLASSES.includes(r.charge_class) ? r.charge_class : 'unknown'),
+          minutes: minutes,
+          quota_minutes: quota,
+          billable_minutes: billable,
+          gross_usd: gross,
+          net_usd: net,
+          invalid: invalid
+        });
+      });
+    };
+    take(billing, false);
+    take(jobs, true);
+    return out;
+  }
+
+  function totals(facts) {
+    const CLASSES = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'];
+    const enc = (s) => encodeURIComponent(String(s));
+    const acc = new Map();
+    (Array.isArray(facts) ? facts : []).forEach((f) => {
+      [f.month, '*'].forEach((period) => {
+        [f.runner_type, '*'].forEach((runner) => {
+          [f.repo, '*'].forEach((repo) => {
+            const key = [period, runner, repo].map(enc).join('|');
+            let row = acc.get(key);
+            if (!row) {
+              row = { key: key, period: period, runner_type: runner, repo: repo, total_minutes: 0, quota_minutes: 0, gross_usd: 0, net_usd: 0, latest_day: '', invalid: 0 };
+              CLASSES.forEach((c) => { row[c + '_minutes'] = 0; });
+              acc.set(key, row);
+            }
+            row[f.charge_class + '_minutes'] += f.minutes;
+            row.total_minutes += f.minutes;
+            row.quota_minutes += f.quota_minutes;
+            row.gross_usd += f.gross_usd;
+            row.net_usd += f.net_usd;
+            row.invalid += f.invalid;
+            if (f.day > row.latest_day) row.latest_day = f.day;
+          });
+        });
+      });
+    });
+    return Array.from(acc.values());
+  }
+
+  function byAxis(facts) {
+    const AXIS_NAMES = ['charge_class', 'repo', 'runner_type', 'visibility'];
+    const enc = (s) => encodeURIComponent(String(s));
+    const acc = new Map();
+    (Array.isArray(facts) ? facts : []).forEach((f) => {
+      [f.month, '*'].forEach((period) => {
+        [f.runner_type, '*'].forEach((runner) => {
+          [f.repo, '*'].forEach((repo) => {
+            AXIS_NAMES.forEach((axis) => {
+              const group = f[axis];
+              const key = [period, runner, repo, axis, group].map(enc).join('|');
+              let row = acc.get(key);
+              if (!row) {
+                row = { key: key, period: period, runner_type: runner, repo: repo, axis: axis, group: group, minutes: 0, quota_minutes: 0, unknown_minutes: 0, net_usd: 0, last_day: '' };
+                acc.set(key, row);
+              }
+              row.minutes += f.minutes;
+              row.quota_minutes += f.quota_minutes;
+              if (f.charge_class === 'unknown') row.unknown_minutes += f.minutes;
+              row.net_usd += f.net_usd;
+              if (f.day > row.last_day) row.last_day = f.day;
+            });
+          });
+        });
+      });
+    });
+    return Array.from(acc.values());
+  }
+
+  function keyOf(parts) {
+    return parts.map((p) => encodeURIComponent(String(p))).join('|');
+  }
+
+  // 'latest' は facts の最新月、'all' は全期間（'*'）に解決する。
+  // sources は取得済みの fetch 出力。行のない月（利用ゼロの月）も取得期間から選択肢に含める。
+  function resolvePeriod(period, factRows, sources) {
+    const p = period == null ? 'latest' : String(period);
+    if (p === 'all' || p === '*') return '*';
+    if (p !== 'latest') return p;
+    const months = months_(factRows, sources);
+    return months.length ? months[months.length - 1] : '*';
+  }
+
+  // facts の月と、取得期間（since〜until）が覆う月の和集合（昇順）。
+  function months_(factRows, sources) {
+    const set = new Set((factRows || []).map((f) => f.month).filter((m) => /^\d{4}-\d{2}$/.test(m)));
+    (Array.isArray(sources) ? sources : []).forEach((src) => {
+      const sp = span(src);
+      if (!sp) return;
+      let y = Number(sp.first.slice(0, 4));
+      let mo = Number(sp.first.slice(5, 7));
+      const endKey = sp.last.slice(0, 7);
+      for (let i = 0; i < 240; i += 1) {
+        const key = y + '-' + (mo < 10 ? '0' : '') + mo;
+        if (key > endKey) break;
+        set.add(key);
+        mo += 1;
+        if (mo > 12) { mo = 1; y += 1; }
+      }
+    });
+    return Array.from(set).sort();
+  }
+
+  // fetch_*.py の出力（{since, until, rows}）の取得期間を [first, last]（YYYY-MM-DD）へ正規化する。
+  // billing は月粒度（YYYY-MM）、jobs は日粒度。期間が読めない入力（rows 配列だけ等）は null。
+  function span(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+    const M = /^(\d{4})-(\d{2})$/;
+    const D = /^\d{4}-\d{2}-\d{2}$/;
+    const s = input.since;
+    const u = input.until;
+    if (typeof s !== 'string' || typeof u !== 'string') return null;
+    if (M.test(s) && M.test(u)) {
+      const m = M.exec(u);
+      const last = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+      return { first: s + '-01', last: u + '-' + (last < 10 ? '0' : '') + last };
+    }
+    return D.test(s) && D.test(u) ? { first: s, last: u } : null;
+  }
+
+  // 選択期間に対する取得状況。'none' = 取得なし・範囲外（0 ではなく不明）、'partial' = 一部のみ、
+  // 'full' = 全体を取得済み、'unknown' = 取得期間が読めない。today（YYYY-MM-DD）は当月の末尾の上限。
+  // 全期間（'*'）は other（もう一方の取得元）の期間との和集合を全体として照合する。
+  function coverage(input, period, today, other) {
+    if (input === undefined || input === null) return 'none';
+    const sp = span(input);
+    if (!sp) return 'unknown';
+    if (period === '*') {
+      const o = other === undefined || other === null ? null : span(other);
+      if (!o) return 'full';
+      const first = sp.first < o.first ? sp.first : o.first;
+      let last = sp.last > o.last ? sp.last : o.last;
+      if (today && today < last) last = today;
+      return sp.first <= first && sp.last >= last ? 'full' : 'partial';
+    }
+    const m = /^(\d{4})-(\d{2})$/.exec(period);
+    if (!m) return 'unknown';
+    const first = period + '-01';
+    let last = period + '-' + new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+    if (today && today < last) last = today;
+    if (sp.last < first || sp.first > last) return 'none';
+    return sp.first <= first && sp.last >= last ? 'full' : 'partial';
+  }
+
+  function matches(f, period, runner, repo) {
+    return (period === '*' || f.month === period)
+      && (!runner || runner === '*' || f.runner_type === runner)
+      && (!repo || repo === '*' || f.repo === repo);
+  }
+
+  // 値の降順（同値は名前順）で上位 n 件 + 残りの和（その他）。
+  function topGroups(entries, n) {
+    const sorted = entries.slice().sort((a, b) => (b.value - a.value) || (a.group < b.group ? -1 : a.group > b.group ? 1 : 0));
+    if (sorted.length <= n) return sorted;
+    const rest = sorted.slice(n).reduce((s, e) => s + e.value, 0);
+    return sorted.slice(0, n).concat([{ group: OTHER, value: rest }]);
+  }
+
+  // 料金区分は固定順（paid が最下段）。それ以外は渡された順で「その他」を最後にする。
+  function stackOrder(groupBy, groups) {
+    if (groupBy === 'charge_class') return CLASS_ORDER.filter((c) => groups.includes(c));
+    return groups.filter((g) => g !== OTHER).concat(groups.includes(OTHER) ? [OTHER] : []);
+  }
+
+  function dayRange(days) {
+    if (!days.length) return [];
+    const sorted = days.slice().sort();
+    const out = [];
+    const end = Date.parse(sorted[sorted.length - 1] + 'T00:00:00Z');
+    for (let t = Date.parse(sorted[0] + 'T00:00:00Z'); t <= end; t += 86400000) {
+      out.push(new Date(t).toISOString().slice(0, 10));
+    }
+    return out;
+  }
+
+  // グラフ用の日 x グループの値。groups は積み上げ順（先頭が最下段）。
+  function daily(factRows, sel) {
+    const period = resolvePeriod(sel.period, factRows, sel.sources);
+    const metric = sel.include_free === false ? 'quota_minutes' : 'minutes';
+    const axis = AXES.includes(sel.group_by) ? sel.group_by : 'charge_class';
+    const rows = factRows.filter((f) => matches(f, period, sel.runner_type, sel.repo) && /^\d{4}-/.test(f.day));
+    const sums = new Map();
+    rows.forEach((f) => {
+      if (f.minutes > 0 || f[metric] > 0) sums.set(f[axis], (sums.get(f[axis]) || 0) + f[metric]);
+    });
+    const entries = Array.from(sums, (e) => ({ group: e[0], value: e[1] }));
+    let ids;
+    const idOf = new Map();
+    if (axis === 'charge_class') {
+      ids = stackOrder(axis, entries.map((e) => e.group));
+    } else {
+      const top = topGroups(entries, TOP_N);
+      ids = stackOrder(axis, top.map((e) => e.group));
+      const kept = new Set(ids);
+      entries.forEach((e) => { idOf.set(e.group, kept.has(e.group) ? e.group : OTHER); });
+    }
+    const values = Object.create(null);
+    ids.forEach((id) => { values[id] = Object.create(null); });
+    // 枠消費（quota_minutes）で区分不明の行がある群は下限値（unknown 行の quota は 0）。
+    const lowerIds = new Set();
+    rows.forEach((f) => {
+      const id = axis === 'charge_class' ? f.charge_class : (idOf.get(f[axis]) || null);
+      if (id === null || !values[id]) return;
+      if (metric === 'quota_minutes' && f.charge_class === 'unknown' && f.minutes > 0) lowerIds.add(id);
+      values[id][f.day] = (values[id][f.day] || 0) + f[metric];
+    });
+    const groups = ids.map((id) => ({
+      id: id,
+      total: Object.keys(values[id]).reduce((s, d) => s + values[id][d], 0),
+      lower: lowerIds.has(id)
+    }));
+    return { period: period, metric: metric, axis: axis, days: dayRange(rows.map((f) => f.day)), groups: groups, values: values, lowerBound: lowerIds.size > 0 };
+  }
+
+  return {
+    CLASS_ORDER: CLASS_ORDER,
+    CLASS_META: CLASS_META,
+    AXES: AXES,
+    OTHER: OTHER,
+    OTHER_LABEL: OTHER_LABEL,
+    TOP_N: TOP_N,
+    facts: facts,
+    totals: totals,
+    byAxis: byAxis,
+    keyOf: keyOf,
+    resolvePeriod: resolvePeriod,
+    months: months_,
+    span: span,
+    coverage: coverage,
+    matches: matches,
+    topGroups: topGroups,
+    stackOrder: stackOrder,
+    daily: daily
+  };
+})();
+</script>
+
+<script>
+/*
+ * 描画スクリプト。dash.onData の render が全 status で全体を描き直す。
+ * 値は dataset と calc の出力だけから取り、文字列は textContent / d3 .text() / new Option で出す。
+ */
+const U = window.UsageAgg;
+const page = document.getElementById('aud-page');
+const $ = (sel) => page.querySelector(sel);
+
+dash.calc('facts', {
+  inputs: ['billing', 'jobs'],
+  fn: U.facts,
+  title: '正規化した利用行',
+  description: 'billing と jobs の行を共通の列にそろえる。数値は非負数に変換し、不正値は 0 にして invalid に数える。'
+});
+dash.calc('totals', {
+  inputs: ['facts'],
+  fn: U.totals,
+  title: '期間・ランナー・リポジトリ別の合計',
+  description: '月と全期間、ランナー種類、リポジトリの組み合わせごとに区分別の分数・金額を合計する。'
+});
+dash.calc('by_axis', {
+  inputs: ['facts'],
+  fn: U.byAxis,
+  title: '軸ごとの内訳',
+  description: '料金区分・リポジトリ・ランナー種類・公開範囲の各軸で分数・枠の消費・請求額・最終利用日を合計する。'
+});
+
+const fmtMin = d3.format(',.1~f');
+const fmtUsd = (v) => '$' + d3.format(',.2f')(v);
+const fmtTick = new Intl.NumberFormat('en', { notation: 'compact' }).format;
+const parseDay = d3.utcParse('%Y-%m-%d');
+const fmtDay = d3.utcFormat('%b %-d');
+
+let hidden = new Set();
+let hiddenAxis = '';
+let sortKey = 'minutes';
+let sortDir = 'desc';
+
+function readSel() {
+  const p = dash.params() || {};
+  const plan = p.plan_included_minutes;
+  return {
+    group_by: U.AXES.includes(p.group_by) ? p.group_by : 'charge_class',
+    include_free: !(p.include_free === false || p.include_free === 'false'),
+    period: p.period == null ? 'latest' : String(p.period),
+    runner_type: p.runner_type || null,
+    repo: p.repo || null,
+    plan: plan !== null && plan !== undefined && plan !== '' && Number.isFinite(Number(plan)) ? Number(plan) : null
+  };
+}
+
+function labelOf(axis, id) {
+  if (id === U.OTHER) return U.OTHER_LABEL;
+  if (axis === 'charge_class' && U.CLASS_META[id]) return U.CLASS_META[id].label;
+  return id;
+}
+
+function palette(i) {
+  const cs = dash.colors;
+  return Array.isArray(cs) && cs.length ? cs[i % cs.length] : 'currentColor';
+}
+
+function colorMap(axis, groups) {
+  const map = new Map();
+  let i = 0;
+  groups.forEach((g) => {
+    if (axis === 'charge_class') {
+      const m = U.CLASS_META[g.id];
+      map.set(g.id, m.css || palette(m.idx));
+    } else if (g.id === U.OTHER) {
+      map.set(g.id, 'var(--cds-chart-muted)');
+    } else {
+      map.set(g.id, palette(i));
+      i += 1;
+    }
+  });
+  return map;
+}
+
+function fillSelect(el, items, value) {
+  const sig = items.map((it) => it.value + '\u0001' + it.label).join('\u0002');
+  if (el.getAttribute('data-sig') !== sig) {
+    el.replaceChildren(...items.map((it) => new Option(it.label, it.value)));
+    el.setAttribute('data-sig', sig);
+  }
+  el.value = items.some((it) => it.value === value) ? value : items[0].value;
+}
+
+function paintControls(sel, facts, sources) {
+  // 「最新月」のラベルは選択中の period と独立に、facts の最新月から求める。
+  const latestMonth = U.resolvePeriod('latest', facts, sources);
+  const months = U.months(facts, sources).reverse();
+  const periodItems = [{ value: 'latest', label: latestMonth === '*' ? '最新月' : '最新月（' + latestMonth + '）' }]
+    .concat(months.map((m) => ({ value: m, label: m })))
+    .concat([{ value: 'all', label: '全期間' }]);
+  fillSelect($('#aud-period'), periodItems, sel.period === '*' ? 'all' : sel.period);
+  const runners = Array.from(new Set(facts.map((f) => f.runner_type))).sort();
+  fillSelect($('#aud-runner'), [{ value: '', label: 'すべて' }].concat(runners.map((r) => ({ value: r, label: r }))), sel.runner_type || '');
+  const repos = Array.from(new Set(facts.map((f) => f.repo))).sort();
+  fillSelect($('#aud-repo'), [{ value: '', label: 'すべて' }].concat(repos.map((r) => ({ value: r, label: r }))), sel.repo || '');
+  page.querySelectorAll('[data-axis]').forEach((b) => {
+    b.setAttribute('aria-pressed', b.getAttribute('data-axis') === sel.group_by ? 'true' : 'false');
+  });
+  $('#aud-incl').checked = sel.include_free;
+}
+
+function paintTotals(rows, sel, period, cov, ready) {
+  const byKey = new Map((rows || []).map((r) => [r.key, r]));
+  const key = U.keyOf([period, sel.runner_type || '*', sel.repo || '*']);
+  const row = byKey.get(key);
+  // 取得済み期間に該当行がないときは未取得ではなく利用ゼロ。取得なし・不明は従来どおり「—」。
+  // ゼロ補完は項目ごとに、その項目の取得元（セルフホスト分は jobs、他は billing）の取得状況だけで判定する。
+  const zeroRow = { key: key, total_minutes: 0, quota_minutes: 0, gross_usd: 0, net_usd: 0, paid_minutes: 0, included_minutes: 0, public_free_minutes: 0, unknown_minutes: 0, self_hosted_minutes: 0 };
+  page.querySelectorAll('[data-source="totals"]').forEach((el) => {
+    const field = el.getAttribute('data-field');
+    el.setAttribute('data-where', 'key=' + encodeURIComponent(key));
+    let text = '—';
+    // jobs が未接続なら合計は billing だけで算出する（Coverage notes と同じ扱い）。
+    const src = field === 'self_hosted_minutes' ? ['jobs'] : (field === 'total_minutes' && cov.jobsConnected ? ['billing', 'jobs'] : ['billing']);
+    const zeroOk = ready && src.every((k) => cov[k] !== 'none' && cov[k] !== 'unknown');
+    const r = row || (zeroOk ? zeroRow : null);
+    if (r && !src.some((k) => cov[k] === 'none')) {
+      text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(r[field]) : fmtMin(r[field]);
+      // 区分不明の利用がある範囲では含有枠の消費は下限値になる。
+      if (field === 'quota_minutes' && r.unknown_minutes > 0) text += ' 以上';
+    }
+    el.textContent = text;
+  });
+  const alert = !!row && row.paid_minutes > 0;
+  page.querySelectorAll('.aud-paid').forEach((el) => el.classList.toggle('aud-alert', alert));
+  $('#aud-tile-paid').classList.toggle('aud-tile-alert', alert);
+  $('#aud-tile-net').classList.toggle('aud-tile-alert', alert);
+  const lowerBound = !!row && row.unknown_minutes > 0;
+  const qnote = document.getElementById('aud-quota-note');
+  if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : '定価を Linux 単価で割った分';
+  let remaining;
+  if (cov.billing === 'none' || cov.billing === 'partial' || cov.billing === 'unknown') remaining = '不明（選択月の billing を取得しきれていない）';
+  else if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
+  else if (sel.plan === null) remaining = 'プラン未指定のため不明';
+  else if (period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
+  // 行がない単月は、billing 取得済み（上の分岐を通過）かつ準備完了のときだけ消費 0 として全量を残量にする。
+  else if (!row && !ready) remaining = '不明（集計を取得できていない）';
+  else remaining = fmtMin(Math.max(sel.plan - (row || zeroRow).quota_minutes, 0)) + ' 分';
+  $('#aud-remaining').textContent = remaining;
+}
+
+// 取得元（fetch_*.py）の warnings（1,000 件上限による欠損など）をそのまま見せる。
+// 取得漏れがあるのに通常の合計だけが出ないよう、warnings dataset が届いたときに表示する。
+function paintWarnings() {
+  const el = $('#aud-warnings');
+  const w = dash.data('warnings');
+  const all = w && w.status === 'ok' && Array.isArray(w.data) ? w.data.slice() : [];
+  // billing / jobs の JSON 自体の warnings も引き継ぐ（warnings dataset は任意）。
+  ['billing', 'jobs'].forEach((k) => {
+    const d = dash.data(k);
+    if (d && d.status === 'ok' && d.data && Array.isArray(d.data.warnings)) {
+      d.data.warnings.slice(0, 20).forEach((x) => { if (typeof x === 'string') all.push(k + ': ' + x); });
+    }
+  });
+  const items = Array.from(new Set(all.filter((x) => typeof x === 'string' && x !== ''))).slice(0, 20);
+  el.replaceChildren(...items.map((t) => {
+    const li = document.createElement('li');
+    li.textContent = '注意: ' + t.slice(0, 300);
+    return li;
+  }));
+  el.hidden = items.length === 0;
+}
+
+function drawMessage(host, text) {
+  d3.select(host).selectAll('*').remove();
+  d3.select(host).append('div').attr('class', 'aud-empty').text(text);
+}
+
+function drawChart(host, model, colors, axis, latestDay) {
+  d3.select(host).selectAll('*').remove();
+  const visible = model.groups.filter((g) => !hidden.has(g.id));
+  if (!model.days.length || !visible.length) {
+    drawMessage(host, '該当するデータがない。');
+    return;
+  }
+  const w = Math.max(host.clientWidth, 280);
+  const h = 280;
+  const margin = { top: 12, right: 12, bottom: 28 };
+  const svg = d3.select(host).append('svg').attr('width', '100%').attr('viewBox', '0 0 ' + w + ' ' + h)
+    .attr('role', 'img').attr('aria-label', '日ごとの積み上げ棒グラフ（値は下の表と同じ）');
+  const rows = model.days.map((day) => {
+    const v = Object.create(null);
+    model.groups.forEach((g) => { v[g.id] = model.values[g.id][day] || 0; });
+    return { day: day, v: v };
+  });
+  const series = d3.stack().keys(visible.map((g) => g.id)).value((d, k) => d.v[k])(rows);
+  const yMax = d3.max(series, (s) => d3.max(s, (d) => d[1])) || 1;
+  const y = d3.scaleLinear().domain([0, yMax]).nice().range([h - margin.bottom, margin.top]);
+  const ticks = y.ticks(5);
+  const probe = svg.append('text').attr('class', 'aud-axis-text');
+  let left = 8;
+  ticks.forEach((t) => {
+    probe.text(fmtTick(t));
+    left = Math.max(left, probe.node().getComputedTextLength() + 14);
+  });
+  probe.remove();
+  const x = d3.scaleBand().domain(model.days).range([left, w - margin.right]).padding(0.2);
+  svg.selectAll('line.aud-grid').data(ticks).join('line').attr('class', 'aud-grid')
+    .attr('x1', left).attr('x2', w - margin.right).attr('y1', (t) => y(t)).attr('y2', (t) => y(t));
+  svg.selectAll('text.aud-ytick').data(ticks).join('text').attr('class', 'aud-axis-text aud-ytick')
+    .attr('x', left - 6).attr('y', (t) => y(t) + 4).attr('text-anchor', 'end').text((t) => fmtTick(t));
+  const step = Math.max(1, Math.ceil(model.days.length / Math.max(1, Math.floor((w - left) / 52))));
+  svg.selectAll('text.aud-xtick').data(model.days.filter((d, i) => i % step === 0)).join('text')
+    .attr('class', 'aud-axis-text aud-xtick').attr('x', (d) => x(d) + x.bandwidth() / 2).attr('y', h - 8)
+    .attr('text-anchor', 'middle').text((d) => fmtDay(parseDay(d)));
+  svg.append('g').selectAll('g').data(series).join('g').style('fill', (s) => colors.get(s.key))
+    .selectAll('rect').data((s) => s).join('rect')
+    .attr('x', (d) => x(d.data.day)).attr('width', x.bandwidth())
+    .attr('y', (d) => y(d[1])).attr('height', (d) => Math.max(0, y(d[0]) - y(d[1])))
+    .style('opacity', (d) => (d.data.day === latestDay ? 0.6 : 1));
+
+  const tip = d3.select(host).append('div').attr('class', 'aud-tip').attr('hidden', true);
+  const showTip = (day) => {
+    tip.selectAll('*').remove();
+    tip.append('div').text(day + '（UTC）');
+    let total = 0;
+    visible.slice().reverse().forEach((g) => {
+      const v = model.values[g.id][day] || 0;
+      total += v;
+      const r = tip.append('div').attr('class', 'aud-tip-row');
+      r.append('span').attr('class', 'aud-swatch').style('background', colors.get(g.id));
+      r.append('span').text(labelOf(axis, g.id) + ' ' + fmtMin(v) + (g.lower ? ' 以上' : ''));
+    });
+    tip.append('div').text('合計 ' + fmtMin(total) + (visible.some((g) => g.lower) ? ' 分以上' : ' 分'));
+    tip.attr('hidden', null);
+    const tw = tip.node().offsetWidth;
+    const cx = x(day) + x.bandwidth() / 2;
+    tip.style('left', Math.max(0, Math.min(cx - tw / 2, host.clientWidth - tw)) + 'px');
+  };
+  svg.append('g').selectAll('rect').data(model.days).join('rect')
+    .attr('x', (d) => x(d) - x.step() * x.paddingInner() / 2).attr('width', x.step())
+    .attr('y', margin.top).attr('height', h - margin.bottom - margin.top).style('fill', 'transparent')
+    .on('pointerenter', (e, d) => showTip(d)).on('pointermove', (e, d) => showTip(d))
+    .on('pointerleave', () => tip.attr('hidden', true));
+}
+
+function drawLegend(host, model, colors, axis) {
+  const btns = d3.select(host).selectAll('button').data(model.groups, (g) => g.id).join('button')
+    .attr('type', 'button').attr('aria-pressed', (g) => (hidden.has(g.id) ? 'false' : 'true'))
+    .on('click', (e, g) => {
+      if (hidden.has(g.id)) hidden.delete(g.id); else hidden.add(g.id);
+      render();
+    });
+  btns.selectAll('*').remove();
+  btns.append('span').attr('class', 'aud-swatch').style('background', (g) => colors.get(g.id));
+  btns.append('span').text((g) => labelOf(axis, g.id) + ' ' + fmtMin(g.total) + (g.lower ? ' 以上' : ''));
+}
+
+function paintTable(rows, sel, period) {
+  const metric = sel.include_free ? 'minutes' : 'quota_minutes';
+  $('#aud-th-minutes').textContent = sel.include_free ? '分数' : '分数（枠の消費のみ）';
+  $('#aud-th-minutes').parentNode.setAttribute('data-field', metric);
+  const axisName = { charge_class: '料金区分', repo: 'リポジトリ', runner_type: 'ランナー種類', visibility: '公開範囲' }[sel.group_by];
+  $('#aud-table-title').textContent = axisName + '別の内訳';
+  $('#aud-chart-title').textContent = '日ごとの利用時間（' + axisName + '別）';
+  const shown = rows.filter((r) => r.period === period && r.runner_type === (sel.runner_type || '*')
+    && r.repo === (sel.repo || '*') && r.axis === sel.group_by);
+  const sortVal = (r) => {
+    if (sortKey === 'group') return labelOf(sel.group_by, r.group);
+    return sortKey === 'minutes' ? r[metric] : r[sortKey];
+  };
+  shown.sort((a, b) => {
+    const ka = sortVal(a);
+    const kb = sortVal(b);
+    const c = ka < kb ? -1 : ka > kb ? 1 : 0;
+    return sortDir === 'asc' ? c : -c;
+  });
+  page.querySelectorAll('th[aria-sort]').forEach((th) => {
+    const k = th.querySelector('button').getAttribute('data-sort');
+    th.setAttribute('aria-sort', k === sortKey ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none');
+  });
+  d3.select(document.getElementById('aud-tbody')).selectAll('tr').data(shown, (r) => r.key).join('tr')
+    .attr('data-key', (r) => r.key)
+    .each(function (r) {
+      const lb = r.unknown_minutes > 0 ? ' 以上' : '';
+      const cells = [
+        { text: labelOf(sel.group_by, r.group) },
+        { text: fmtMin(r[metric]) + (metric === 'quota_minutes' ? lb : '') },
+        { text: fmtMin(r.quota_minutes) + lb },
+        { text: fmtUsd(r.net_usd) },
+        { text: r.last_day }
+      ];
+      d3.select(this).selectAll('td').data(cells).join('td').text((c) => c.text);
+    }).order();
+  $('#aud-table-empty').hidden = shown.length > 0;
+}
+
+function render() {
+  const sel = readSel();
+  const f = dash.data('facts');
+  const t = dash.data('totals');
+  const a = dash.data('by_axis');
+  const ready = f.status === 'ok' && t.status === 'ok' && a.status === 'ok' && Array.isArray(f.data);
+  const jobsD = dash.data('jobs');
+  const billD = dash.data('billing');
+  const facts = ready ? f.data : [];
+  const srcs = [billD, jobsD].filter((d) => d.status === 'ok').map((d) => d.data);
+  const period = U.resolvePeriod(sel.period, facts, srcs);
+  if (hiddenAxis !== sel.group_by) {
+    hidden = new Set();
+    hiddenAxis = sel.group_by;
+  }
+  paintControls(sel, facts, srcs);
+  const today = new Date().toISOString().slice(0, 10);
+  const cov = {
+    billing: billD.status === 'ok' ? U.coverage(billD.data, period, today, jobsD.status === 'ok' ? jobsD.data : null) : 'none',
+    jobs: jobsD.status === 'ok' ? U.coverage(jobsD.data, period, today, billD.status === 'ok' ? billD.data : null) : 'none',
+    jobsConnected: jobsD.status === 'ok'
+  };
+  paintTotals(ready ? t.data : [], sel, period, cov, ready);
+  $('#aud-nojobs').hidden = jobsD.status === 'ok';
+  const notes = [];
+  [['billing', 'billing（GitHub ホスト分）'], ['jobs', 'jobs（セルフホスト分）']].forEach((p) => {
+    if (cov[p[0]] === 'none' && !(p[0] === 'jobs' && jobsD.status !== 'ok')) notes.push(p[1] + 'は選択期間を取得していないため不明（0 ではない）。');
+    else if (cov[p[0]] === 'partial') notes.push(p[1] + 'は選択期間の一部しか取得しておらず、過小な値になる。');
+    else if (cov[p[0]] === 'unknown') notes.push(p[1] + 'の取得期間（since / until）が読めず、範囲を確認できない。');
+  });
+  const covEl = $('#aud-coverage');
+  covEl.textContent = notes.join(' ');
+  covEl.hidden = notes.length === 0;
+  const invalid = facts.reduce((s, r) => s + r.invalid, 0);
+  const inv = $('#aud-invalid');
+  inv.hidden = invalid === 0;
+  inv.textContent = '不正な値を含む行があり、0 として扱った（' + invalid + ' 件）。';
+  paintWarnings();
+  const latest = facts.reduce((m, r) => (r.day > m && /^\d{4}-/.test(r.day) ? r.day : m), '');
+  $('#aud-partial').textContent = latest ? '最新日（' + latest + '）は集計途中の可能性がある。' : '最新日は集計途中の可能性がある。';
+  const chart = document.getElementById('aud-chart');
+  const legend = document.getElementById('aud-legend');
+  const lowerEl = $('#aud-lower');
+  if (ready) {
+    const model = U.daily(facts, Object.assign({}, sel, { sources: srcs }));
+    const colors = colorMap(model.axis, model.groups);
+    drawChart(chart, model, colors, model.axis, latest);
+    drawLegend(legend, model, colors, model.axis);
+    lowerEl.hidden = !model.lowerBound;
+  } else {
+    lowerEl.hidden = true;
+    drawMessage(chart, '—');
+    d3.select(legend).selectAll('*').remove();
+  }
+  paintTable(ready ? a.data : [], sel, period);
+}
+
+function change(patch) {
+  dash.setParams(patch);
+  render();
+}
+
+page.querySelectorAll('[data-axis]').forEach((b) => b.addEventListener('click', () => change({ group_by: b.getAttribute('data-axis') })));
+document.getElementById('aud-period').addEventListener('change', (e) => change({ period: e.target.value }));
+document.getElementById('aud-runner').addEventListener('change', (e) => change({ runner_type: e.target.value || null }));
+document.getElementById('aud-repo').addEventListener('change', (e) => change({ repo: e.target.value || null }));
+document.getElementById('aud-incl').addEventListener('change', (e) => change({ include_free: e.target.checked }));
+document.getElementById('aud-reset').addEventListener('click', () => {
+  hidden = new Set();
+  dash.resetParams();
+  render();
+});
+page.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => {
+  const k = b.getAttribute('data-sort');
+  if (sortKey === k) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+  else { sortKey = k; sortDir = k === 'group' ? 'asc' : 'desc'; }
+  render();
+}));
+
+dash.onData(render);
+</script>

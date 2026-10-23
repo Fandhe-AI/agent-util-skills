@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "source": "billing",
+  "org": "example-org",
+  "since": "2026-09",
+  "until": "2026-10",
+  "generated_at": "2026-10-03T12:00:00Z",
+  "linux_price_per_minute": {"2026-09": 0.008, "2026-10": 0.008},
+  "rows": [
+    {"day": "2026-09-30", "repo": "repo-a", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "included", "minutes": 100, "quota_minutes": 100, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-b", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "included", "minutes": 90, "quota_minutes": 90, "billable_minutes": 0, "gross_usd": 0.72, "discount_usd": 0.72, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-c", "visibility": "private", "sku": "actions macos", "runner_type": "macos", "charge_class": "included", "minutes": 80, "quota_minutes": 400, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-d", "visibility": "internal", "sku": "actions windows", "runner_type": "windows", "charge_class": "included", "minutes": 70, "quota_minutes": 140, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-e", "visibility": "public", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "public_free", "minutes": 60, "quota_minutes": 0, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-f", "visibility": "unknown", "sku": "actions linux arm", "runner_type": "ubuntu-arm", "charge_class": "unknown", "minutes": 50, "quota_minutes": 0, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-g", "visibility": "private", "sku": "actions other", "runner_type": "other", "charge_class": "included", "minutes": 40, "quota_minutes": 40, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-h", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "included", "minutes": 30, "quota_minutes": 30, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-i", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "included", "minutes": 20, "quota_minutes": 20, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-09-30", "repo": "repo-j", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "included", "minutes": 10, "quota_minutes": 10, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-10-01", "repo": "repo-a", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "paid", "minutes": 25, "quota_minutes": 0, "billable_minutes": 25, "gross_usd": 0.2, "discount_usd": 0, "net_usd": 0.2},
+    {"day": "2026-10-01", "repo": "repo-e", "visibility": "public", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "paid", "minutes": 15, "quota_minutes": 0, "billable_minutes": 15, "gross_usd": 0.12, "discount_usd": 0, "net_usd": 0.12},
+    {"day": "2026-10-02", "repo": "repo-a", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "included", "minutes": "12.5", "quota_minutes": "12.5", "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-10-02", "repo": "repo-b", "visibility": "private", "sku": "actions macos", "runner_type": "macos", "charge_class": "included", "minutes": 8, "quota_minutes": 40, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-10-02", "repo": "repo-c", "visibility": "unknown", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "unknown", "minutes": 5, "quota_minutes": 0, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-10-03", "repo": "repo-a", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "included", "minutes": -3, "quota_minutes": 0, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-10-03", "repo": "repo-b", "visibility": "private", "sku": "actions linux", "runner_type": "ubuntu", "charge_class": "weird", "minutes": "abc", "quota_minutes": 0, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0}
+  ]
+}
