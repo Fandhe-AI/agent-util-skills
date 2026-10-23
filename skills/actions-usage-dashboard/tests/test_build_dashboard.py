@@ -104,15 +104,28 @@ class CreateTests(unittest.TestCase):
         self.assertEqual(load(self.out, "dash-params.json")["plan_included_minutes"], 3000)
 
     def test_t6_oversize_template(self):
+        import contextlib
+        import io
+        from unittest import mock
         big = os.path.join(self.out, "big.html")
         with open(big, "w", encoding="utf-8") as f:
             f.write("a" * (256 * 1024 + 1))
         out = os.path.join(self.out, "o")
-        rc, _, err = run(base(out) + ["--template", big])
+        buf = io.StringIO()
+        with mock.patch.object(bd, "TEMPLATE_PATH", big), contextlib.redirect_stderr(buf):
+            rc = bd.main(base(out))
         self.assertEqual(rc, 1)
-        self.assertIn("256 KB", err)
+        self.assertIn("256 KB", buf.getvalue())
         self.assertFalse(os.path.exists(os.path.join(out, "index.json")))
         self.assertFalse(os.path.exists(os.path.join(out, "batch.json")))
+
+    def test_template_arg_removed(self):
+        out = os.path.join(self.out, "o")
+        rc, _, err = run(base(out) + ["--template", TEMPLATE])
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(out))
+        with open(SCRIPT, encoding="utf-8") as f:
+            self.assertIsNone(re.search(r'add_argument\(\s*"--template"', f.read()))
 
     def test_t7_boundary(self):
         overhead = bd.doc_bytes({"text": ""})
