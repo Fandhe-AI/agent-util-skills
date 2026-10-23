@@ -287,3 +287,36 @@ test('「その他」の識別子は __other__ という実名リポジトリと
   assert.notEqual(U.OTHER, '__other__')
   assert.doesNotMatch(U.OTHER, /^[A-Za-z0-9._-]+$/)
 })
+
+test('facts は年が 2000〜2099 の外の日付を (invalid) に寄せる', () => {
+  const mk = (day) => ({ day, minutes: 1, charge_class: 'paid', repo: 'a', runner_type: 'ubuntu', visibility: 'private' })
+  const out = plain(U.facts([mk('0001-01-01'), mk('9999-12-31'), mk('2026-10-01')], []))
+  assert.equal(out[0].day, '(invalid)')
+  assert.equal(out[1].day, '(invalid)')
+  assert.ok(out[0].invalid >= 1 && out[1].invalid >= 1)
+  assert.equal(out[2].day, '2026-10-01')
+  assert.equal(out[2].invalid, 0)
+})
+
+test('daily はグラフの日数上限を超えるとループせず tooLong を返す', () => {
+  const mk = (day) => ({ month: day.slice(0, 7), day, repo: 'a', runner_type: 'ubuntu', visibility: 'private', charge_class: 'paid', minutes: 1, quota_minutes: 0 })
+  const sel = { period: 'all', group_by: 'charge_class', include_free: true }
+  const over = plain(U.daily([mk('2000-01-01'), mk('2099-12-31')], sel))
+  assert.equal(over.days.length, 0)
+  assert.ok(over.tooLong > U.MAX_CHART_DAYS)
+  const start = Date.parse('2026-01-01T00:00:00Z')
+  const dayAt = (n) => new Date(start + n * 86400000).toISOString().slice(0, 10)
+  const edge = plain(U.daily([mk(dayAt(0)), mk(dayAt(U.MAX_CHART_DAYS - 1))], sel))
+  assert.equal(edge.days.length, U.MAX_CHART_DAYS)
+  assert.equal(edge.tooLong, 0)
+  const past = plain(U.daily([mk(dayAt(0)), mk(dayAt(U.MAX_CHART_DAYS))], sel))
+  assert.equal(past.days.length, 0)
+  assert.equal(past.tooLong, U.MAX_CHART_DAYS + 1)
+})
+
+test('drawChart は tooLong を参照して警告を出す', () => {
+  const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'templates', 'dashboard', 'index.html'), 'utf8')
+  const body = html.slice(html.indexOf('function drawChart('))
+  assert.match(body.slice(0, 600), /model\.tooLong/)
+  assert.match(html, /グラフの上限/)
+})

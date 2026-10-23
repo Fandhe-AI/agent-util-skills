@@ -55,6 +55,9 @@ RUNNER_TYPE_RULES = (
     (("windows",), "windows"),
 )
 SUMMARY_MONTHS_MAX = 12
+# 取得期間の上限（月数）。同梱 docs の同系エンドポイントの保持期間（過去 24 か月）に合わせた値。
+# usage 本体の保持期間は未確認。`--since 0001-01` のような入力で gh を大量に呼ばないための多層防御。
+MAX_MONTHS = 24
 
 
 def normalize_sku(sku):
@@ -312,6 +315,10 @@ def main(argv=None):
             raise FetchError("--since / --until は YYYY-MM 形式で指定する")
         if not a.since <= until <= current:
             raise FetchError("期間は since <= until <= 当月（UTC）で指定する")
+        sy, sm = int(a.since[:4]), int(a.since[5:7])
+        uy, um = int(until[:4]), int(until[5:7])
+        if (uy * 12 + um) - (sy * 12 + sm) + 1 > MAX_MONTHS:
+            raise FetchError("期間は最大 %d か月（since から until まで）" % MAX_MONTHS)
         if os.path.isdir(a.out):
             raise FetchError("--out がディレクトリを指している")
         if not os.path.isdir(os.path.dirname(os.path.abspath(a.out))):

@@ -32,6 +32,8 @@
 - billing の `day` は明細の `date` を UTC に直した日。対象月でない明細は捨てる
 - jobs の `day` は job の `started_at` の UTC 日
 - 期間の指定は billing が `--since` / `--until`（`YYYY-MM`、`--until` の上限は UTC の当月）、jobs が `--since`（`YYYY-MM-DD`）
+- billing の期間は最大 24 か月（since から until まで）。超えると gh を呼ばずに終了コード 1 で終わる。24 は同梱 docs の同系エンドポイントの保持期間に合わせた値で、usage 本体の保持期間は未確認
+- summarize.py の rows 入力は 8 MB 以下（build_dashboard.py と同じ。超えると終了コード 1）。グラフは 744 日（24 か月 x 31 日）を超えると描画せず警告を出す
 
 ## billing usage API
 

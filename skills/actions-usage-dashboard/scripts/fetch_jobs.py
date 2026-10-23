@@ -63,6 +63,8 @@ from _common import ORG_RE, FetchError, atomic_write_json, gh_api  # noqa: E402
 SCHEMA_VERSION = 1
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+# キャッシュの listing.listed_at の検証用（build_dashboard.py の ISO_RE と同じ形）。
+ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
 RUNS_SEARCH_CAP = 1000
@@ -334,6 +336,10 @@ def load_cache(path, org):
                 or not isinstance(ls.get("repos"), dict) or not isinstance(ls.get("truncated"), list) \
                 or not all(isinstance(t, str) for t in ls["truncated"]):
             raise bad
+        # 形式に合わない再開時刻は破棄して「不明」に倒す（端末へ制御文字を出さない）
+        la = ls.get("listed_at")
+        if not (isinstance(la, str) and ISO_RE.match(la)):
+            ls.pop("listed_at", None)
         for repo, items in ls["repos"].items():
             if not REPO_RE.match(repo) or not isinstance(items, list):
                 raise bad
@@ -472,7 +478,8 @@ def main(argv=None):
                 del ls["repos"][repo]
                 ls["truncated"] = [t for t in ls["truncated"] if not t.startswith("%s/%s " % (a.org, repo))]
             if ls["repos"]:
-                resumed_at = ls.get("listed_at") if isinstance(ls.get("listed_at"), str) else "不明"
+                la = ls.get("listed_at")
+                resumed_at = la if isinstance(la, str) and ISO_RE.match(la) else "不明"
         for repo in targets:
             if repo not in ls["repos"]:
                 client.check_rate()

@@ -59,8 +59,9 @@ DATASET_META = {
 # 雛形の readSel() が読むキーと揃える。
 DEFAULT_PARAMS = {"group_by": "charge_class", "include_free": True, "period": "latest",
                   "runner_type": None, "repo": None}
-DEFAULT_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "templates", "dashboard", "index.html")
+# 雛形はスキル同梱の 1 ファイルに固定する。任意パスを読む引数は持たない（Issue #145 L-4）。
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "templates", "dashboard", "index.html")
 
 
 class BuildError(Exception):
@@ -217,7 +218,6 @@ def main(argv=None):
     ap.add_argument("--plan-included-minutes", type=int)
     ap.add_argument("--updated-at")
     ap.add_argument("--updated-by", default=DEFAULT_BY)
-    ap.add_argument("--template", default=DEFAULT_TEMPLATE, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     try:
         return run(a)
@@ -296,7 +296,7 @@ def run(a):
                     batch.append(write_entry("datasets", did, fn, out_dir, "update", if_ver[did]))
     else:
         try:
-            with open(a.template, "rb") as f:
+            with open(TEMPLATE_PATH, "rb") as f:
                 html = f.read().decode("utf-8")
         except (OSError, UnicodeDecodeError):
             raise BuildError("雛形を読めない")

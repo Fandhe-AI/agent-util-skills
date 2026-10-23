@@ -172,10 +172,14 @@ window.UsageAgg = (function () {
   const OTHER = '\u0000other';
   const OTHER_LABEL = 'その他';
   const TOP_N = 7;
+  // グラフに描く日数の上限（24 か月 x 31 日。fetch_billing.py の MAX_MONTHS と揃える）。
+  const MAX_CHART_DAYS = 744;
 
   function facts(billing, jobs) {
     const CLASSES = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'];
     const DAY = /^\d{4}-\d{2}-\d{2}$/;
+    const MIN_YEAR = 2000;
+    const MAX_YEAR = 2099;
     const out = [];
     const nonNeg = (v) => {
       const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN);
@@ -198,7 +202,8 @@ window.UsageAgg = (function () {
         const gross = num(r.gross_usd);
         const net = num(r.net_usd);
         const day = String(r.day == null ? '' : r.day).slice(0, 10);
-        const ok = DAY.test(day);
+        const yr = Number(day.slice(0, 4));
+        const ok = DAY.test(day) && yr >= MIN_YEAR && yr <= MAX_YEAR;
         if (!ok) invalid += 1;
         out.push({
           day: ok ? day : '(invalid)',
@@ -379,10 +384,18 @@ window.UsageAgg = (function () {
     const sorted = days.slice().sort();
     const out = [];
     const end = Date.parse(sorted[sorted.length - 1] + 'T00:00:00Z');
-    for (let t = Date.parse(sorted[0] + 'T00:00:00Z'); t <= end; t += 86400000) {
+    const start = Date.parse(sorted[0] + 'T00:00:00Z');
+    const n = Math.round((end - start) / 86400000) + 1;
+    if (!(n <= MAX_CHART_DAYS)) return null;
+    for (let t = start; t <= end; t += 86400000) {
       out.push(new Date(t).toISOString().slice(0, 10));
     }
     return out;
+  }
+
+  function spanDays(days) {
+    const sorted = days.slice().sort();
+    return Math.round((Date.parse(sorted[sorted.length - 1] + 'T00:00:00Z') - Date.parse(sorted[0] + 'T00:00:00Z')) / 86400000) + 1;
   }
 
   // グラフ用の日 x グループの値。groups は積み上げ順（先頭が最下段）。
@@ -421,7 +434,9 @@ window.UsageAgg = (function () {
       total: Object.keys(values[id]).reduce((s, d) => s + values[id][d], 0),
       lower: lowerIds.has(id)
     }));
-    return { period: period, metric: metric, axis: axis, days: dayRange(rows.map((f) => f.day)), groups: groups, values: values, lowerBound: lowerIds.size > 0 };
+    const range = dayRange(rows.map((f) => f.day));
+    const tooLong = range === null ? spanDays(rows.map((f) => f.day)) : 0;
+    return { period: period, metric: metric, axis: axis, days: range || [], tooLong: tooLong, groups: groups, values: values, lowerBound: lowerIds.size > 0 };
   }
 
   return {
@@ -431,6 +446,7 @@ window.UsageAgg = (function () {
     OTHER: OTHER,
     OTHER_LABEL: OTHER_LABEL,
     TOP_N: TOP_N,
+    MAX_CHART_DAYS: MAX_CHART_DAYS,
     facts: facts,
     totals: totals,
     byAxis: byAxis,
@@ -624,6 +640,10 @@ function drawMessage(host, text) {
 function drawChart(host, model, colors, axis, latestDay) {
   d3.select(host).selectAll('*').remove();
   const visible = model.groups.filter((g) => !hidden.has(g.id));
+  if (model.tooLong) {
+    drawMessage(host, '期間が ' + model.tooLong + ' 日あり、グラフの上限（' + U.MAX_CHART_DAYS + ' 日）を超えるため描画しない。期間を絞ると表示できる。');
+    return;
+  }
   if (!model.days.length || !visible.length) {
     drawMessage(host, '該当するデータがない。');
     return;
