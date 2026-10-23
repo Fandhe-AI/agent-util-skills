@@ -101,12 +101,12 @@ class SummaryTests(Base):
         self.assertEqual(bd["paid"], {"minutes": 130.0, "net_usd": 2.48})
         self.assertEqual(bd["included"]["quota_minutes"], 800.0)
         self.assertEqual(bd["included"]["included_minutes"], 3000)
-        self.assertEqual(bd["included"]["remaining"], 2200.0)
-        self.assertAlmostEqual(bd["included"]["ratio"], 800 / 3000, places=5)
+        self.assertIsNone(bd["included"]["remaining"])  # unknown ありは確定値にしない
+        self.assertIsNone(bd["included"]["ratio"])
         self.assertEqual(bd["public_free"]["minutes"], 700.0)
         self.assertEqual(bd["self_hosted"], {"minutes": 40.0, "available": True})
         self.assertEqual(bd["unknown"]["minutes"], 50.0)
-        self.assertTrue(any("過小" in w for w in s["warnings"]))
+        self.assertTrue(any("下限" in w for w in s["warnings"]))
 
     def test_no_jobs(self):
         s = self.summary(jobs=False)
@@ -116,7 +116,7 @@ class SummaryTests(Base):
     def test_over_quota(self):
         s = self.summary("free")
         inc = s["breakdown"]["included"]
-        self.assertEqual(inc["remaining"], 1200.0)
+        self.assertIsNone(inc["remaining"])
         self.assertEqual(inc["over"], 0.0)
         rows = [row("2026-10-01", "r", "included", 2500, quota=2500)]
         bd = sm.breakdown(rows, 2000, False)
@@ -206,6 +206,28 @@ class WarningAndMissingBillingTests(Base):
         self.assertIn("保証できる場合だけ", msg)
         self.assertIn("unknown のまま", msg)
 
+    def test_unknown_makes_remaining_and_ratio_null(self):
+        org, rows, src, w = sm.load_rows([self.write("b.json", doc("billing", BILLING))])
+        s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w, today="2026-10-31")
+        inc = s["breakdown"]["included"]
+        self.assertTrue(inc["lower_bound"])
+        self.assertIsNone(inc["remaining"])
+        self.assertIsNone(inc["ratio"])
+        text = "\n".join(sm.render_text(s))
+        self.assertIn("下限", text)
+        self.assertNotIn("残り", text)
+        self.assertNotIn("%、", text)
+
+    def test_no_unknown_keeps_exact_remaining(self):
+        rs = [r for r in BILLING if r["charge_class"] != "unknown"]
+        org, rows, src, w = sm.load_rows([self.write("b.json", doc("billing", rs))])
+        s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w, today="2026-10-31")
+        inc = s["breakdown"]["included"]
+        self.assertFalse(inc["lower_bound"])
+        self.assertIsNotNone(inc["remaining"])
+        self.assertIsNotNone(inc["ratio"])
+        self.assertIn("残り", "\n".join(sm.render_text(s)))
+
     def test_jobs_only_shows_no_data(self):
         org, rows, src, w = sm.load_rows([self.write("j.json", doc("jobs", JOBS))])
         s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w)
@@ -246,6 +268,28 @@ class CoverageTests(Base):
         s = self.build("2026-10", "2026-10-10")
         self.assertTrue(s["breakdown"]["self_hosted"]["available"])
         self.assertTrue(any("途中から" in w for w in s["warnings"]))
+
+    def test_tail_missing_warns_and_in_json(self):
+        paths = [self.write("b.json", doc("billing", [row("2026-10-02", "r", "paid", 5, usd=1)],
+                                          since="2026-10", until="2026-10")),
+                 self.write("j.json", doc("jobs", [row("2026-10-08", "s", "self_hosted", 40)],
+                                          since="2026-09-01", until="2026-10-10"))]
+        org, rows, src, _w = sm.load_rows(paths)
+        s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, today="2026-10-31")
+        self.assertTrue(s["coverage"]["jobs"]["tail_missing"])
+        self.assertFalse(s["coverage"]["jobs"]["head_missing"])
+        self.assertFalse(s["coverage"]["billing"]["tail_missing"])
+        self.assertEqual(s["coverage"]["jobs"]["until"], "2026-10-10")
+        self.assertTrue(any("末尾まで届かない" in w and "2026-10-10" in w for w in s["warnings"]))
+
+    def test_current_month_uses_today_as_expected_end(self):
+        paths = [self.write("j.json", doc("jobs", [row("2026-10-08", "s", "self_hosted", 40)],
+                                          since="2026-09-01", until="2026-10-10"))]
+        org, rows, src, _w = sm.load_rows(paths)
+        ok = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, today="2026-10-10")
+        self.assertFalse(ok["coverage"]["jobs"]["tail_missing"])
+        ng = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, today="2026-10-11")
+        self.assertTrue(ng["coverage"]["jobs"]["tail_missing"])
 
     def test_missing_or_bad_range_rejected(self):
         for src, since, until in (("billing", "2026-9", "2026-10"), ("billing", "2026-10", "2026-09"),

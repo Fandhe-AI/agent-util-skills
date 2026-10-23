@@ -116,13 +116,18 @@ def _coverage(src, data, p):
     return first, last
 
 
-def month_overlap(cov, month):
-    """取得期間が対象月と重なるか。(重なり, 月初から取れているか) を返す。"""
+def month_overlap(cov, month, today=None):
+    """取得期間が対象月と重なるか。(重なり, 月初から取れているか, 期待末日まで取れているか) を返す。
+
+    期待末日は対象月の末日。ただし当月（today が対象月内）は today を超えて取れないため today とする。
+    """
     if cov is None:
-        return False, False
+        return False, False, False
     m_first = month + "-01"
     m_last = "%s-%02d" % (month, calendar.monthrange(int(month[:4]), int(month[5:]))[1])
-    return cov[0] <= m_last and cov[1] >= m_first, cov[0] <= m_first
+    expected_end = min(m_last, today) if today else m_last
+    return (cov[0] <= m_last and cov[1] >= m_first, cov[0] <= m_first,
+            cov[1] >= expected_end)
 
 
 def load_rows(paths):
@@ -203,6 +208,9 @@ def _r(x):
 
 
 def breakdown(rows, included_minutes, has_jobs, has_billing=True):
+    """内訳を作る。unknown 区分の利用がある月は含有枠の消費が過小になるため、
+    remaining / ratio を確定値にせず None（不明）にし、quota_minutes は下限として扱う。
+    """
     s = {c: {"minutes": 0.0, "net_usd": 0.0, "quota": 0.0} for c in CHARGE_CLASSES}
     for r in rows:
         a = s[r["charge_class"]]
@@ -212,10 +220,13 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True):
     quota = s["included"]["quota"]
     inc = {"minutes": _r(s["included"]["minutes"]), "quota_minutes": _r(quota),
            "included_minutes": included_minutes, "remaining": None, "over": None, "ratio": None}
+    inc["lower_bound"] = s["unknown"]["minutes"] > 0
     if included_minutes:
-        inc["remaining"] = _r(max(included_minutes - quota, 0.0))
+        # 消費は下限でも超過分は確定するため over は残す。残量と割合は下限からは決まらない。
         inc["over"] = _r(max(quota - included_minutes, 0.0))
-        inc["ratio"] = _r(quota / included_minutes)
+        if not inc["lower_bound"]:
+            inc["remaining"] = _r(max(included_minutes - quota, 0.0))
+            inc["ratio"] = _r(quota / included_minutes)
     if not has_billing:
         # billing 未入力では GitHub ホスト分の内訳と枠の残りを計算できない。0 と誤読させず不明にする。
         return {
@@ -273,12 +284,15 @@ def candidates(month_rows, all_rows, top):
             "others": max(len(ordered) - top, 0)}
 
 
-def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=()):
+def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=(), today=None):
     mrows = select_month(rows, month)
     inc_min = included_for(plan)
     warnings = list(src_warnings)
-    has_billing, b_full = month_overlap(sources.get("billing"), month)
-    has_jobs, j_full = month_overlap(sources.get("jobs"), month)
+    if today is None:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    has_billing, b_full, b_tail = month_overlap(sources.get("billing"), month, today)
+    has_jobs, j_full, j_tail = month_overlap(sources.get("jobs"), month, today)
+    coverage = {}
     if "billing" not in sources:
         warnings.append("billing 未入力のため有料・含有枠・公開無料の内訳と残量は不明（fetch_billing.py の出力を --rows に渡す）")
     elif not has_billing:
@@ -286,17 +300,24 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
                         % (month, *sources["billing"]))
     if "jobs" in sources and not has_jobs:
         warnings.append("対象月 %s は jobs の取得期間（%s..%s）外のためセルフホストは不明" % (month, *sources["jobs"]))
-    for name, ok, full in (("billing", has_billing, b_full), ("jobs", has_jobs, j_full)):
-        if ok and not full:
+    for name, ok, full, tail in (("billing", has_billing, b_full, b_tail), ("jobs", has_jobs, j_full, j_tail)):
+        if not ok:
+            continue
+        coverage[name] = {"since": sources[name][0], "until": sources[name][1],
+                          "head_missing": not full, "tail_missing": not tail}
+        if not full:
             warnings.append("%s の取得期間（%s..%s）が対象月の途中から始まるため月初分が欠ける"
                             % (name, *sources[name]))
+        if not tail:
+            warnings.append("%s の取得期間（%s..%s）が対象月の末尾まで届かないため %s 以降の分が欠ける"
+                            % (name, *sources[name], sources[name][1]))
     if plan_warning:
         warnings.append(plan_warning)
     elif inc_min is None:
         warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
     bd = breakdown(mrows, inc_min, has_jobs, has_billing)
     if has_billing and bd["unknown"]["minutes"] > 0:
-        warnings.append("区分不明あり。含有枠の消費は過小。期間中に公開範囲が変わっていないと保証できる場合だけ、"
+        warnings.append("区分不明あり。含有枠の消費は下限で、残量・割合は不明。期間中に公開範囲が変わっていないと保証できる場合だけ、"
                         "fetch_billing.py に --assume-current-visibility を付けると現在の公開範囲で分類できる"
                         "（削除済み・権限不足のリポジトリは unknown のまま残る）")
     if not mrows:
@@ -305,7 +326,7 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
         "schema_version": SCHEMA_VERSION, "org": org, "month": month,
         "plan": {"name": plan, "included_minutes": inc_min},
         "breakdown": bd, "group_by": group_top(mrows, group_by, top),
-        "candidates": candidates(mrows, rows, top), "warnings": warnings,
+        "candidates": candidates(mrows, rows, top), "coverage": coverage, "warnings": warnings,
     }
 
 
@@ -321,7 +342,12 @@ def render_text(s):
         out.append("公開リポの無料: データなし")
         return _render_tail(s, out)
     out.append("有料: %.1f 分 / %.2f USD" % (bd["paid"]["minutes"], bd["paid"]["net_usd"]))
-    if inc["included_minutes"]:
+    if inc["included_minutes"] and inc["lower_bound"]:
+        txt = "含有枠: 消費 %.1f 分以上（下限。区分不明あり）（実 %.1f 分）/ %d 分、残量・割合は不明" % (
+            inc["quota_minutes"], inc["minutes"], inc["included_minutes"])
+        if inc["over"] > 0:
+            txt += "、超過 %.1f 分以上" % inc["over"]
+    elif inc["included_minutes"]:
         txt = "含有枠: 消費 %.1f 分（実 %.1f 分）/ %d 分 = %.1f%%、残り %.1f 分" % (
             inc["quota_minutes"], inc["minutes"], inc["included_minutes"],
             inc["ratio"] * 100, inc["remaining"])
