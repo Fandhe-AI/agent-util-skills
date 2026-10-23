@@ -146,7 +146,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 
 | 用途 | 必要な権限 |
 |---|---|
-| billing usage（`organizations/<org>/settings/billing/usage`） | 公式は org の administrator を要求する（出典: rest/billing/usage）。billing manager で呼べるかは**未確認**。fine-grained token では Organization permissions の "Administration"（read）で足りる（出典: permissions-required ページ）。ただし実機では未検証である。動作確認済みの経路は classic token の `admin:org` だけで、org 設定の書き込みを含む広いスコープである。"Administration"（read）は読み取り専用でより狭いが、確認できるまで推奨とは断定しない。使い終わったらトークンを失効させるか、有効期限の短いトークンを使う |
+| billing usage（`organizations/<org>/settings/billing/usage`） | 公式は org の administrator を要求する（出典: rest/billing/usage）。billing manager で呼べるかは**未確認**。fine-grained token は使わない。公式の使用状況レポートのチュートリアルは、これらの課金エンドポイントが fine-grained token に対応しないとしており、対応する権限名も公式文書で確認できていない（権限名は創作しない）。動作確認済みの経路は classic token の `admin:org` だけで、org 設定の書き込みを含む広いスコープである。公式文書で classic のより狭いスコープを確認できるまで、これ以外は推奨しない。使い終わったらトークンを失効させるか、有効期限の短いトークンを使う |
 | jobs（runs / jobs / リポジトリ一覧） | リポジトリ一覧 `orgs/<org>/repos` は Repository permissions の "Metadata"（read）、`actions/runs` と `runs/<id>/jobs` は Repository permissions の "Actions"（read）（出典: permissions-required ページ）。`fetch_billing.py` も visibility の取得に `orgs/<org>/repos` を呼ぶため、"Metadata"（read）が要る。実機は未検証 |
 | `rate_limit` | 権限不要 |
 
@@ -154,8 +154,9 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 
 確認日は 2026-10-23。
 
-- https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens : billing usage は Organization "Administration"（read）、`orgs/<org>/repos` は Repository "Metadata"（read）、runs / jobs は Repository "Actions"（read）
+- https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens : `orgs/<org>/repos` は Repository "Metadata"（read）、runs / jobs は Repository "Actions"（read）。billing usage の fine-grained 権限は載っていない（公式文書で要確認）
 - https://docs.github.com/en/rest/billing/usage : 呼び出せるのは organization の administrator。billing manager の記載は無い
+- 使用状況レポートのチュートリアル（公式）: 課金系エンドポイントは fine-grained token 非対応
 - https://docs.github.com/en/billing/reference/billing-reports : 利用はすべて UTC で記録される。詳細レポートは Web UI 専用で、REST API は集計済みの情報だけを返す
 - https://docs.github.com/en/billing/concepts/product-billing/github-actions : artifact storage の使用量は 6〜12 時間以内に更新される（minutes の記載ではない）
 - 未確認: Actions の分数について請求画面と API の更新間隔・時差（https://docs.github.com/en/billing/how-tos/products/view-productlicense-use を含め、上記のどのページにも記載が無い）
