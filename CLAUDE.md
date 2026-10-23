@@ -36,8 +36,8 @@ skills/                               -- 本リポジトリが上流ソースと
   comment-code/ contribute-skill/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/
   implement-issue/ implement-issue-tree/ implement-review/ implement-review-pr/ init-claude/
   project-add-items/ project-archive-done/ project-create-issues/ project-init/
-  project-sync-issues/ project-update-items/ project-view-status/ sync-skills-lock/
-  update-claude/ update-docs/ update-issue-tree/     -- Fandhe-AI/agent-cli-skills から日次同期（23件）
+  project-sync-issues/ project-update-items/ project-view-status/ setup-repo-guards/ sync-skills-lock/
+  update-claude/ update-docs/ update-issue-tree/     -- Fandhe-AI/agent-cli-skills から日次同期（24件）
   anthropic-claude-code/ anthropic-claude-code-extend/ github-docs/
                                        -- Fandhe-AI/agent-reference-skills から日次同期（3件）
 skills-lock.json                      -- vendored スキルの source・skillPath・computedHash 台帳
@@ -191,7 +191,7 @@ create-skill, create-agent
 
 ### vendored スキル（消費専用・.agents/skills/ に配置。編集は上流リポジトリで行う）
 
-- **Fandhe-AI/agent-cli-skills 由来（23件）**: comment-code, contribute-skill, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, init-claude, project-add-items, project-archive-done, project-create-issues, project-init, project-sync-issues, project-update-items, project-view-status, sync-skills-lock, update-claude, update-docs, update-issue-tree
+- **Fandhe-AI/agent-cli-skills 由来（24件）**: comment-code, contribute-skill, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, init-claude, project-add-items, project-archive-done, project-create-issues, project-init, project-sync-issues, project-update-items, project-view-status, setup-repo-guards, sync-skills-lock, update-claude, update-docs, update-issue-tree
 - **Fandhe-AI/agent-reference-skills 由来（3件）**: github-docs, anthropic-claude-code, anthropic-claude-code-extend
 
 vendored スキルは `.github/workflows/update-external.yml` の日次同期で更新される。手元で改修した vendored スキルを upstream へ反映する場合は `contribute-skill` を使う。
