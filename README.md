@@ -1,6 +1,6 @@
 # Agent Util Skills
 
-Claude Code 向けのユーティリティスキル集。`create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを、開発ワークフロースキル集 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から本リポジトリへ移設して独立管理する。加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）、`actions-usage-dashboard`（org の GitHub Actions 利用分数データ取得）を本リポジトリで新規開発し、合わせて 6 スキルを上流ソースとして管理する。
+Claude Code 向けのユーティリティスキル集。`create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを、開発ワークフロースキル集 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から本リポジトリへ移設して独立管理する。加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）、`actions-usage-dashboard`（org の Actions 利用分数を日次集計し Dashboard 型 Artifact で可視化）を本リポジトリで新規開発し、合わせて 6 スキルを上流ソースとして管理する。
 
 インストールには [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
 
@@ -76,12 +76,14 @@ fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub
 
 ### actions-usage-dashboard
 
-org の GitHub Actions 利用分数を billing usage API から取得し、日 x リポジトリ x SKU x 料金区分（paid / included / public_free）の行データ（JSON）へ正規化する。「Actions の使用量を集計して」「課金分数を日次で出して」「billing usage を取得して」などで使用する。
+org の GitHub Actions 利用分数（使用時間）を日次で集計し、claude.ai の Dashboard 型 Artifact で可視化する。作成・確認・更新の 3 用途に対応する。「Actions の使用時間を見せて」「無料枠の残りを確認して」「Actions のダッシュボードを作って」「ダッシュボードを更新して」などで使用する。
 
-- `fetch_billing.py` は GitHub ホストランナーが対象。セルフホストは `fetch_jobs.py`（Actions jobs API、増分キャッシュ付き）で別に集計する。`gh api` 経由のみでトークンは扱わず、Python 標準ライブラリだけで動く
-- 有料分は公開範囲ではなく明細ごとの `netAmount / pricePerUnit` から判定し、`quota_minutes` は含有枠を消費した分だけを Linux 単価で換算する
-- 月の取得に失敗した場合は部分ファイルを書かず非 0 で終了する
-- 詳細は [skills/actions-usage-dashboard/SKILL.md](skills/actions-usage-dashboard/SKILL.md) を参照
+- 最重要の軸は料金区分（`paid` / `included` / `public_free` / `self_hosted`）で、全スクリプトとページで共通に使う
+- 取得: `fetch_billing.py`（GitHub ホストランナー。billing usage API）と `fetch_jobs.py`（セルフホスト。jobs API と増分キャッシュ）。どちらも `gh api` 経由のみでトークンは扱わず、Python 標準ライブラリだけで動く
+- 確認: `summarize.py` が Artifact を開かずにターミナルへ 20 行以内の要約とセルフホスト移行候補を出す
+- 作成・更新: `build_dashboard.py` が Artifact へ書く JSON と batch を一括生成する。雛形 `templates/dashboard/index.html` は数値を持たない
+- モデルはデータ本体の JSON を読まず、スクリプトが出す要約とパスだけを扱う。データを添付すると Artifact を開ける人は元データ（非公開リポ名を含む）を読める点に注意する
+- 詳細は [skills/actions-usage-dashboard/SKILL.md](skills/actions-usage-dashboard/SKILL.md)、換算式・権限は [references/data-sources.md](skills/actions-usage-dashboard/references/data-sources.md) を参照
 
 各スキルのネットワーク・sandbox 実行要件は [docs/skill-network-requirements.md](docs/skill-network-requirements.md) を参照。
 
