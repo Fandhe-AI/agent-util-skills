@@ -27,7 +27,7 @@ org の Actions 利用分数を、ダッシュボードを「作る」・ター�
 
 コマンドの `<skill-root>` は、この SKILL.md が置かれたディレクトリ（導入先により `skills/` / `.agents/skills/` / `.claude/skills/` 配下の `actions-usage-dashboard`）の絶対パスに読み替える。
 
-前提: `gh` が認証済みで、org の billing 閲覧権限があること（[必要な権限](references/data-sources.md#必要な権限)）。作業用ディレクトリ（rows・キャッシュ・`--out-dir`）は `mktemp -d` など作業ツリーの外に置き、rows を誤ってコミットしない。
+前提: `gh` が認証済みで、org の billing 閲覧権限があること（[必要な権限](references/data-sources.md#必要な権限)）。動作確認済みなのは classic token の `admin:org` だけで、これは org 設定の書き込みも含む広いスコープである。使い終わったら失効させるか、有効期限の短いトークンを使う（fine-grained token の権限名は未確認。確認は #143）。作業用ディレクトリ（rows・キャッシュ・`--out-dir`）は `mktemp -d` など作業ツリーの外に置き、rows を誤ってコミットしない。
 
 ```bash
 # GitHub ホスト分（billing）
