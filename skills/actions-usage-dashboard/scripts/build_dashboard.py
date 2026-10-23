@@ -20,6 +20,9 @@
   --update --add-dataset jobs は、作成時に無かった dataset を op: set（全体）で足し、
   既存分の update と同じ batch に入れる。「--if-version が無ければ新規」と推測しないのは、
   書き忘れが版固定なしの上書きにならないよう fail-closed にするため。
+  更新では billing の rows を省いて jobs だけを渡せる（作成は billing 必須のまま）。
+  --add-dataset が jobs だけなのは、dataset id が雛形・本スクリプト・テストで固定の契約であり、
+  warnings は fetch 出力の warnings として既に表示されるため（詳細は SKILL.md）。
 
 batch.json にはローカルの絶対パスが入る。このファイル自体は store へ送らない
   （ArtifactData が file_path を読み、参照先の中身だけを文書として送る）。
@@ -207,13 +210,13 @@ def parse_if_versions(items, ids):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Dashboard 型 Artifact へ書く文書と batch.json を生成する")
     ap.add_argument("--org", required=True)
-    ap.add_argument("--rows", action="append", required=True, help="rows JSON（billing 必須、jobs 任意）")
+    ap.add_argument("--rows", action="append", required=True, help="rows JSON（作成は billing 必須・jobs 任意。--update では jobs だけも可）")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--asset-url", action="append", default=[], help="アップロード後の /_blob/ url（--rows と同順）")
     ap.add_argument("--update", action="store_true")
     ap.add_argument("--if-version", action="append", default=[], help="<id>=<N>（--update 用）")
     ap.add_argument("--add-dataset", action="append", default=[], choices=["jobs"],
-                    help="--update で store にまだ無い dataset を op: set で作る")
+                    help="--update で store にまだ無い dataset を op: set で作る（jobs のみ。理由は SKILL.md）")
     ap.add_argument("--title")
     ap.add_argument("--plan-included-minutes", type=int)
     ap.add_argument("--updated-at")
@@ -240,8 +243,10 @@ def run(a):
     ids = [e["id"] for e in entries]
     if len(set(ids)) != len(ids):
         raise BuildError("同じ source の rows が重複している")
-    if "billing" not in ids:
-        raise BuildError("billing の rows が必要")
+    # billing 必須は作成だけ。更新は dataset 単位の op なので jobs だけも通す
+    # （billing は月粒度・jobs は日粒度で、片方だけ取り直したい場面がある）。
+    if not a.update and "billing" not in ids:
+        raise BuildError("作成には billing の rows が必要")
     title = clean_text("--title", a.title) if a.title else "%s の Actions 利用状況" % a.org
     by = clean_text("--updated-by", a.updated_by)
     updated = {"at": resolve_updated_at(a.updated_at, entries), "by": by}
