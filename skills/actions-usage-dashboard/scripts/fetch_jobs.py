@@ -27,7 +27,24 @@
   完了済みの旧 attempt の分をキャッシュから残す。キャッシュは非信頼入力として検証し、壊れていれば止まる。
 
 終了コード: 0 成功 / 1 失敗 / 3 レート制限の残量不足で中断（キャッシュ保存済み。
-  同じコマンドで再実行すると続きから取る。中断時と失敗時は --out を書かない）。
+  同じコマンドで再実行すると続きから取る。中断時と失敗時は --out を書かない）/
+  4 --max-seconds の時間上限で中断（キャッシュ保存済み。3 と違い待たずにすぐ再実行してよい。--out は書かない）。
+
+runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, from}}）に、リポジトリごとの
+  「次回の一覧の下限候補」を持つ。2 回目以降は created>=from から一覧し、API 呼び出しを減らす。
+  from は「実行日 - RELIST_WINDOW_DAYS」と「処理後も未登録の run の作成日」と「1,000 件上限で
+  欠けた日」の最小値。窓内の再実行（run_attempt 増）と未完了 run を拾い続けるための下限である。
+  --since を前回より過去にしたリポジトリ、cursor の無いリポジトリは全期間を一覧する。
+  出力の行は一覧ではなく cache["runs"] から作るため、一覧から外れた古い run も集計に残る。
+  cursor はキャッシュ（非信頼入力）なので load_cache で検証し、未来日の from は
+  「今日 - RELIST_WINDOW_DAYS」で挟み込んで、一覧を飛ばしてデータを落とす改ざんを防ぐ。
+
+進捗と checkpoint: 大きな org では初回が前景の timeout を超えるため、リポジトリの境目（一覧）と
+  run の境目（jobs）で、--progress-interval 秒ごとに stderr へ数値だけの進捗を出し、同時に
+  キャッシュを保存する。外部から kill されても、それまでの取得を失わず同じコマンドで続きから取れる。
+  進捗にリポジトリ名を出さない（エージェントが stderr を読むためのトークン節約と、非公開名の露出回避）。
+  --max-seconds は時間で区切る上限で、run / リポジトリの境目で中断する。各フェーズで少なくとも
+  1 単位は処理してから中断するため、小さな値でも再実行を重ねれば必ず前進する。
 
 判定: labels に self-hosted を持つ job だけをセルフホストとする（独自ランナーグループに置いた
   GitHub ホストの larger runner は self-hosted ラベルを持たないため含めず、billing との二重計上を避ける）。
@@ -56,6 +73,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timedelta, timezone
 
 SCHEMA_VERSION = 1
@@ -71,6 +89,13 @@ MAX_JOB_PAGES = 100
 DEFAULT_MIN_REMAINING = 200
 DEFAULT_RATE_CHECK_EVERY = 25
 EXIT_RATE_LIMITED = 3
+EXIT_TIME_BUDGET = 4
+DEFAULT_PROGRESS_INTERVAL = 30
+# GitHub の run を再実行できる期間（公式文書では初回実行から 30 日と認識しているが、この環境では
+# 一次情報を確認できていない）に余裕を持たせた値。一覧の下限を「前回実行日 - この日数」より新しく
+# しないことで、窓内の再実行（run_attempt 増）を取りこぼさない。CLI 引数にはしない（小さくすると
+# 取りこぼしで分数が減るため、利用者が触る値ではない）
+RELIST_WINDOW_DAYS = 45
 ZERO_COLS = ("quota_minutes", "billable_minutes", "gross_usd", "discount_usd", "net_usd")
 
 
@@ -90,7 +115,44 @@ class RateLimited(Exception):
         self.remaining, self.reset = remaining, reset
 
 
+class TimeBudgetExceeded(Exception):
+    """--max-seconds に達した。main が保存して終了コード 4 で終える（RateLimited と違い待たずに再実行できる）。"""
+
+
 # ---- 純粋関数（gh に依存しない） ----
+
+def relist_floor(entry, since, today):
+    """リポジトリの runs 一覧の下限日を返す。cursor が無い・前回より過去を求めた場合は全期間（since）。"""
+    if entry is None or since < date.fromisoformat(entry["since"]):
+        return since
+    # 正規のキャッシュでは from が常に「前回実行日 - 窓」以下なので min は何も変えない。
+    # 改ざんされた未来日の from で一覧が飛ばされ、データが落ちるのを防ぐための挟み込み
+    base = today - timedelta(days=RELIST_WINDOW_DAYS)
+    return max(since, min(date.fromisoformat(entry["from"]), base))
+
+
+def next_cursor_entry(items, settled, truncated_days, since, today):
+    """次回の一覧の下限候補を cursor の 1 エントリにする。
+
+    items: 今回一覧した run（{id, run_attempt, created_at}）。settled(id, attempt) は処理後も
+    cache["runs"] に attempt 以上で登録済みかを返す。未登録の run（未完了・再実行中・不正 job）と
+    1,000 件上限で欠けた日は、次回も一覧に入れるため from に含める。作成日が読めない run があれば
+    安全側で since（全期間）にする。
+    """
+    cands = [today - timedelta(days=RELIST_WINDOW_DAYS)]
+    for it in items:
+        if settled(it["id"], it["run_attempt"]):
+            continue
+        d = it.get("created_at", "")[:10]
+        try:
+            if not DATE_RE.match(d):
+                raise ValueError
+            cands.append(date.fromisoformat(d))
+        except ValueError:
+            return {"since": since.isoformat(), "from": since.isoformat()}
+    cands.extend(truncated_days)
+    return {"since": since.isoformat(), "from": min(cands).isoformat()}
+
 
 def is_self_hosted(job):
     # self-hosted ラベルだけで判定する。GitHub ホストの larger runner は独自ランナーグループに
@@ -177,6 +239,36 @@ def build_rows(entries, visibility, since):
         row.update({c: 0.0 for c in ZERO_COLS})
         rows.append(row)
     return rows
+
+
+# ---- 進捗・時間上限 ----
+
+class Pacer:
+    """進捗の間引き出力・checkpoint 保存・時間上限の判定を担う。
+
+    main から run / リポジトリの境目でだけ呼ばれる。進捗は数値のみ（外部由来の文字列を出さない）。
+    """
+
+    def __init__(self, max_seconds, interval, clock=time.monotonic):
+        self.max_seconds, self.interval, self.clock = max_seconds, interval, clock
+        self.start = self.last = clock()
+        self.units = {"list": 0, "jobs": 0}
+
+    def check_budget(self, phase):
+        # 各フェーズで 1 単位は処理してから中断する（小さすぎる値でも再実行で必ず前進させるため）
+        if self.max_seconds > 0 and self.units[phase] >= 1 and self.clock() - self.start >= self.max_seconds:
+            raise TimeBudgetExceeded()
+
+    def done(self, phase):
+        self.units[phase] += 1
+
+    def report(self, label, k, n, calls, save):
+        now = self.clock()
+        if k < n and self.interval > 0 and now - self.last < self.interval:
+            return
+        self.last = now
+        print("進捗: %s %d/%d・API 呼び出し %d・経過 %d 秒" % (label, k, n, calls, now - self.start), file=sys.stderr)
+        save()
 
 
 # ---- gh 層 ----
@@ -363,6 +455,21 @@ def load_cache(path, org):
                     _run_key(it)
                 except FetchError:
                     raise bad
+    cur = c.get("cursor")
+    if cur is not None:
+        if not isinstance(cur, dict):
+            raise bad
+        for repo, ent in cur.items():
+            if not REPO_RE.match(repo) or not isinstance(ent, dict):
+                raise bad
+            for k in ("since", "from"):
+                v = ent.get(k)
+                if not isinstance(v, str) or not DATE_RE.match(v):
+                    raise bad
+                try:
+                    date.fromisoformat(v)
+                except ValueError:
+                    raise bad
     for rid, e in c["runs"].items():
         if not rid.isdigit() or not isinstance(e, dict) or not isinstance(e.get("repo"), str) \
                 or not REPO_RE.match(e["repo"]) or not _pos_int(e.get("attempt")) \
@@ -424,6 +531,10 @@ def main(argv=None):
                     help="core レート制限の残量がこの値を下回ったら中断する")
     ap.add_argument("--rate-check-every", type=int, default=DEFAULT_RATE_CHECK_EVERY,
                     help="API 呼び出しがこの回数増えるごとに残量を確認する")
+    ap.add_argument("--max-seconds", type=float, default=0,
+                    help="この秒数に達したら run / リポジトリの境目でキャッシュを保存して終了コード 4 で中断する（0 は無制限）")
+    ap.add_argument("--progress-interval", type=float, default=DEFAULT_PROGRESS_INTERVAL,
+                    help="進捗の stderr 出力とキャッシュ保存の間隔（秒。0 で境目ごと）")
     a = ap.parse_args(argv)
     now = datetime.now(timezone.utc)
     today = now.date()
@@ -431,6 +542,7 @@ def main(argv=None):
              "archived": 0, "badname": 0}
     truncated, skipped, cache, cache_path, client = [], [], None, None, None
     resumed_at = None
+    relist = {"full": 0, "partial": 0, "oldest": None}
     until_s = today.isoformat()
 
     def lines(rows=None, note=None):
@@ -445,6 +557,10 @@ def main(argv=None):
         if rows is not None:
             out.append("行数: %d・セルフホスト合計 %.1f 分（除外: GitHub ホスト job %d / 未完了 job %d）" % (
                 len(rows), sum(r["minutes"] for r in rows), stats["hosted"], stats["unfinished"]))
+        if relist["full"] or relist["partial"]:
+            out.append("runs 一覧: 全期間 %d リポ / 前回位置から %d リポ%s" % (
+                relist["full"], relist["partial"],
+                "（下限の最古 %s）" % relist["oldest"] if relist["oldest"] else ""))
         if truncated:
             out.append("警告: 1,000 件上限で欠けた可能性のある区間 %d" % len(truncated))
         if skipped:
@@ -461,6 +577,9 @@ def main(argv=None):
         since = parse_since(a.since, today)
         if a.min_remaining < 0 or a.rate_check_every < 1:
             raise FetchError("--min-remaining は 0 以上、--rate-check-every は 1 以上の整数で指定する")
+        if not (math.isfinite(a.max_seconds) and a.max_seconds >= 0
+                and math.isfinite(a.progress_interval) and a.progress_interval >= 0):
+            raise FetchError("--max-seconds と --progress-interval は 0 以上の数で指定する")
         if os.path.isdir(a.out):
             raise FetchError("--out がディレクトリを指している")
         if not os.path.isdir(os.path.dirname(os.path.abspath(a.out))):
@@ -473,6 +592,7 @@ def main(argv=None):
         cache = load_cache(cache_path, a.org)
         os.makedirs(a.cache, exist_ok=True)
         client = GhClient(a.min_remaining, a.rate_check_every)
+        pacer = Pacer(a.max_seconds, a.progress_interval)
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)
         return 1
@@ -503,27 +623,55 @@ def main(argv=None):
                   "listed_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
             cache["listing"] = ls
         else:
-            # 再開: 待機中に状態が変わり得る未完了 run を含むリポジトリは一覧を取り直す
-            for repo in [r for r, its in ls["repos"].items() if any(i["status"] != "completed" for i in its)]:
+            # 再開: 待機中に状態が変わり得る未完了 run を含むリポジトリは一覧を取り直す。
+            # ただし時間上限での中断（すぐ再実行する前提）の直後は取り直さない。取り直すと、
+            # 未完了 run を持つリポジトリが毎回先頭で消費されて後続の一覧が進まなくなる
+            if ls.pop("budget_stop", False):
+                stale = []
+            else:
+                stale = [r for r, its in ls["repos"].items() if any(i["status"] != "completed" for i in its)]
+            for repo in stale:
                 del ls["repos"][repo]
                 ls["truncated"] = [t for t in ls["truncated"] if not t.startswith("%s/%s " % (a.org, repo))]
             if ls["repos"]:
                 resumed_at = ls.get("listed_at") if isinstance(ls.get("listed_at"), str) else "不明"
-        for repo in targets:
+        cursors = cache.get("cursor") or {}
+
+        def checkpoint():
+            _save_quietly(cache_path, cache)
+
+        for ti, repo in enumerate(targets, 1):
             if repo not in ls["repos"]:
+                pacer.check_budget("list")
                 client.check_rate()
                 tr = []
+                floor = relist_floor(cursors.get(repo), since, today)
+                if floor == since:
+                    relist["full"] += 1
+                else:
+                    relist["partial"] += 1
+                    if relist["oldest"] is None or floor.isoformat() < relist["oldest"]:
+                        relist["oldest"] = floor.isoformat()
                 items = [{"id": r["id"], "run_attempt": _run_key(r)[1], "status": r.get("status") or "",
                           "created_at": r.get("created_at") if isinstance(r.get("created_at"), str) else ""}
-                         for r in client.list_runs(repo, a.org, since, today, tr)]
+                         for r in client.list_runs(repo, a.org, floor, today, tr)]
                 ls["repos"][repo] = items
                 ls["truncated"].extend(tr)
+                pacer.done("list")
+            pacer.report("runs 一覧", ti, len(targets), client.total(), checkpoint)
             for run in ls["repos"][repo]:
                 rid, att = _run_key(run)
                 listed.append((rid, att, repo, run))
         truncated.extend(ls["truncated"])
         stats["listed"] = len(listed)
         listed.sort(key=lambda t: t[0])
+
+        def needs_fetch(rid, att, run):
+            ent = cache["runs"].get(str(rid))
+            return (ent is None or att > ent["attempt"]) and run.get("status") == "completed"
+
+        todo = sum(1 for rid, att, _r, run in listed if needs_fetch(rid, att, run))
+        fetched_k = 0
         for rid, att, repo, run in listed:
             ent = cache["runs"].get(str(rid))
             if ent is not None and att <= ent["attempt"]:
@@ -535,18 +683,23 @@ def main(argv=None):
                 # 再実行中でも、キャッシュ済みの旧 attempt の分は実際に消費された時間なので集計に残す
                 stats["pending"] += 1
                 continue
+            pacer.check_budget("jobs")
             client.check_rate()
             jobs = client.list_jobs(repo, a.org, rid)
+            pacer.done("jobs")
+            fetched_k += 1
             try:
                 agg, hosted, unfinished = aggregate_jobs(jobs)
             except InvalidJob as e:
                 skipped.append("%s/%s run %d: %s" % (a.org, repo, rid, e))
+                pacer.report("jobs 取得", fetched_k, todo, client.total(), checkpoint)
                 continue
             created = run.get("created_at") if isinstance(run.get("created_at"), str) else ""
             cache["runs"][str(rid)] = {"repo": repo, "attempt": att, "created_at": created, "agg": agg}
             stats["fetched"] += 1
             stats["hosted"] += hosted
             stats["unfinished"] += unfinished
+            pacer.report("jobs 取得", fetched_k, todo, client.total(), checkpoint)
         # 一覧に無い run（削除・1,000 件上限の欠落）も、対象リポジトリのキャッシュ済み履歴として残す
         entries = [e for k, e in cache["runs"].items() if e["repo"] in visibility]
         # --since より前に作られた run はこの期間では再参照されないため、キャッシュの無制限な増加を防ぐ
@@ -556,6 +709,26 @@ def main(argv=None):
                   and not any(x["day"] >= a.since for x in e["agg"])]:
             del cache["runs"][k]
         rows = build_rows(entries, visibility, a.since)
+        # 次回の一覧の下限を作り直す。今回の対象外（アーカイブ・削除・改名前の名前）の cursor は捨てる
+        by_repo = {}
+        for rid, att, repo, run in listed:
+            by_repo.setdefault(repo, []).append({"id": rid, "run_attempt": att,
+                                                 "created_at": run.get("created_at", "")})
+
+        def settled(rid, att):
+            ent = cache["runs"].get(str(rid))
+            return ent is not None and ent["attempt"] >= att
+
+        cache["cursor"] = {}
+        for repo in targets:
+            tdays = []
+            for t in ls["truncated"]:
+                if t.startswith("%s/%s " % (a.org, repo)):
+                    try:
+                        tdays.append(date.fromisoformat(t.rsplit(" ", 1)[1]))
+                    except ValueError:
+                        pass
+            cache["cursor"][repo] = next_cursor_entry(by_repo.get(repo, []), settled, tdays, since, today)
         cache.pop("listing", None)
         atomic_write_json(cache_path, cache)
         atomic_write_json(a.out, {
@@ -575,6 +748,14 @@ def main(argv=None):
               "reset（epoch %s）後に同じコマンドで再実行すると続きから取る" % (e.remaining, a.min_remaining, e.reset),
               file=sys.stderr)
         return EXIT_RATE_LIMITED
+    except TimeBudgetExceeded:
+        if isinstance(cache.get("listing"), dict):
+            cache["listing"]["budget_stop"] = True
+        _save_quietly(cache_path, cache)
+        print("\n".join(lines(note="中断: 時間上限（キャッシュ保存済み）")))
+        print("エラー: --max-seconds %g 秒に達したため中断した。キャッシュ保存済み。"
+              "同じコマンドをすぐ再実行すると続きから取る" % a.max_seconds, file=sys.stderr)
+        return EXIT_TIME_BUDGET
     except FetchError as e:
         _save_quietly(cache_path, cache)
         print("エラー: %s" % e, file=sys.stderr)
