@@ -586,8 +586,10 @@ function paintTotals(rows, sel, period, cov, ready) {
   if (cov.billing === 'none' || cov.billing === 'partial' || cov.billing === 'unknown') remaining = '不明（選択月の billing を取得しきれていない）';
   else if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
   else if (sel.plan === null) remaining = 'プラン未指定のため不明';
-  else if (!row || period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
-  else remaining = fmtMin(Math.max(sel.plan - row.quota_minutes, 0)) + ' 分';
+  else if (period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
+  // 行がない単月は、billing 取得済み（上の分岐を通過）かつ準備完了のときだけ消費 0 として全量を残量にする。
+  else if (!row && !ready) remaining = '不明（集計を取得できていない）';
+  else remaining = fmtMin(Math.max(sel.plan - (row || zeroRow).quota_minutes, 0)) + ' 分';
   $('#aud-remaining').textContent = remaining;
 }
 

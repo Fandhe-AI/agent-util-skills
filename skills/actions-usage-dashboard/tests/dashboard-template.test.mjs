@@ -231,3 +231,41 @@ test('paintTotals のゼロ補完は準備完了時だけ、項目の取得元�
 test('paintWarnings は billing / jobs の JSON 内 warnings も引き継ぐ', () => {
   assert.match(HTML, /\['billing', 'jobs'\]\.forEach\(\(k\) => \{[\s\S]*?\.warnings/)
 })
+
+// paintTotals だけを取り出し、DOM とフォーマッタを最小のスタブに差し替えて残量の文言を確かめる。
+const paintRemaining = (rows, sel, period, cov, ready) => {
+  const m = HTML.match(/function paintTotals\([\s\S]*?\n\}\n/)
+  assert.ok(m, 'paintTotals が見つかること')
+  const out = {}
+  const el = { textContent: '', setAttribute() {}, getAttribute: () => '', classList: { toggle() {} } }
+  const box = {
+    U,
+    page: { querySelectorAll: () => [] },
+    $: (id) => (id === '#aud-remaining' ? out : el),
+    document: { getElementById: () => null },
+    fmtMin: (v) => String(v),
+    fmtUsd: (v) => '$' + v
+  }
+  runInNewContext(`${m[0]}\npaintTotals(rows, sel, period, cov, ready)`, { ...box, rows, sel, period, cov, ready })
+  return out.textContent
+}
+const covFull = { billing: 'full', jobs: 'full', jobsConnected: true }
+const selOf = (o = {}) => ({ runner_type: '', repo: '', plan: 3000, ...o })
+
+test('利用ゼロの単月は取得済み・プラン指定・絞り込みなしならプラン全量を残量にする', () => {
+  assert.equal(paintRemaining([], selOf(), '2026-11', covFull, true), '3000 分')
+  // 行がある月は従来どおり枠消費を引く（区分不明がなければ 3000 - 500）。
+  const row = { key: U.keyOf(['2026-10', '*', '*']), quota_minutes: 500, unknown_minutes: 0, paid_minutes: 0 }
+  assert.equal(paintRemaining([row], selOf(), '2026-10', covFull, true), '2500 分')
+})
+
+test('利用ゼロの月でも絞り込み・全期間・billing 未取得・準備未完了・プラン未指定では全量を出さない', () => {
+  assert.equal(paintRemaining([], selOf({ repo: 'a/b' }), '2026-11', covFull, true), '月全体を選んだときだけ表示')
+  assert.equal(paintRemaining([], selOf({ runner_type: 'linux' }), '2026-11', covFull, true), '月全体を選んだときだけ表示')
+  assert.equal(paintRemaining([], selOf(), '*', covFull, true), '月全体を選んだときだけ表示')
+  assert.match(paintRemaining([], selOf(), '2026-11', { ...covFull, billing: 'none' }, true), /^不明/)
+  assert.match(paintRemaining([], selOf(), '2026-11', { ...covFull, billing: 'unknown' }, true), /^不明/)
+  assert.match(paintRemaining([], selOf(), '2026-11', { ...covFull, billing: 'partial' }, true), /^不明/)
+  assert.equal(paintRemaining([], selOf(), '2026-11', covFull, false), '不明（集計を取得できていない）')
+  assert.equal(paintRemaining([], selOf({ plan: null }), '2026-11', covFull, true), 'プラン未指定のため不明')
+})
