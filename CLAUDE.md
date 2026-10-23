@@ -4,7 +4,7 @@ This file provides guidance to Claude Code（claude.ai/code）when working with 
 
 ## Overview
 
-Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）を新規開発して、`actions-usage-dashboard`（Actions 利用分数データ取得）も加えて、合わせて 6 スキルを本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
+Claude Code 向けユーティリティスキル集。[Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から `create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを移設し、加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）、`actions-usage-dashboard`（org の Actions 利用分数を日次集計し Dashboard 型 Artifact で可視化）を新規開発して、合わせて 6 スキルを本リポジトリで独立管理する。開発ワークフロースキル（agent-cli-skills）と参照スキル（agent-reference-skills）は vendoring で取り込み、消費専用として扱う。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
 
 ## Repository Structure
 
@@ -28,8 +28,10 @@ skills/                               -- 本リポジトリが上流ソースと
     templates/                        -- flow-diagram-template.html・wireframe-template.html・storyboard-template.html
     scripts/                          -- capture_screenshot.py（Playwright PNG 撮影）、check_overflow.py（レイアウト崩れ検証）
   actions-usage-dashboard/
-    scripts/                          -- fetch_billing.py（billing usage API から GitHub ホストランナーの日次行を作る）
-    tests/                            -- test_fetch_billing.py（回帰テスト）・fetch-billing.test.mjs（Node.js ブリッジ）
+    references/                       -- data-sources.md（API 項目と出力列の対応・有料分と含有枠の換算式・セルフホスト判定・権限・レート制限・終了コード）
+    templates/                        -- dashboard/index.html（数値を持たない Dashboard 型ページ雛形。集計・グルーピング切替はページ内で行う）
+    scripts/                          -- fetch_billing.py（billing usage API → GitHub ホストランナーの日次行）、fetch_jobs.py（jobs API → セルフホストの日次行・増分キャッシュ）、summarize.py（ターミナル向け 20 行以内の要約・セルフホスト移行候補）、build_dashboard.py（Artifact 書き込み用 JSON・batch の一括生成）
+    tests/                            -- test_fetch_billing.py・test_fetch_jobs.py・test_summarize.py・test_build_dashboard.py（回帰テスト）、*.test.mjs（node:test。Python テストのブリッジと dashboard-template.test.mjs による雛形検証）、fixtures/dashboard/（合成データ）
   setup-github-pages/
     references/                       -- site-format.md（nav.toml スキーマ・予約アセット名・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）、update-recovery.md（更新失敗時の復旧手順）
     templates/                        -- FF_REV・pages.yml・nav.toml・index.md・rust-toolchain.toml 雛形
