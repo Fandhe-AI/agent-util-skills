@@ -555,6 +555,28 @@ class Cli(unittest.TestCase):
         self.assertIn(4, codes)
         self.assertEqual(self.rows(), self.rows(ref_out))
 
+    def test_max_seconds_invalid_job_run_does_not_block_progress(self):
+        # 不正な job を含む run が時間上限をまたいでも、同じ周回では取り直さず後続の run へ進む
+        self.cfg["jobs"]["1"] = [{"id": "bad", "labels": []}]
+        self.write_cfg()
+        codes = []
+        for _ in range(30):
+            r = self.run_cli(["--max-seconds", "0.001"])
+            codes.append(r.returncode)
+            if r.returncode == 0:
+                break
+            self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertEqual(codes[-1], 0, codes)
+        bad_fetches = [c for c in self.calls() if "actions/runs/1/jobs" in c]
+        self.assertEqual(len(bad_fetches), 1, bad_fetches)
+        with open(self.out) as f:
+            self.assertTrue(any("スキップ" in w and "run 1" in w for w in json.load(f)["warnings"]))
+        self.assertTrue(len(self.rows()) >= 1)
+        # 周回が終わった（listing を捨てた）後の実行では、スキップ分も再試行される
+        self.reset_calls()
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertTrue(any("actions/runs/1/jobs" in c for c in self.calls()))
+
     def test_killed_run_keeps_checkpoint(self):
         ref_out = os.path.join(self.root, "ref.json")
         self.assertEqual(self.run_cli(out=ref_out, cache=os.path.join(self.root, "refcache")).returncode, 0)
@@ -618,6 +640,17 @@ class Cli(unittest.TestCase):
         self.assertEqual(os.listdir(self.work), ["afile"])
         self.assertFalse(os.path.exists(self.cache))
         self.assertFalse(os.path.exists(self.out))
+
+
+class SharedCommonTest(unittest.TestCase):
+    """helper の定義が scripts/_common.py の 1 か所であることを固定する（Issue #141）。"""
+
+    def test_helpers_are_shared_with_common(self):
+        import _common
+        expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
+        self.assertEqual(os.path.realpath(_common.__file__), expected)
+        for name in ('FetchError', 'ORG_RE', 'gh_api', 'atomic_write_json'):
+            self.assertIs(getattr(fj, name), getattr(_common, name), name)
 
 
 if __name__ == "__main__":

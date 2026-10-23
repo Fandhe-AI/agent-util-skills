@@ -2,7 +2,7 @@
 """build_dashboard.py の回帰テスト。
 
 役割: batch.json の形（ArtifactData batch の writes）、index.json の 256 KB 検査、
---update が dataset の source と updated だけを変えること、入力検証の fail-closed を固定する。
+--update が dataset の source と updated だけを変えること、--add-dataset による新 dataset の set、入力検証の fail-closed を固定する。
 build-dashboard.test.mjs から `node --test` 経由で実行される。
 
 fixture は既存の合成データ（org は example-org）。本リポは PUBLIC のため実在の値を入れない。
@@ -178,6 +178,64 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(rc, 1, ifv)
 
 
+    def add(self, extra, rows=(BILLING, JOBS), urls=("/_blob/n0", "/_blob/n1"), update=True):
+        a = base(self.out, rows) + (["--update"] if update else [])
+        for u in urls:
+            a += ["--asset-url", u]
+        return run(a + list(extra))
+
+    def test_add_jobs_to_billing_only_dashboard(self):
+        rc, _, err = run(base(self.out, (BILLING,)) + ["--asset-url", "/_blob/o0"])
+        self.assertEqual(rc, 0, err)
+        rc, _, err = self.add(["--if-version", "billing=3", "--add-dataset", "jobs"])
+        self.assertEqual(rc, 0, err)
+        b = load(self.out, "batch.json")
+        self.assertEqual([(w["op"], w["collection"], w["doc_id"]) for w in b],
+                         [("update", "datasets", "billing"), ("set", "datasets", "jobs")])
+        self.assertEqual(b[0]["if_version"], 3)
+        self.assertEqual(set(b[1]), {"op", "collection", "doc_id", "file_path"})
+        real = os.path.realpath(self.out)
+        for w in b:
+            self.assertTrue(os.path.isabs(w["file_path"]))
+            self.assertTrue(w["file_path"].startswith(real + os.sep))
+        jd = load(self.out, "dataset-jobs.json")
+        self.assertEqual(set(jd), {"title", "description", "source", "updated"})
+        self.assertEqual(jd["source"], {"kind": "file", "url": "/_blob/n1", "name": "jobs.json"})
+        self.assertEqual(jd["updated"]["at"], "2026-10-03T12:00:00Z")
+        self.assertEqual(set(load(self.out, "dataset-billing.update.json")), {"source", "updated"})
+        self.assertFalse(os.path.exists(os.path.join(self.out, "dataset-jobs.update.json")))
+
+    def test_add_dataset_invalid(self):
+        cases = [
+            (["--add-dataset", "jobs"], dict(update=False)),
+            (["--if-version", "billing=1", "--add-dataset", "jobs"], dict(rows=(BILLING,), urls=("/_blob/n0",))),
+            (["--add-dataset", "jobs", "--if-version", "jobs=1", "--if-version", "billing=1"], {}),
+            (["--add-dataset", "jobs", "--add-dataset", "jobs", "--if-version", "billing=1"], {}),
+            (["--add-dataset", "billing", "--if-version", "jobs=1"], {}),
+            (["--add-dataset", "jobs"], {}),
+        ]
+        for extra, kw in cases:
+            with tempfile.TemporaryDirectory() as d:
+                self.out = d
+                rc, _, _ = self.add(extra, **kw)
+                self.assertIn(rc, (1, 2), extra)  # choices 違反は argparse の 2
+                self.assertFalse(os.path.exists(os.path.join(d, "batch.json")), extra)
+
+    def test_add_dataset_stage1(self):
+        os.makedirs(self.out, exist_ok=True)
+        for n in ("batch.json", "dataset-jobs.json"):
+            with open(os.path.join(self.out, n), "w") as f:
+                f.write("[]")
+        rc, out, err = self.add(["--add-dataset", "jobs"], urls=())
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.out, "dataset-jobs.json")))
+        self.assertIn("billing.json", out)
+        self.assertIn("jobs.json", out)
+        rc, _, _ = self.add(["--add-dataset", "jobs"], rows=(BILLING,), urls=())
+        self.assertEqual(rc, 1)
+
+
 class ValidationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -221,6 +279,27 @@ class ValidationTests(unittest.TestCase):
         src = open(SCRIPT, encoding="utf-8").read()
         for m in ("subprocess", "urllib", "socket", "http"):
             self.assertIsNone(re.search(r"^\s*(import|from)\s+%s\b" % m, src, re.M), m)
+
+
+class CommonParityTest(unittest.TestCase):
+    """build_dashboard.py は _common.py を import せず複製する（ネットワーク非依存の保証を守るため）。
+    複製が正典の _common.py と乖離しないことをここで固定する（Issue #141）。"""
+
+    def test_copies_match_common(self):
+        import importlib.util
+        import inspect
+        path = os.path.join(HERE, "..", "scripts", "_common.py")
+        spec = importlib.util.spec_from_file_location("_common_parity", path)
+        cm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cm)
+        self.assertEqual(bd.ORG_RE.pattern, cm.ORG_RE.pattern)
+        self.assertEqual(bd.ORG_RE.flags, cm.ORG_RE.flags)
+        self.assertEqual(inspect.getsource(bd.atomic_write_json),
+                         inspect.getsource(cm.atomic_write_json))
+
+    def test_does_not_import_common(self):
+        src = open(SCRIPT, encoding="utf-8").read()
+        self.assertIsNone(re.search(r"^\s*(import|from)\s+_common\b", src, re.M))
 
 
 class CollisionTests(unittest.TestCase):

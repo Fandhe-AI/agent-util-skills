@@ -25,20 +25,22 @@
   変わっていないと利用者が保証できる場合だけ --assume-current-visibility で現在値を採る。
 
 アクセス: gh api 経由のみ。トークンは扱わない。標準ライブラリだけで動く。
+helper の共有: FetchError / gh_api / atomic_write_json / ORG_RE は _common.py から import する。
 """
 import argparse
 import json
 import math
 import os
 import re
-import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 
+# `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
+# append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from _common import ORG_RE, FetchError, atomic_write_json, gh_api  # noqa: E402
+
 SCHEMA_VERSION = 1
-GH_TIMEOUT = 120
-ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
 MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])\Z")
 LINUX_PRICE_SKU = "actions linux"
 UNATTRIBUTED = "(unattributed)"
@@ -53,10 +55,6 @@ RUNNER_TYPE_RULES = (
     (("windows",), "windows"),
 )
 SUMMARY_MONTHS_MAX = 12
-
-
-class FetchError(Exception):
-    """取得・検証の失敗。main が日本語 1 行にして終了コード 1 で終える。"""
 
 
 def normalize_sku(sku):
@@ -273,20 +271,6 @@ def summarize(rows, months, out_path, since, until):
     ]
 
 
-def gh_api(args):
-    try:
-        r = subprocess.run(["gh", "api"] + args, capture_output=True, text=True,
-                           timeout=GH_TIMEOUT, shell=False)
-    except FileNotFoundError:
-        raise FetchError("gh コマンドが見つからない")
-    except subprocess.TimeoutExpired:
-        raise FetchError("gh api が %d 秒でタイムアウト" % GH_TIMEOUT)
-    if r.returncode != 0:
-        lines = (r.stderr or "").strip().splitlines()
-        raise FetchError("gh api 失敗: %s" % (lines[0][:200] if lines else "exit %d" % r.returncode))
-    return r.stdout
-
-
 def fetch_visibility(org):
     text = gh_api(["--paginate", "orgs/%s/repos?per_page=100&type=all" % org])
     out = {}
@@ -307,24 +291,6 @@ def fetch_month(org, month):
         return json.loads(text)
     except ValueError:
         raise FetchError("%s: 応答を JSON として解析できない" % month)
-
-
-def atomic_write_json(path, obj):
-    d = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(prefix=".%s." % os.path.basename(path), suffix=".tmp", dir=d)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=1)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def main(argv=None):

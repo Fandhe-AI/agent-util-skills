@@ -58,10 +58,9 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
 出力対象: 今回の一覧に無い run（GitHub 側で削除・1,000 件上限で欠落）でも、対象リポジトリの
   キャッシュ済み履歴は集計に残す。
 
-helper の複製: gh_api / atomic_write_json / ORG_RE / FetchError は fetch_billing.py と
-  同じ実装を複製している（python3 -I 起動ではスクリプト隣接の import ができず、各スクリプトを
-  自己完結にするため）。直すときは両方を直す。REPO_RE / DATE_RE は本スクリプト固有。
-  検証用の正規表現の終端は `\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
+helper の共有: gh_api / atomic_write_json / ORG_RE / FetchError は _common.py から import する
+  （定義は 1 か所）。REPO_RE / DATE_RE / parse_concatenated_json（ページ数も返す版）は本スクリプト固有。
+  検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api 経由のみ（読み取り専用）。トークンは扱わない。標準ライブラリだけで動く。
 """
@@ -70,15 +69,16 @@ import json
 import math
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
 
+# `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
+# append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from _common import ORG_RE, FetchError, atomic_write_json, gh_api  # noqa: E402
+
 SCHEMA_VERSION = 1
-GH_TIMEOUT = 120
-ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 SELF_HOSTED_LABEL = "self-hosted"
@@ -97,10 +97,6 @@ DEFAULT_PROGRESS_INTERVAL = 30
 # 取りこぼしで分数が減るため、利用者が触る値ではない）
 RELIST_WINDOW_DAYS = 45
 ZERO_COLS = ("quota_minutes", "billable_minutes", "gross_usd", "discount_usd", "net_usd")
-
-
-class FetchError(Exception):
-    """取得・検証の失敗。main が日本語 1 行にして終了コード 1 で終える。"""
 
 
 class InvalidJob(FetchError):
@@ -273,20 +269,6 @@ class Pacer:
 
 # ---- gh 層 ----
 
-def gh_api(args):
-    try:
-        r = subprocess.run(["gh", "api"] + args, capture_output=True, text=True,
-                           timeout=GH_TIMEOUT, shell=False)
-    except FileNotFoundError:
-        raise FetchError("gh コマンドが見つからない")
-    except subprocess.TimeoutExpired:
-        raise FetchError("gh api が %d 秒でタイムアウト" % GH_TIMEOUT)
-    if r.returncode != 0:
-        lines = (r.stderr or "").strip().splitlines()
-        raise FetchError("gh api 失敗: %s" % (lines[0][:200] if lines else "exit %d" % r.returncode))
-    return r.stdout
-
-
 def _json(text, what):
     try:
         return json.loads(text)
@@ -444,6 +426,11 @@ def load_cache(path, org):
                 or not isinstance(ls.get("repos"), dict) or not isinstance(ls.get("truncated"), list) \
                 or not all(isinstance(t, str) for t in ls["truncated"]):
             raise bad
+        sk = ls.get("skipped", {})
+        if not isinstance(sk, dict) or not all(
+                k.isdigit() and isinstance(v, dict) and _pos_int(v.get("attempt")) and isinstance(v.get("msg"), str)
+                for k, v in sk.items()):
+            raise bad
         for repo, items in ls["repos"].items():
             if not REPO_RE.match(repo) or not isinstance(items, list):
                 raise bad
@@ -487,24 +474,6 @@ def load_cache(path, org):
             except ValueError:
                 raise bad
     return c
-
-
-def atomic_write_json(path, obj):
-    d = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(prefix=".%s." % os.path.basename(path), suffix=".tmp", dir=d)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=1)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 # ---- main ----
@@ -635,6 +604,11 @@ def main(argv=None):
                 ls["truncated"] = [t for t in ls["truncated"] if not t.startswith("%s/%s " % (a.org, repo))]
             if ls["repos"]:
                 resumed_at = ls.get("listed_at") if isinstance(ls.get("listed_at"), str) else "不明"
+        # 不正な job を含む run は、同じ周回（listing が生きている間）の再開では再取得しない。
+        # 記録しないと時間上限で中断→再実行のたびに同じ run を先頭で取り直して進めなくなる。
+        # listing を捨てる次の周回では空に戻るため、スキップ分も再試行される
+        ls_skipped = ls.setdefault("skipped", {})
+        skipped.extend(v["msg"] for v in ls_skipped.values())
         cursors = cache.get("cursor") or {}
 
         def checkpoint():
@@ -668,6 +642,9 @@ def main(argv=None):
 
         def needs_fetch(rid, att, run):
             ent = cache["runs"].get(str(rid))
+            sk = ls_skipped.get(str(rid))
+            if sk is not None and att <= sk["attempt"]:
+                return False
             return (ent is None or att > ent["attempt"]) and run.get("status") == "completed"
 
         todo = sum(1 for rid, att, _r, run in listed if needs_fetch(rid, att, run))
@@ -679,6 +656,9 @@ def main(argv=None):
                 ent["repo"] = repo
                 stats["cached"] += 1
                 continue
+            sk = ls_skipped.get(str(rid))
+            if sk is not None and att <= sk["attempt"]:
+                continue  # 同じ周回で不正と判明済み（警告は listing から復元済み）
             if run.get("status") != "completed":
                 # 再実行中でも、キャッシュ済みの旧 attempt の分は実際に消費された時間なので集計に残す
                 stats["pending"] += 1
@@ -691,7 +671,9 @@ def main(argv=None):
             try:
                 agg, hosted, unfinished = aggregate_jobs(jobs)
             except InvalidJob as e:
-                skipped.append("%s/%s run %d: %s" % (a.org, repo, rid, e))
+                msg = "%s/%s run %d: %s" % (a.org, repo, rid, e)
+                skipped.append(msg)
+                ls_skipped[str(rid)] = {"attempt": att, "msg": msg}
                 pacer.report("jobs 取得", fetched_k, todo, client.total(), checkpoint)
                 continue
             created = run.get("created_at") if isinstance(run.get("created_at"), str) else ""
