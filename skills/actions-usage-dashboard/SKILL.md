@@ -59,7 +59,7 @@ python3 <skill-root>/scripts/summarize.py --rows <billing.json> [--rows <jobs.js
 
 取得済みの rows JSON は、Dashboard 型ページの雛形 [`templates/dashboard/index.html`](templates/dashboard/index.html) でグルーピングを切り替えながら見られる（単一ファイル。数値は持たず、集計はページ内の関数が行う）。
 
-- datasets: `billing`（必須。`fetch_billing.py` の rows JSON）と `jobs`（任意。`fetch_jobs.py` の rows JSON。無いとセルフホストは集計しない）と `warnings`（任意。各 rows JSON の `warnings` を連結した文字列の配列。1,000 件上限による欠損などをページ上部に表示する）
+- datasets: `billing`（必須。`fetch_billing.py` の出力 JSON を `{since, until, rows, ...}` のまま渡す）と `jobs`（任意。`fetch_jobs.py` の出力 JSON を同様にそのまま渡す。無いとセルフホストは集計しない）。`rows` だけを抜き出さない: ページは `since` / `until` で選択月が取得期間内か照合し、範囲外は 0 ではなく「不明」、一部のみは警告付きで表示する（`rows` 配列だけを渡すと照合できず警告する）と `warnings`（任意。各 rows JSON の `warnings` を連結した文字列の配列。1,000 件上限による欠損などをページ上部に表示する）
 - params: `group_by`（`charge_class` / `repo` / `runner_type` / `visibility`）・`include_free`（`false` で含有枠の消費だけを見る）・`period`（`latest` / `YYYY-MM` / `all`）・`runner_type`・`repo`・`plan_included_minutes`（プランの含有分。未指定なら残量は不明）
 - 区分不明（unknown）の利用がある範囲は、含有枠の消費を下限として「以上」と表示し、残量は不明にする
 - 集計関数の回帰テストは `tests/dashboard-template.test.mjs`

@@ -2,7 +2,7 @@
   actions-usage-dashboard の Dashboard 型ページ雛形（files/index.html にそのまま入れる単一ファイル）。
 
   役割: build_dashboard.py（呼び出し元）がこのファイルを無加工で埋め込み、datasets/billing
-  （必須）と datasets/jobs（任意）、dash/params の既定値を添える。ページは数値を持たず、
+  （必須）と datasets/jobs（任意。どちらも fetch 出力の JSON 全体 {since, until, rows}。取得期間の照合に使う）、dash/params の既定値を添える。ページは数値を持たず、
   集計は usage-agg ブロックの自己完結関数（dash.calc に直接渡す）が行う。
   契約: dataset id = billing / jobs。params = group_by / include_free / period /
   runner_type / repo / plan_included_minutes。詳細は references/data-sources.md と
@@ -62,6 +62,7 @@
     </p>
     <p class="aud-note">日付はすべて UTC。<span id="aud-partial">最新日は集計途中の可能性がある。</span></p>
     <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
+    <p class="aud-note aud-alert" id="aud-coverage" hidden></p>
     <p class="aud-note" id="aud-invalid" hidden></p>
     <ul class="aud-note" id="aud-warnings" data-source="warnings" aria-label="取得元の警告" hidden></ul>
     <p class="aud-note" data-source="billing jobs">データ源: billing usage API（GitHub ホスト）と Actions jobs API（セルフホスト）。</p>
@@ -179,7 +180,8 @@ window.UsageAgg = (function () {
       return Number.isFinite(n) && n >= 0 ? n : -1;
     };
     const take = (rows, fromJobs) => {
-      (Array.isArray(rows) ? rows : []).forEach((r) => {
+      const list = Array.isArray(rows) ? rows : (rows && Array.isArray(rows.rows) ? rows.rows : []);
+      list.forEach((r) => {
         if (!r || typeof r !== 'object') return;
         let invalid = 0;
         const num = (v) => {
@@ -287,6 +289,39 @@ window.UsageAgg = (function () {
     return months.length ? months.reduce((a, b) => (a > b ? a : b)) : '*';
   }
 
+  // fetch_*.py の出力（{since, until, rows}）の取得期間を [first, last]（YYYY-MM-DD）へ正規化する。
+  // billing は月粒度（YYYY-MM）、jobs は日粒度。期間が読めない入力（rows 配列だけ等）は null。
+  function span(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+    const M = /^(\d{4})-(\d{2})$/;
+    const D = /^\d{4}-\d{2}-\d{2}$/;
+    const s = input.since;
+    const u = input.until;
+    if (typeof s !== 'string' || typeof u !== 'string') return null;
+    if (M.test(s) && M.test(u)) {
+      const m = M.exec(u);
+      const last = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+      return { first: s + '-01', last: u + '-' + (last < 10 ? '0' : '') + last };
+    }
+    return D.test(s) && D.test(u) ? { first: s, last: u } : null;
+  }
+
+  // 選択期間に対する取得状況。'none' = 取得なし・範囲外（0 ではなく不明）、'partial' = 一部のみ、
+  // 'full' = 全体を取得済み、'unknown' = 取得期間が読めない。today（YYYY-MM-DD）は当月の末尾の上限。
+  function coverage(input, period, today) {
+    if (input === undefined || input === null) return 'none';
+    const sp = span(input);
+    if (!sp) return 'unknown';
+    if (period === '*') return 'full';
+    const m = /^(\d{4})-(\d{2})$/.exec(period);
+    if (!m) return 'unknown';
+    const first = period + '-01';
+    let last = period + '-' + new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+    if (today && today < last) last = today;
+    if (sp.last < first || sp.first > last) return 'none';
+    return sp.first <= first && sp.last >= last ? 'full' : 'partial';
+  }
+
   function matches(f, period, runner, repo) {
     return (period === '*' || f.month === period)
       && (!runner || runner === '*' || f.runner_type === runner)
@@ -365,6 +400,8 @@ window.UsageAgg = (function () {
     byAxis: byAxis,
     keyOf: keyOf,
     resolvePeriod: resolvePeriod,
+    span: span,
+    coverage: coverage,
     matches: matches,
     topGroups: topGroups,
     stackOrder: stackOrder,
@@ -480,7 +517,7 @@ function paintControls(sel, facts) {
   $('#aud-incl').checked = sel.include_free;
 }
 
-function paintTotals(rows, sel, period, jobsOk) {
+function paintTotals(rows, sel, period, cov) {
   const byKey = new Map((rows || []).map((r) => [r.key, r]));
   const key = U.keyOf([period, sel.runner_type || '*', sel.repo || '*']);
   const row = byKey.get(key);
@@ -488,7 +525,8 @@ function paintTotals(rows, sel, period, jobsOk) {
     const field = el.getAttribute('data-field');
     el.setAttribute('data-where', 'key=' + encodeURIComponent(key));
     let text = '—';
-    if (row && !(field === 'self_hosted_minutes' && !jobsOk)) {
+    const src = field === 'self_hosted_minutes' ? ['jobs'] : (field === 'total_minutes' ? ['billing', 'jobs'] : ['billing']);
+    if (row && !src.some((k) => cov[k] === 'none')) {
       text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(row[field]) : fmtMin(row[field]);
       // 区分不明の利用がある範囲では含有枠の消費は下限値になる。
       if (field === 'quota_minutes' && row.unknown_minutes > 0) text += ' 以上';
@@ -503,7 +541,8 @@ function paintTotals(rows, sel, period, jobsOk) {
   const qnote = document.getElementById('aud-quota-note');
   if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : '定価を Linux 単価で割った分';
   let remaining;
-  if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
+  if (cov.billing === 'none' || cov.billing === 'partial') remaining = '不明（選択月の billing を取得しきれていない）';
+  else if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
   else if (sel.plan === null) remaining = 'プラン未指定のため不明';
   else if (!row || period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
   else remaining = fmtMin(Math.max(sel.plan - row.quota_minutes, 0)) + ' 分';
@@ -655,7 +694,8 @@ function render() {
   const t = dash.data('totals');
   const a = dash.data('by_axis');
   const ready = f.status === 'ok' && t.status === 'ok' && a.status === 'ok' && Array.isArray(f.data);
-  const jobsOk = dash.data('jobs').status === 'ok';
+  const jobsD = dash.data('jobs');
+  const billD = dash.data('billing');
   const facts = ready ? f.data : [];
   const period = U.resolvePeriod(sel.period, facts);
   if (hiddenAxis !== sel.group_by) {
@@ -663,8 +703,22 @@ function render() {
     hiddenAxis = sel.group_by;
   }
   paintControls(sel, facts);
-  paintTotals(ready ? t.data : [], sel, period, jobsOk);
-  $('#aud-nojobs').hidden = jobsOk;
+  const today = new Date().toISOString().slice(0, 10);
+  const cov = {
+    billing: billD.status === 'ok' ? U.coverage(billD.data, period, today) : 'none',
+    jobs: jobsD.status === 'ok' ? U.coverage(jobsD.data, period, today) : 'none'
+  };
+  paintTotals(ready ? t.data : [], sel, period, cov);
+  $('#aud-nojobs').hidden = jobsD.status === 'ok';
+  const notes = [];
+  [['billing', 'billing（GitHub ホスト分）'], ['jobs', 'jobs（セルフホスト分）']].forEach((p) => {
+    if (cov[p[0]] === 'none' && !(p[0] === 'jobs' && jobsD.status !== 'ok')) notes.push(p[1] + 'は選択期間を取得していないため不明（0 ではない）。');
+    else if (cov[p[0]] === 'partial') notes.push(p[1] + 'は選択期間の一部しか取得しておらず、過小な値になる。');
+    else if (cov[p[0]] === 'unknown') notes.push(p[1] + 'の取得期間（since / until）が読めず、範囲を確認できない。');
+  });
+  const covEl = $('#aud-coverage');
+  covEl.textContent = notes.join(' ');
+  covEl.hidden = notes.length === 0;
   const invalid = facts.reduce((s, r) => s + r.invalid, 0);
   const inv = $('#aud-invalid');
   inv.hidden = invalid === 0;

@@ -14,7 +14,9 @@ import { fileURLToPath } from 'node:url'
 const TESTS_DIR = dirname(fileURLToPath(import.meta.url))
 const HTML = readFileSync(join(TESTS_DIR, '..', 'templates', 'dashboard', 'index.html'), 'utf8')
 const billing = JSON.parse(readFileSync(join(TESTS_DIR, 'fixtures', 'dashboard', 'billing.json'), 'utf8')).rows
-const jobs = JSON.parse(readFileSync(join(TESTS_DIR, 'fixtures', 'dashboard', 'jobs.json'), 'utf8')).rows
+const billingDoc = JSON.parse(readFileSync(join(TESTS_DIR, 'fixtures', 'dashboard', 'billing.json'), 'utf8'))
+const jobsDoc = JSON.parse(readFileSync(join(TESTS_DIR, 'fixtures', 'dashboard', 'jobs.json'), 'utf8'))
+const jobs = jobsDoc.rows
 
 const blocks = [...HTML.matchAll(/<script id="usage-agg">([\s\S]*?)<\/script>/g)]
 assert.equal(blocks.length, 1, 'usage-agg ブロックが 1 件だけあること')
@@ -161,4 +163,28 @@ test('T10 サイズと契約', () => {
   for (const m of HTML.matchAll(/data-source="([^"]+)"/g)) m[1].split(/\s+/).forEach((i) => ids.add(i))
   for (const id of ids) assert.ok(['billing', 'jobs', 'warnings', 'facts', 'totals', 'by_axis'].includes(id), id)
   assert.equal((HTML.match(/dash\.calc\(/g) || []).length, 3)
+})
+
+test('T11 fetch 出力のオブジェクトをそのまま渡しても全行が集計される', () => {
+  const fromDocs = plain(U.facts(billingDoc, jobsDoc))
+  assert.equal(fromDocs.length, 19)
+  assert.deepEqual(fromDocs, facts)
+})
+
+test('T12 取得期間外は 0 ではなく none、一部は partial になる', () => {
+  // fixture: billing は 2026-09〜2026-10、jobs は 2026-10-01〜2026-10-03 のみ。
+  assert.equal(U.coverage(billingDoc, '2026-09', '2026-10-20'), 'full')
+  assert.equal(U.coverage(jobsDoc, '2026-09', '2026-10-20'), 'none')
+  assert.equal(U.coverage(jobsDoc, '2026-10', '2026-10-03'), 'full')
+  assert.equal(U.coverage(jobsDoc, '2026-10', '2026-10-20'), 'partial')
+  assert.equal(U.coverage(billingDoc, '2026-08', '2026-10-20'), 'none')
+  assert.equal(U.coverage(undefined, '2026-10', '2026-10-20'), 'none')
+  assert.equal(U.coverage(jobs, '2026-10', '2026-10-20'), 'unknown')
+  assert.equal(U.coverage(jobsDoc, '*', '2026-10-20'), 'full')
+})
+
+test('T13 ページは範囲外のセルフホスト分を不明表示にする', () => {
+  assert.match(HTML, /U\.coverage\(/)
+  assert.match(HTML, /cov\[k\] === 'none'/)
+  assert.match(HTML, /id="aud-coverage"/)
 })
