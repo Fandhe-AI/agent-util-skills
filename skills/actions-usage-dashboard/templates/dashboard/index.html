@@ -94,7 +94,7 @@
     <div class="aud-tile">
       <div class="aud-tile-label">含有枠の消費（分）</div>
       <div class="aud-tile-value" data-source="totals" data-field="quota_minutes" data-where="key=*%7C*%7C*">—</div>
-      <div class="aud-tile-note">定価を Linux 単価で割った分</div>
+      <div class="aud-tile-note" id="aud-quota-note">定価を Linux 単価で割った分</div>
     </div>
     <div class="aud-tile">
       <div class="aud-tile-label">公開リポの無料（分）</div>
@@ -461,9 +461,11 @@ function fillSelect(el, items, value) {
   el.value = items.some((it) => it.value === value) ? value : items[0].value;
 }
 
-function paintControls(sel, facts, period) {
+function paintControls(sel, facts) {
+  // 「最新月」のラベルは選択中の period と独立に、facts の最新月から求める。
+  const latestMonth = U.resolvePeriod('latest', facts);
   const months = Array.from(new Set(facts.map((f) => f.month).filter((m) => /^\d{4}-\d{2}$/.test(m)))).sort().reverse();
-  const periodItems = [{ value: 'latest', label: period === '*' ? '最新月' : '最新月（' + period + '）' }]
+  const periodItems = [{ value: 'latest', label: latestMonth === '*' ? '最新月' : '最新月（' + latestMonth + '）' }]
     .concat(months.map((m) => ({ value: m, label: m })))
     .concat([{ value: 'all', label: '全期間' }]);
   fillSelect($('#aud-period'), periodItems, sel.period === '*' ? 'all' : sel.period);
@@ -487,6 +489,8 @@ function paintTotals(rows, sel, period, jobsOk) {
     let text = '—';
     if (row && !(field === 'self_hosted_minutes' && !jobsOk)) {
       text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(row[field]) : fmtMin(row[field]);
+      // 区分不明の利用がある範囲では含有枠の消費は下限値になる。
+      if (field === 'quota_minutes' && row.unknown_minutes > 0) text += ' 以上';
     }
     el.textContent = text;
   });
@@ -494,8 +498,12 @@ function paintTotals(rows, sel, period, jobsOk) {
   page.querySelectorAll('.aud-paid').forEach((el) => el.classList.toggle('aud-alert', alert));
   $('#aud-tile-paid').classList.toggle('aud-tile-alert', alert);
   $('#aud-tile-net').classList.toggle('aud-tile-alert', alert);
+  const lowerBound = !!row && row.unknown_minutes > 0;
+  const qnote = document.getElementById('aud-quota-note');
+  if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : '定価を Linux 単価で割った分';
   let remaining;
-  if (sel.plan === null) remaining = 'プラン未指定のため不明';
+  if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
+  else if (sel.plan === null) remaining = 'プラン未指定のため不明';
   else if (!row || period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
   else remaining = fmtMin(Math.max(sel.plan - row.quota_minutes, 0)) + ' 分';
   $('#aud-remaining').textContent = remaining;
@@ -637,7 +645,7 @@ function render() {
     hidden = new Set();
     hiddenAxis = sel.group_by;
   }
-  paintControls(sel, facts, period);
+  paintControls(sel, facts);
   paintTotals(ready ? t.data : [], sel, period, jobsOk);
   $('#aud-nojobs').hidden = jobsOk;
   const invalid = facts.reduce((s, r) => s + r.invalid, 0);
