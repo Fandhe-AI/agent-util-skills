@@ -21,4 +21,6 @@ test('test_summarize.py（集計・出力・入力検証・gh スタブの unitt
   const r = spawnSync('python3', ['-I', '-B', join(TESTS_DIR, 'test_summarize.py')], { encoding: 'utf8' })
   assert.equal(r.status, 0, `unittest 失敗\n${r.stdout}\n${r.stderr}`)
   assert.match(r.stderr, /\nOK\n?$/, 'unittest が OK で終了していない')
+  // unittest.main() は警告を default 表示にするため、閉じ忘れは stderr に出る（Issue #144）
+  assert.doesNotMatch(r.stderr, /ResourceWarning/, `ResourceWarning が出ている（ファイルを with で閉じる）\n${r.stderr}`)
 })
