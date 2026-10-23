@@ -27,7 +27,7 @@ tools:
 | 区分 | パス・コマンド |
 |------|---------------|
 | 実行対象（Node） | `skills/*/tests/*.test.mjs`（`node --test`） |
-| 実行対象（Python） | `skills/setup-github-pages/tests/test_rebrand.py`（`python3 -I -B -m unittest discover`） |
+| 実行対象（Python） | `skills/*/tests/test_*.py`（`python3 -I -B -m unittest discover`。tests ディレクトリごとに実行） |
 | 読み取りのみ | `skills/**`（テストの所在確認・失敗箇所の読解） |
 | 変更禁止 | 全ファイル（Edit / Write は tools に含めない。Bash でのファイル変更も禁止） |
 
@@ -41,7 +41,7 @@ Bash はテスト実行と所在確認・ログ読取の診断目的のみに使
 | 所在確認・状態確認 | `ls`、`find`、`git status`、`git log` |
 | ログ用ディレクトリの作成 | `mktemp`（`mktemp -d` のみ） |
 | ログ読取 | `grep`、`tail`、`cat` |
-| 終了コード表示 | `echo`（シェル組み込み。`echo "exit=$?"` 形のみ） |
+| 終了コード・ログ所在の表示 | `echo`（シェル組み込み。`echo "<ラベル> exit=$?"` 形と `echo "LOGDIR=${LOGDIR}"` のみ） |
 
 - 出力のリダイレクト（`>`）は `mktemp -d` で作った専用ログディレクトリ内に限る。それ以外へ書き込まない。
 - 禁止: `git commit`・`git push`・`git add`・`gh`・`rm`・`mv`・`curl`・`wget` 等、上記以外のすべてのコマンド。
@@ -72,11 +72,11 @@ Bash はテスト実行と所在確認・ログ読取の診断目的のみに使
 
 ```bash
 ls skills/*/tests/*.test.mjs
-ls skills/setup-github-pages/tests/test_rebrand.py
+ls skills/*/tests/test_*.py
 ```
 
-現時点の実在: `setup-firebase-hosting` の 3 件（`key-deletion-authority` / `perm-check-403` / `version-pin`）、
-`setup-github-pages` の 2 件（`rebrand` / `rev-pin`）と `test_rebrand.py`。
+実在するファイルは上の `ls` の出力をそのまま報告に列挙する（本文に固定の在庫一覧を書かない）。
+Python テストを実行する tests ディレクトリの集合も、この出力から決める。
 
 ### Step 2: テストを新規実行する
 
@@ -92,10 +92,15 @@ Bash 呼び出しごとにシェル変数は引き継がれないため、ディ
 LOGDIR="$(mktemp -d)"
 node --test skills/*/tests/*.test.mjs > "${LOGDIR}/node-test.log" 2>&1
 echo "node exit=$?"
-python3 -I -B -m unittest discover -s skills/setup-github-pages/tests -p 'test_*.py' > "${LOGDIR}/py-test.log" 2>&1
-echo "py exit=$?"
+python3 -I -B -m unittest discover -s skills/setup-github-pages/tests -p 'test_*.py' > "${LOGDIR}/py-setup-github-pages.log" 2>&1
+echo "py setup-github-pages exit=$?"
+python3 -I -B -m unittest discover -s skills/actions-usage-dashboard/tests -p 'test_*.py' > "${LOGDIR}/py-actions-usage-dashboard.log" 2>&1
+echo "py actions-usage-dashboard exit=$?"
 echo "LOGDIR=${LOGDIR}"
 ```
+
+Python の行は Step 1 で `test_*.py` が見つかった tests ディレクトリごとに 1 組ある。
+Step 1 の出力に上記以外のディレクトリが現れた場合は、同じ形式の行（ログ名 `py-<skill>.log`）を追加する。
 
 `rm` は禁止のため、ログは `mktemp` 配下に残る。掃除はユーザーに委ね、報告に `LOGDIR` の絶対パスを記載する。
 
@@ -104,21 +109,23 @@ echo "LOGDIR=${LOGDIR}"
 - `python3 -I` はカレントディレクトリを `sys.path` に入れないため、`-m unittest test_rebrand` は
   `ModuleNotFoundError` になる。必ず `discover -s <dir>` 形を使う。
 - `-I -B` で隔離・pycache 非生成にする（`-B` を外さない）。
-- 所要時間の目安は Node 約 100 秒・Python 約 100 秒。Bash の timeout を 300000ms 以上にする。
-  `rebrand.test.mjs` は Python 側テストも内部で呼ぶため、両者は一部重複する。
+- 対象が増えると所要時間が延びるため、Bash の timeout は 600000ms を指定する。
+- Node 側のブリッジテスト（`setup-github-pages` の `rebrand.test.mjs`、`actions-usage-dashboard` の
+  `build-dashboard` / `fetch-billing` / `fetch-jobs` / `summarize`）は、対応する Python テストを内部で実行するため、
+  Node と Python の結果は一部重複する。
 - 一部だけの実行を依頼された場合は、該当ファイルのみ `node --test <path>` で実行してよい。
 
 ### Step 3: 出力全体を読む
 
 ログの末尾（`ℹ tests / pass / fail`、`Ran N tests` / `OK` / `FAILED`）、警告、失敗テスト名を確認する。
-一部だけ読んで判断しない。
+一部だけ読んで判断しない。Python のログはディレクトリごとに `Ran N tests` / `OK` / `FAILED` を確認する。
 
 Step 2 の最後に表示した `LOGDIR` の絶対パスを指定して読む。
 
 ```bash
 LOGDIR="<Step 2 で表示された絶対パス>"
 grep -E '^ℹ (tests|pass|fail|cancelled|skipped)' "${LOGDIR}/node-test.log"
-tail -5 "${LOGDIR}/py-test.log"
+tail -5 "${LOGDIR}"/py-*.log
 ```
 
 ### Step 4: 失敗時の引き継ぎ
@@ -141,7 +148,7 @@ git status --short
 
 - [ ] 信頼済みの作業ツリー（自分のブランチまたは `main`）であることを確認した
 - [ ] 許可コマンド以外（`git commit`・`gh`・`rm`・`curl` 等）とネットワーク接続を使っていない
-- [ ] 実行対象の実在を Step 1 で確認した
+- [ ] 実行対象の実在を Step 1 で確認し、Python テストを含む全ディレクトリを実行した
 - [ ] 各コマンドを新規実行し、終了コードを取得した
 - [ ] 出力全体（件数・失敗・警告）を読んだ
 - [ ] 失敗がある場合、修正せず `sub-investigator` への引き継ぎ情報を添えた
@@ -156,11 +163,11 @@ git status --short
 ### 実行結果
 | 対象 | コマンド | 終了コード | 件数 | 失敗 |
 |------|---------|-----------|------|------|
-| Node | node --test skills/*/tests/*.test.mjs | 0 | tests 39 / pass 39 | 0 |
-| Python | python3 -I -B -m unittest discover -s skills/setup-github-pages/tests -p 'test_*.py' | 0 | Ran 293 tests | 0 |
+| Node | node --test skills/*/tests/*.test.mjs | <exit> | tests <N> / pass <N> | <fail> |
+| Python (<skill>) | python3 -I -B -m unittest discover -s skills/<skill>/tests -p 'test_*.py' | <exit> | Ran <N> tests | <fail> |
 
 ### 証拠（出力の引用）
-（`ℹ pass 39` / `Ran 293 tests ... OK` など、読んだ出力の該当行）
+（`ℹ pass <N>` / `Ran <N> tests ... OK` など、読んだ出力の該当行。数値は必ず今回の新規実行の出力から転記し、本文の例をそのまま書かない）
 
 ### 失敗詳細（ある場合のみ）
 - テスト名 / エラーメッセージ / 再現コマンド
