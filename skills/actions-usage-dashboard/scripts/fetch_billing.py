@@ -157,7 +157,8 @@ def select_items(payload, month, org):
         paid_i = min(max(n / p, 0.0), q) if p > 0 else 0.0
         u["paid"] += paid_i
         u["gpaid"] += g * paid_i / q if q > 0 else 0.0
-        if u["price"] <= 0:
+        # 返却順に依存させないため、正の単価の最小値を保持する
+        if p > 0 and (u["price"] <= 0 or p < u["price"]):
             u["price"] = p
         u["q"] += q
         u["g"] += g
@@ -167,10 +168,10 @@ def select_items(payload, month, org):
 
 
 def linux_price(units):
-    for (_, _, sku), u in units.items():
-        if normalize_sku(sku) == LINUX_PRICE_SKU and u["price"] > 0:
-            return u["price"]
-    return None
+    """Linux 換算単価。明細の順序に依存しないよう、正の単価の最小値（標準 Linux の単価）を採る。"""
+    prices = [u["price"] for (_, _, sku), u in units.items()
+              if normalize_sku(sku) == LINUX_PRICE_SKU and u["price"] > 0]
+    return min(prices) if prices else None
 
 
 def _r(x):

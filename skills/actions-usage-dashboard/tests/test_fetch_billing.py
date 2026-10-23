@@ -154,6 +154,18 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(by["included"]["billable_minutes"], 0)
         self.assertEqual(round(by["paid"]["gross_usd"] + by["included"]["gross_usd"], 6), 0.24)
 
+    def test_mixed_unit_prices_order_independent(self):
+        # 返却順を入れ替えても換算単価と quota が変わらない
+        a = item("2026-07-01", "priv-api", "Actions Linux", 10, 0.008, 0.08, 0.08)
+        b = item("2026-07-01", "priv-api", "Actions Linux", 10, 0.016, 0.16, 0.0)
+        r1, p1 = fb.build_rows({"2026-07": {"usageItems": [a, b]}}, VISIBILITY, ORG)
+        r2, p2 = fb.build_rows({"2026-07": {"usageItems": [b, a]}}, VISIBILITY, ORG)
+        self.assertEqual(r1, r2)
+        self.assertEqual(p1, p2)
+        self.assertEqual(p1["2026-07"], 0.008)
+        inc = [r for r in r1 if r["charge_class"] == "included"][0]
+        self.assertEqual(inc["quota_minutes"], 20)
+
     def test_excluded_and_deterministic_order(self):
         self.assertFalse([r for r in self.rows if r["sku"] in ("Actions storage", "Copilot premium")])
         keys = [(r["day"], r["repo"], r["sku"], fb.CHARGE_ORDER[r["charge_class"]]) for r in self.rows]
