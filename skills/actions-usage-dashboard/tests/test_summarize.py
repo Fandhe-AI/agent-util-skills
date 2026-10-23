@@ -491,7 +491,7 @@ class SharedCommonTest(unittest.TestCase):
         import _common
         expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
         self.assertEqual(os.path.realpath(_common.__file__), expected)
-        for name in ('FetchError', 'ORG_RE', 'gh_api'):
+        for name in ('FetchError', 'ORG_RE', 'MONTH_RE', 'gh_api'):
             self.assertIs(getattr(sm, name), getattr(_common, name), name)
 
 

@@ -688,8 +688,16 @@ class SharedCommonTest(unittest.TestCase):
         import _common
         expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
         self.assertEqual(os.path.realpath(_common.__file__), expected)
-        for name in ('FetchError', 'ORG_RE', 'gh_api', 'atomic_write_json'):
+        for name in ('FetchError', 'ORG_RE', 'gh_api', 'atomic_write_json',
+                     'parse_concatenated_json'):
             self.assertIs(getattr(fj, name), getattr(_common, name), name)
+
+    def test_parse_concatenated_json(self):
+        items, pages = fj.parse_concatenated_json('[{"a":1}]\n [{"a":2}][]')
+        self.assertEqual((len(items), pages), (2, 3))
+        for bad in ('{"a":1}', '[1][', 'x'):
+            with self.assertRaises(fj.FetchError, msg=bad):
+                fj.parse_concatenated_json(bad)
 
 
 if __name__ == "__main__":

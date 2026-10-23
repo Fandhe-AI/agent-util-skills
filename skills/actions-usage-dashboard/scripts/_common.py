@@ -1,8 +1,8 @@
 """actions-usage-dashboard の gh 呼び出し・原子的書き込み helper の唯一の定義。
 
 役割と境界:
-  fetch_billing.py / fetch_jobs.py / summarize.py が共有する GH_TIMEOUT / ORG_RE /
-  FetchError / gh_api / atomic_write_json をここに集約する。以前は各スクリプトが同じ
+  fetch_billing.py / fetch_jobs.py / summarize.py が共有する GH_TIMEOUT / ORG_RE / MONTH_RE /
+  FetchError / gh_api / atomic_write_json / parse_concatenated_json をここに集約する。以前は各スクリプトが同じ
   実装を複製しており、片方だけ直して乖離する恐れがあった。標準ライブラリだけで動く。
 
 読み込み方:
@@ -14,7 +14,8 @@
 import しない利用者:
   build_dashboard.py は「ネットワークに出ない」保証（subprocess 等を import しない）を
   守るため本モジュールを import せず、ORG_RE / atomic_write_json を複製している。
-  複製が本モジュールと一致することは tests/test_build_dashboard.py が検査する。
+  safe / CTRL_RE は summarize.py が正典で、build_dashboard.py が複製している（既定長だけが
+  意図した差）。いずれの一致も tests/test_build_dashboard.py が検査する。
 
 検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 """
@@ -26,6 +27,7 @@ import tempfile
 
 GH_TIMEOUT = 120
 ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
+MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])\Z")
 
 
 class FetchError(Exception):
@@ -62,3 +64,26 @@ def atomic_write_json(path, obj):
         except OSError:
             pass
         raise
+
+
+def parse_concatenated_json(text):
+    """gh --paginate が連結した JSON 配列（[..][..]）を (1 本のリスト, ページ数) にする。
+
+    fetch_billing（リポジトリ一覧）と fetch_jobs（同。ページ数を件数計上に使う）が共有する。
+    配列以外・解析不能は FetchError（fail-closed）。
+    """
+    dec, i, n, out, pages = json.JSONDecoder(), 0, len(text), [], 0
+    while i < n:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except ValueError:
+            raise FetchError("リポジトリ一覧の JSON を解析できない")
+        if not isinstance(obj, list):
+            raise FetchError("リポジトリ一覧が配列ではない")
+        out.extend(obj)
+        pages += 1
+    return out, pages

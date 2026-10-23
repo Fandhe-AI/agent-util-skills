@@ -16,8 +16,8 @@
   gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
   プラン名は API 由来の非信頼文字列のため、出力前に safe() で無害化する（テキスト・JSON 共通）。
 
-helper の共有: FetchError / gh_api / ORG_RE は _common.py から import する（定義は 1 か所）。
-  MONTH_RE は fetch_billing.py と同じ定義を複製している。
+helper の共有: FetchError / gh_api / ORG_RE / MONTH_RE は _common.py から import する（定義は 1 か所）。
+  safe / CTRL_RE は本スクリプトが正典で、build_dashboard.py が複製している（一致は tests/test_build_dashboard.py が検査）。
   _num は判定を同じにし、例外メッセージだけ入力の違いに合わせて変えている（API ではなく rows）。DAY_RE は本スクリプト固有。
   検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
@@ -35,10 +35,9 @@ from datetime import date, datetime, timezone
 # `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from _common import ORG_RE, FetchError, gh_api  # noqa: E402
+from _common import MONTH_RE, ORG_RE, FetchError, gh_api  # noqa: E402
 
 SCHEMA_VERSION = 1
-MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])\Z")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 # プランごとの月間含有分（Linux 換算の分）。別名は同じ定数ブロックで持つ。
 PLAN_INCLUDED_MINUTES = {"free": 2000, "team": 3000, "enterprise": 50000}

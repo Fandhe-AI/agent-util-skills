@@ -27,9 +27,11 @@
 batch.json にはローカルの絶対パスが入る。このファイル自体は store へ送らない
   （ArtifactData が file_path を読み、参照先の中身だけを文書として送る）。
 
-helper の複製: ORG_RE / atomic_write_json / safe は複製である。正典は _common.py（fetch 系が共有）だが、
-  「ネットワークに出ない」保証（subprocess を import しない）を守るため、ここでは import しない。
-  ORG_RE / atomic_write_json が _common.py と一致することは tests/test_build_dashboard.py が検査する。
+helper の複製: ORG_RE / atomic_write_json / safe / CTRL_RE は複製である。「ネットワークに出ない」保証
+  （subprocess を import しない）を守るため、_common.py も summarize.py も import しない。
+  ORG_RE / atomic_write_json の正典は _common.py。safe / CTRL_RE の正典は summarize.py で、
+  既定長だけが意図した差（端末向けの名前は 60 字、ここはパスとエラー文を載せるため 300 字）。
+  一致と差は tests/test_build_dashboard.py が検査する。
   標準ライブラリだけで動く。
 """
 import argparse
@@ -73,7 +75,7 @@ class BuildError(Exception):
 
 def safe(s, limit=300):
     s = CTRL_RE.sub("?", str(s))
-    return s if len(s) <= limit else s[:limit] + "..."
+    return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
 def atomic_write_json(path, obj):
