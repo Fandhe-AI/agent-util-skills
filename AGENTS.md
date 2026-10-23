@@ -9,7 +9,8 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
 `.claude/rules/`（`skill-authoring.md` / `agent-authoring.md` / `description-style.md` /
 `security.md`）を参照し、本書は重複させずレビュー判定基準に絞る。
 
-本リポジトリは `create-html-report` と `setup-firebase-hosting` の 2 スキルを
+本リポジトリは `create-html-report` / `setup-firebase-hosting` / `create-pitch-deck` /
+`create-design-doc` / `setup-github-pages` / `actions-usage-dashboard` の 6 スキルを
 `npx skills add Fandhe-AI/agent-util-skills` で**組織内の複数リポジトリへ配布する**上流
 ソースである。ここでの誤情報・危険なコマンド例・脆弱なコード例は導入先すべてへ伝播するため、
 通常のリポジトリより厳しい基準でレビューする。
@@ -58,6 +59,47 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
 - **危険なコマンド例の混入（P0）**: SKILL.md の手順・スクリプト例に `--no-verify`・force
   push・`rm -rf` の広域削除・`sudo` 常用・TLS 検証の恒常的無効化を含めない
 
+### Python（`skills/create-pitch-deck/scripts/build_slides.py` / `validate_slides.py`）
+
+- **エスケープ・再帰検査の省略（P0）**: untrusted な deck spec 由来の文字列をエスケープせず
+  HTML へ挿入するコード。iframe `srcdoc` へ埋め込む wireframe のエスケープや、`srcdoc` の中身の
+  再帰的な検査を省く変更
+- **inline JavaScript の逸脱（P0）**: `eval` / `Function` / `innerHTML` 代入 / `on*` 属性・
+  `fetch` 等ネットワーク API の追加（禁止パターンの事前検査を外す変更を含む）
+- **外部リソース依存の追加（P0）**: 外部・相対参照の追加（単一 HTML 配布の契約違反）
+- **validator の弱体化（P1）**: `validate_slides.py` の検査項目（自己完結性・inline JS の安全性・
+  必須スライド・はみ出し・PNG 撮影）を削除・無効化する変更
+
+### Python / HTML（`skills/create-design-doc/scripts/` / `templates/`）
+
+- **外部リソース依存の追加（P0）**: テンプレート・ワイヤーフレームへの外部 CDN・外部リソース
+  （`//`・`http(s)://`）依存の追加
+- **検査の弱体化（P1）**: `check_overflow.py` の外部参照検出・横スクロール検査を弱める変更
+- **許可範囲の拡大（P1）**: `--allow-local-refs` の適用を storyboard 以外へ広げる変更
+
+### bash / Python（`skills/setup-github-pages/scripts/` / `templates/`）
+
+- **入力検証の省略（P0）**: `check_repo.sh` / `_common.py` の `owner/repo` 検証を通さずに外部入力を
+  `gh` / `git` へ渡すコード
+- **取得元固定の緩和（P0）**: `FF_REV`（40 桁 commit）固定・`--locked`・匿名取得を、ブランチ名・
+  タグ参照・認証情報付き URL へ緩める変更。ライセンス取得の固定 URL・https 限定・リダイレクト
+  非追従・時間とサイズの上限を外す変更
+- **設定値の表示（P0）**: 認証情報を含み得る git 設定値（`insteadOf` 等）を表示する変更
+- **第三者 action の固定緩和（P1）**: `pages.yml` の第三者 action の SHA 固定を緩める変更
+  （`Fandhe-AI/actions` の `@latest` は下記の例外に従い対象外）
+- **競合時停止の除去（P1）**: `scaffold.py` が競合で停止（exit 3）する挙動を外し、利用者の了承なしに
+  上書きする変更。`tests/rev-pin.test.mjs` の検査を弱める変更
+
+### Python（`skills/actions-usage-dashboard/scripts/` / `templates/dashboard/`）
+
+- **通信経路・認証情報（P0）**: トークンを直接扱う・ログへ出す変更、`gh api` 以外の通信経路の追加
+- **公開前承認の省略（P0）**: Artifact の作成・アップロード前のユーザー明示承認を省く変更
+  （非公開リポジトリ名・金額が承認なしに載る）。モデルに rows JSON や生成物を読ませる手順の追加
+- **上限・形式検証の撤廃（P1）**: `build_dashboard.py` の `--asset-url`（`/_blob/<id>` 形式のみ）
+  検証、文書 256 KB 未満・rows 8 MB 以下の上限を外す変更
+- **読み戻し文書の扱い（P1）**: ストアから読み戻した文書を信頼できるものとして扱う変更、
+  check 文書の成功を確認せず完了とする変更。テンプレートへの数値の埋め込み
+
 ### 共通
 
 - **秘密情報の混入（P0）**: 実 API キー・実トークン・内部 URL を SKILL.md・references・
@@ -81,7 +123,8 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
   あり、本リポジトリ側で直接編集しない。ここへの手動編集提案・PR への直接コミットは指摘する
   （修正は上流リポジトリへ、または `contribute-skill` 経由で行う）
 - **symlink 構造の整合（P1）**: `.claude/skills/<name>` は自前スキル（`create-html-report` /
-  `setup-firebase-hosting`）なら `../../skills/<name>` へ、vendored スキルなら
+  `setup-firebase-hosting` / `create-pitch-deck` / `create-design-doc` / `setup-github-pages` /
+  `actions-usage-dashboard`）なら `../../skills/<name>` へ、vendored スキルなら
   `../../.agents/skills/<name>` へのシンボリックリンクである。`create-skill` / `create-agent`
   のみリポジトリ管理スキルとして実ディレクトリを許容する。この対応関係を崩す変更・リンク切れは
   指摘する
@@ -101,10 +144,13 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
   代表 chart type 名・代表コマンド名を含め、長さ・YAML `#` の落とし穴等の規約
   （`description-style.md`）に従う。発火率を下げる安易な短縮・キーワード削除は指摘する
 - **完了ゲートの保持（P1）**: `create-html-report` の `validate_report.py` 実行・
-  `setup-firebase-hosting` の CI 経路確認等、SKILL.md に明記された検証ステップを省略・弱体化
+  `setup-firebase-hosting` の CI 経路確認・`create-pitch-deck` の `validate_slides.py`・
+  `create-design-doc` の `check_overflow.py`・`setup-github-pages` の `check_site.py` と
+  `build-local.sh` の帰属表記確認・`actions-usage-dashboard` の `tests/` と check 文書の成功確認等、SKILL.md に明記された検証ステップを省略・弱体化
   する編集は `verification.md` 違反として指摘する
 - **索引の同期（P2）**: SKILL.md の参照ファイル一覧・README.md のスキル一覧・CLAUDE.md の
-  Current Skills 一覧は変更時に同時更新する
+  Current Skills 一覧・`docs/skill-network-requirements.md` の判定一覧と各スキルの詳細節は
+  変更時に同時更新する
 
 ## リポジトリ固有の観点
 
