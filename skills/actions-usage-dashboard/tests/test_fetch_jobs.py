@@ -338,7 +338,10 @@ class Cli(unittest.TestCase):
         for body in ("{not json", json.dumps({"schema_version": 1, "org": "other", "runs": {}}),
                      json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": {
                          "repo": "pub-site", "attempt": 1, "created_at": "",
-                         "agg": [{"day": "2026-10-10", "runner_group": "g", "minutes": -1}]}}})):
+                         "agg": [{"day": "2026-10-10", "runner_group": "g", "minutes": -1}]}}}),
+                     ) + tuple(json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": dict(
+                         {"repo": "pub-site", "attempt": 1, "agg": []}, **extra)}})
+                         for extra in ({}, {"created_at": None}, {"created_at": 20261010})):
             with open(p, "w") as f:
                 f.write(body)
             r = self.run_cli()

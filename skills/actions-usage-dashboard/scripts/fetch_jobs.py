@@ -341,7 +341,7 @@ def load_cache(path, org):
     for rid, e in c["runs"].items():
         if not rid.isdigit() or not isinstance(e, dict) or not isinstance(e.get("repo"), str) \
                 or not REPO_RE.match(e["repo"]) or not _pos_int(e.get("attempt")) \
-                or not isinstance(e.get("agg"), list):
+                or not isinstance(e.get("created_at"), str) or not isinstance(e.get("agg"), list):
             raise bad
         for a in e["agg"]:
             m = a.get("minutes") if isinstance(a, dict) else None
