@@ -308,11 +308,18 @@ window.UsageAgg = (function () {
 
   // 選択期間に対する取得状況。'none' = 取得なし・範囲外（0 ではなく不明）、'partial' = 一部のみ、
   // 'full' = 全体を取得済み、'unknown' = 取得期間が読めない。today（YYYY-MM-DD）は当月の末尾の上限。
-  function coverage(input, period, today) {
+  // 全期間（'*'）は other（もう一方の取得元）の期間との和集合を全体として照合する。
+  function coverage(input, period, today, other) {
     if (input === undefined || input === null) return 'none';
     const sp = span(input);
     if (!sp) return 'unknown';
-    if (period === '*') return 'full';
+    if (period === '*') {
+      const o = other === undefined || other === null ? null : span(other);
+      if (!o) return 'full';
+      const first = sp.first < o.first ? sp.first : o.first;
+      const last = sp.last > o.last ? sp.last : o.last;
+      return sp.first <= first && sp.last >= last ? 'full' : 'partial';
+    }
     const m = /^(\d{4})-(\d{2})$/.exec(period);
     if (!m) return 'unknown';
     const first = period + '-01';
@@ -520,12 +527,17 @@ function paintControls(sel, facts) {
 function paintTotals(rows, sel, period, cov) {
   const byKey = new Map((rows || []).map((r) => [r.key, r]));
   const key = U.keyOf([period, sel.runner_type || '*', sel.repo || '*']);
-  const row = byKey.get(key);
+  let row = byKey.get(key);
+  // 取得済み期間に該当行がないときは未取得ではなく利用ゼロ。取得なし・不明は従来どおり「—」。
+  if (!row && cov.billing !== 'none' && cov.billing !== 'unknown') {
+    row = { key: key, total_minutes: 0, quota_minutes: 0, gross_usd: 0, net_usd: 0, paid_minutes: 0, included_minutes: 0, public_free_minutes: 0, unknown_minutes: 0, self_hosted_minutes: 0 };
+  }
   page.querySelectorAll('[data-source="totals"]').forEach((el) => {
     const field = el.getAttribute('data-field');
     el.setAttribute('data-where', 'key=' + encodeURIComponent(key));
     let text = '—';
-    const src = field === 'self_hosted_minutes' ? ['jobs'] : (field === 'total_minutes' ? ['billing', 'jobs'] : ['billing']);
+    // jobs が未接続なら合計は billing だけで算出する（Coverage notes と同じ扱い）。
+    const src = field === 'self_hosted_minutes' ? ['jobs'] : (field === 'total_minutes' && cov.jobsConnected ? ['billing', 'jobs'] : ['billing']);
     if (row && !src.some((k) => cov[k] === 'none')) {
       text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(row[field]) : fmtMin(row[field]);
       // 区分不明の利用がある範囲では含有枠の消費は下限値になる。
@@ -541,7 +553,7 @@ function paintTotals(rows, sel, period, cov) {
   const qnote = document.getElementById('aud-quota-note');
   if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : '定価を Linux 単価で割った分';
   let remaining;
-  if (cov.billing === 'none' || cov.billing === 'partial') remaining = '不明（選択月の billing を取得しきれていない）';
+  if (cov.billing === 'none' || cov.billing === 'partial' || cov.billing === 'unknown') remaining = '不明（選択月の billing を取得しきれていない）';
   else if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
   else if (sel.plan === null) remaining = 'プラン未指定のため不明';
   else if (!row || period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
@@ -705,8 +717,9 @@ function render() {
   paintControls(sel, facts);
   const today = new Date().toISOString().slice(0, 10);
   const cov = {
-    billing: billD.status === 'ok' ? U.coverage(billD.data, period, today) : 'none',
-    jobs: jobsD.status === 'ok' ? U.coverage(jobsD.data, period, today) : 'none'
+    billing: billD.status === 'ok' ? U.coverage(billD.data, period, today, jobsD.status === 'ok' ? jobsD.data : null) : 'none',
+    jobs: jobsD.status === 'ok' ? U.coverage(jobsD.data, period, today, billD.status === 'ok' ? billD.data : null) : 'none',
+    jobsConnected: jobsD.status === 'ok'
   };
   paintTotals(ready ? t.data : [], sel, period, cov);
   $('#aud-nojobs').hidden = jobsD.status === 'ok';

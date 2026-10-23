@@ -181,10 +181,19 @@ test('T12 取得期間外は 0 ではなく none、一部は partial になる',
   assert.equal(U.coverage(undefined, '2026-10', '2026-10-20'), 'none')
   assert.equal(U.coverage(jobs, '2026-10', '2026-10-20'), 'unknown')
   assert.equal(U.coverage(jobsDoc, '*', '2026-10-20'), 'full')
+  // 全期間は両取得元の期間の和集合で照合する（jobs は 10 月のみなので 9 月分が欠ける）。
+  assert.equal(U.coverage(jobsDoc, '*', '2026-10-20', billingDoc), 'partial')
+  assert.equal(U.coverage(billingDoc, '*', '2026-10-20', jobsDoc), 'full')
 })
 
 test('T13 ページは範囲外のセルフホスト分を不明表示にする', () => {
   assert.match(HTML, /U\.coverage\(/)
   assert.match(HTML, /cov\[k\] === 'none'/)
   assert.match(HTML, /id="aud-coverage"/)
+})
+
+test('ページ側の配線: unknown で残量不明・ゼロ補完・jobs 未接続の合計', () => {
+  assert.match(HTML, /cov\.billing === 'unknown'/)
+  assert.match(HTML, /cov\.jobsConnected/)
+  assert.match(HTML, /取得済み期間に該当行がないとき/)
 })
