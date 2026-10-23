@@ -52,6 +52,6 @@ python3 -m pytest -q <skill-root>/tests
 
 ## 注意事項
 
-- このスキルはネットワーク越しの GitHub 操作（`gh api`）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する（`docs/skill-network-requirements.md` 参照）。ネットワーク遮断を解除できない環境では実行できない
+- このスキルはネットワーク越しの GitHub 操作（`gh api`）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する（sandbox 内ではネットワークが遮断され `gh api` が失敗するため）。ネットワーク遮断を解除できない環境では実行できない
 - トークンは扱わない。`gh api` 経由のみで、標準ライブラリだけで動く
-- コミット・PR は `.claude/rules/conventional-commits.md` に従う
+- コミット・PR は導入先リポジトリのコミット規約に従う
