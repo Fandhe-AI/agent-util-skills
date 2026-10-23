@@ -204,8 +204,13 @@ def build_rows(month_payloads, visibility, org, assume_current=False):
             paid, gpaid = u["paid"], u["gpaid"]
             if not assume_current:
                 rest_cls = "unknown"
+            elif public:
+                rest_cls = "public_free"
+            elif vis in ("private", "internal"):
+                rest_cls = "included"
             else:
-                rest_cls = "public_free" if public else "included"
+                # 削除済み・閲覧権限不足・帰属不明は現在値も無いため確定しない
+                rest_cls = "unknown"
             parts = []
             if paid > 0:
                 parts.append(("paid", paid))

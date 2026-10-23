@@ -126,6 +126,18 @@ class BuildRowsTest(unittest.TestCase):
             rows, _ = fb.build_rows(PAYLOADS, VISIBILITY, ORG, True)
             self.assertIn(("2026-07-02", "pub-site", "Actions Linux", "public_free"), index(rows))
 
+    def test_assume_current_keeps_unknown_visibility_unknown(self):
+        # 公開範囲を引けないリポジトリはフラグ指定時も unknown のまま quota へ計上しない
+        payloads = {"2026-07": {"usageItems": [
+            item("2026-07-01", "gone-repo", "Actions Linux", 10, 0.008, 0.08, 0.0),
+            item("2026-07-01", "priv-api", "Actions Linux", 10, 0.008, 0.08, 0.0),
+        ]}}
+        rows, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
+        idx = index(rows)
+        self.assertEqual(idx[("2026-07-01", "gone-repo", "Actions Linux", "unknown")]["quota_minutes"], 0.0)
+        self.assertIn(("2026-07-01", "priv-api", "Actions Linux", "included"), idx)
+        self.assertFalse([r for r in rows if r["repo"] == "gone-repo" and r["charge_class"] != "unknown"])
+
     def test_runner_type(self):
         expect = {
             "Actions Linux": "ubuntu", "Actions Linux 4-core": "ubuntu",
@@ -145,7 +157,7 @@ class BuildRowsTest(unittest.TestCase):
         self.assertAlmostEqual(total("net_usd", "2026-09-02", "pub-site", "Actions Linux 4-core"), 0.32)
 
     def test_visibility_and_prefix(self):
-        self.assertEqual(self.idx[("2026-07-03", "gone-repo", "Actions Linux", "included")]["visibility"], "unknown")
+        self.assertEqual(self.idx[("2026-07-03", "gone-repo", "Actions Linux", "unknown")]["visibility"], "unknown")
         self.assertEqual(self.idx[("2026-07-02", "int-tools", "Actions Linux", "included")]["visibility"], "internal")
         self.assertIn(("2026-08-01", "priv-api", "Actions macOS 3-core", "included"), self.idx)  # org/ を除去
 
