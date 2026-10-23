@@ -41,7 +41,7 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
   意味的コンフリクトは**ラン完了後にベースブランチの CI が green であることを確認**して補う。
   **ただしこの補償はマージ先ブランチへの push で CI が起動するリポジトリでのみ成立する**
   （成立確認の手順・判定表は
-  `skills/implement-issue-tree/references/automerge-design.md` の
+  `.agents/skills/implement-issue-tree/references/automerge-design.md` の
   「補償策の成立確認（base CI プローブ）」節を参照。下記「補償策が成立しないリポジトリ
   （実測記録）」も参照）
 - 「マージが古い base で通ってしまう」を理由に strict を戻さない。戻すと並列ランが止まる
@@ -50,7 +50,7 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 
 ### 補償策が成立しないリポジトリ（実測記録）
 
-測定日: 2026-08-17。測定コマンド: `skills/implement-issue-tree/references/automerge-design.md`
+測定日: 2026-08-17。測定コマンド: `.agents/skills/implement-issue-tree/references/automerge-design.md`
 の「補償策の成立確認（base CI プローブ）」節のプローブ手順（対象ブランチは `@<branch>` で
 明示。この測定では `@` を省略し既定ブランチへフォールバックした形で実行した。既定ブランチは
 `defaultBranchRef` から解決、head sha は HTTP status で存在確認、`event == "push"` の
@@ -74,7 +74,7 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 **注記（`.yml`/`.yaml` 拡張子）**: この測定時点の横断確認は `.github/workflows/*.yml` のみを
 対象にしており、GitHub Actions が同様に認識する `.yaml` 拡張子の workflow ファイルは確認して
 いない（自動マージ設計側の必須 workflow 集合の決め方も同じ理由で `*.yml`/`*.yaml` 両方の確認
-を要求するよう修正済み。`skills/implement-issue-tree/references/automerge-design.md` 参照）。
+を要求するよう修正済み。`.agents/skills/implement-issue-tree/references/automerge-design.md` 参照）。
 5 リポいずれかに `.yaml` 拡張子の workflow ファイルが存在する場合、この表の判定は再測が必要
 になり得る。
 
@@ -105,11 +105,11 @@ workflow 集合の入力形式をカンマ区切り文字列から JSON 配列�
 
 | リポジトリ | 判定 | 理由 | 判断 |
 |-----------|------|------|------|
-| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は `skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする |
+| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は `.agents/skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする |
 | `Fandhe-AI/life-plan-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/local-server` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/pronunciation-vocab-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
-| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は `skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
+| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は `.agents/skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
 
 リポジトリ構成は変わるため、この記録は測定日時点のスナップショットであり、`autoMerge`
 運用を開始・再開するたびに再測する。該当 5 リポへの push トリガ CI 追加（判定表の
@@ -283,5 +283,5 @@ PUT し直す。PUT は `GET` した ruleset JSON の `required_status_checks` �
 
 - `./verification.md` — ruleset 変更後の確認（実測して証拠を示す）
 - `./security.md` — bypass 経路・認証境界の観点
-- `skills/implement-issue-tree/references/automerge-design.md` — G0 の全判定と設計根拠
-- `skills/setup-repo-guards/SKILL.md` — ruleset の初期構築手順
+- `.agents/skills/implement-issue-tree/references/automerge-design.md` — G0 の全判定と設計根拠
+- `setup-repo-guards`（upstream の Fandhe-AI/agent-cli-skills のスキル。このリポジトリには未導入）— ruleset の初期構築手順

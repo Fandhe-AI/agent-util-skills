@@ -33,11 +33,11 @@ skills/                               -- 本リポジトリが上流ソースと
     scripts/                          -- build-local.sh（固定 rev の匿名 cargo install → 生成 → 帰属表記の存在確認）、check_repo.sh（owner/repo 検証）、update-snapshot.sh（更新の記録・復旧）、check_site.py（検証）、scaffold.py（モード判定・配置・更新・競合差分）、_common.py（検証・無害化）
     tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、rebrand.test.mjs（Node.js ブリッジ。名前は旧構成の名残）、test_rebrand.py（check_site・scaffold・verify_attribution・update-snapshot の回帰テスト。名前は旧構成の名残）、fixtures/
 .agents/skills/                       -- vendored スキル（消費専用。npx skills update で同期・直接編集しない）
-  comment-code/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/
+  comment-code/ contribute-skill/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/
   implement-issue/ implement-issue-tree/ implement-review/ implement-review-pr/ init-claude/
   project-add-items/ project-archive-done/ project-create-issues/ project-init/
   project-sync-issues/ project-update-items/ project-view-status/ sync-skills-lock/
-  update-claude/ update-docs/ update-issue-tree/     -- Fandhe-AI/agent-cli-skills から日次同期（20件）
+  update-claude/ update-docs/ update-issue-tree/     -- Fandhe-AI/agent-cli-skills から日次同期（23件）
   anthropic-claude-code/ anthropic-claude-code-extend/ github-docs/
                                        -- Fandhe-AI/agent-reference-skills から日次同期（3件）
 skills-lock.json                      -- vendored スキルの source・skillPath・computedHash 台帳
@@ -57,6 +57,7 @@ skills-lock.json                      -- vendored スキルの source・skillPat
       security-auditor.md             -- OWASP 監査・読み取り専用（Sonnet）
       frontmatter-linter.md           -- frontmatter/symlink 機械検証（Haiku）
       plan-verifier.md                -- 計画検証・読み取り専用（Sonnet）
+      test-runner.md                  -- テスト実行・証拠付き報告・読み取り中心（Haiku）
   rules/
     delegation.md                     -- 委譲の原則（調査・設計フェーズ）
     delegation-impl.md                -- 委譲マッピング（作成・編集フェーズ）
@@ -71,7 +72,11 @@ skills-lock.json                      -- vendored スキルの source・skillPat
     code-comment-style.md             -- コード内コメント・ドキュメンテーションコメント規約
     verification.md                   -- 完了ゲート規約（証拠なき完了宣言の禁止・5段階検証）
     debugging.md                      -- 根本原因デバッグ規約（修正前の原因調査・3回失敗でエスカレーション）
+    out-of-scope-tracking.md          -- スコープ外事項の追跡規約（承認前の自動 Issue 化禁止）
+    ruleset-policy.md                 -- ブランチ ruleset 方針（strict=false・integration_id 束縛・一括更新後の検証）
     github-actions.md                 -- GitHub Actions のキャッシュ方針（保存は main だけ・ルートの lockfile だけをハッシュ）
+  workflows/
+    implement-issue-tree.js           -- symlink: ../skills/implement-issue-tree/scripts/implement-issue-tree.js
   skills/                             -- skills/ と .agents/skills/ へのシンボリックリンク集約
     create-html-report                -- 自前スキル（symlink: ../../skills/create-html-report）
     setup-firebase-hosting            -- 自前スキル（symlink: ../../skills/setup-firebase-hosting）
@@ -80,8 +85,8 @@ skills-lock.json                      -- vendored スキルの source・skillPat
     setup-github-pages                -- 自前スキル（symlink: ../../skills/setup-github-pages）
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
-    (他 create-commit 等は .agents/skills/ への symlink)
-  settings.json                       -- SessionStart hook（リマインダー）
+    (他 create-commit / contribute-skill 等は .agents/skills/ への symlink)
+  settings.json                       -- SessionStart hook（リマインダー）・PostToolUse hook（.sh 編集時 shellcheck）
 .github/
   workflows/
     ci.yml                            -- スキル構造検証（structure）+ lint-docs
@@ -151,6 +156,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `security-auditor` | Sonnet | OWASP Top 10 セキュリティ監査 |
 | `frontmatter-linter` | Haiku | frontmatter・symlink の機械検証 |
 | `plan-verifier` | Sonnet | 計画ファイルの完了検証 |
+| `test-runner` | Haiku | テスト実行と証拠付き報告（修正はせず、失敗は sub-investigator へ引き継ぐ） |
 
 ## Rules
 
@@ -169,6 +175,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `reference-template.md` | skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 | `verification.md` | skill 修正・レビュー作業全般 | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
 | `debugging.md` | skill 修正作業 / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
+| `out-of-scope-tracking.md` | 実装系 Agent / implement-issue-tree | スコープ外事項の追跡（承認前に自動 Issue 化しない） |
 | `ruleset-policy.md` | setup-repo-guards / implement-issue-tree / ruleset を変更する全作業 | ブランチ ruleset 方針（`strict_required_status_checks_policy` は必ず false・required check の `integration_id` 束縛・条件付きチェックを required にしない・一括更新後の 3 軸 + classic BP 検証） |
 | `github-actions.md` | `.github/workflows/` を変更する作業 / `skills/` の lockfile を変更する作業 | GitHub Actions のキャッシュ方針（容量上限と課金の前提・効果測定・保存は main への push だけ・ルートの lockfile だけをハッシュ・PR チェックリスト・配布物の lockfile が利用側のキャッシュキーに与える影響） |
 
@@ -184,7 +191,7 @@ create-skill, create-agent
 
 ### vendored スキル（消費専用・.agents/skills/ に配置。編集は上流リポジトリで行う）
 
-- **Fandhe-AI/agent-cli-skills 由来（20件）**: comment-code, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, init-claude, project-add-items, project-archive-done, project-create-issues, project-init, project-sync-issues, project-update-items, project-view-status, sync-skills-lock, update-claude, update-docs, update-issue-tree
+- **Fandhe-AI/agent-cli-skills 由来（23件）**: comment-code, contribute-skill, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, init-claude, project-add-items, project-archive-done, project-create-issues, project-init, project-sync-issues, project-update-items, project-view-status, sync-skills-lock, update-claude, update-docs, update-issue-tree
 - **Fandhe-AI/agent-reference-skills 由来（3件）**: github-docs, anthropic-claude-code, anthropic-claude-code-extend
 
 vendored スキルは `.github/workflows/update-external.yml` の日次同期で更新される。手元で改修した vendored スキルを upstream へ反映する場合は `contribute-skill` を使う。
@@ -219,6 +226,8 @@ vendored スキルは `.github/workflows/update-external.yml` の日次同期で
 - 作業は subagent へ委譲し main の token 消費を抑える（delegation.md / delegation-impl.md）
 - `.claude/` 配下の編集は `_/dotclaude/` 経由（dotclaude-via-temp）
 - Conventional Commits 厳守（`--no-verify` 禁止）
+
+`.claude/settings.json` には PostToolUse hook（matcher: `Edit|Write`）も設定する。`.sh` ファイルの編集時のみ `shellcheck` を実行し、結果を出力する（非ブロッキング。shellcheck 未導入時は何もしない）。
 
 ## Skill Anatomy
 

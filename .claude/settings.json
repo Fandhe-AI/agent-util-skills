@@ -10,6 +10,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$(jq -r '.tool_input.file_path // empty')\"; case \"${f}\" in *.sh) if command -v shellcheck >/dev/null 2>&1 && [ -f \"${f}\" ]; then shellcheck -- \"${f}\" 2>&1 || true; fi;; esac; exit 0"
+          }
+        ]
+      }
     ]
   }
 }
