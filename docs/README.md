@@ -8,6 +8,7 @@
 | ファイル | 概要 |
 |---------|------|
 | [skill-network-requirements.md](skill-network-requirements.md) | `skills/` 配下の自前スキルのネットワーク・sandbox 実行要件 |
+| [actions-usage-dashboard-field-test.md](actions-usage-dashboard-field-test.md) | actions-usage-dashboard を実 org に通した実測記録（未検証事項と後続手順つき） |
 
 ## ガード検証
 
