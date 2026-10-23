@@ -15,11 +15,10 @@
 プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
   gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
 
-helper の複製: FetchError / gh_api / ORG_RE / MONTH_RE は fetch_billing.py と同じ実装を複製している。
-  _num は判定を同じにし、例外メッセージだけ入力の違いに合わせて変えている（API ではなく rows）。
-  python3 -I 起動ではスクリプトの隣のモジュールを import できないため。
-  直すときは fetch_billing.py / fetch_jobs.py と揃える。DAY_RE は本スクリプト固有。
-  検証用の正規表現の終端は `\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
+helper の共有: FetchError / gh_api / ORG_RE は _common.py から import する（定義は 1 か所）。
+  MONTH_RE は fetch_billing.py と同じ定義を複製している。
+  _num は判定を同じにし、例外メッセージだけ入力の違いに合わせて変えている（API ではなく rows）。DAY_RE は本スクリプト固有。
+  検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
 """
@@ -27,14 +26,17 @@ import argparse
 import calendar
 import json
 import math
+import os
 import re
-import subprocess
 import sys
 from datetime import date, datetime, timezone
 
+# `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
+# append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from _common import ORG_RE, FetchError, gh_api  # noqa: E402
+
 SCHEMA_VERSION = 1
-GH_TIMEOUT = 120
-ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
 MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])\Z")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 # プランごとの月間含有分（Linux 換算の分）。別名は同じ定数ブロックで持つ。
@@ -49,10 +51,6 @@ MAX_SRC_WARNINGS = 5
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
-class FetchError(Exception):
-    """入力・取得の失敗。main が日本語 1 行にして終了コード 1 で終える。"""
-
-
 def _num(item, key, required=True):
     v = item.get(key)
     if v is None and not required:
@@ -60,20 +58,6 @@ def _num(item, key, required=True):
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
         raise FetchError("rows の数値フィールド %s が不正（有限の非負数ではない）" % key)
     return float(v)
-
-
-def gh_api(args):
-    try:
-        r = subprocess.run(["gh", "api"] + args, capture_output=True, text=True,
-                           timeout=GH_TIMEOUT, shell=False)
-    except FileNotFoundError:
-        raise FetchError("gh コマンドが見つからない")
-    except subprocess.TimeoutExpired:
-        raise FetchError("gh api が %d 秒でタイムアウト" % GH_TIMEOUT)
-    if r.returncode != 0:
-        lines = (r.stderr or "").strip().splitlines()
-        raise FetchError("gh api 失敗: %s" % (lines[0][:200] if lines else "exit %d" % r.returncode))
-    return r.stdout
 
 
 def safe(s, limit=MAX_NAME_LEN):

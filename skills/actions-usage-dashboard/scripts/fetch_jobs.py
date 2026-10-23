@@ -41,10 +41,9 @@
 出力対象: 今回の一覧に無い run（GitHub 側で削除・1,000 件上限で欠落）でも、対象リポジトリの
   キャッシュ済み履歴は集計に残す。
 
-helper の複製: gh_api / atomic_write_json / ORG_RE / FetchError は fetch_billing.py と
-  同じ実装を複製している（python3 -I 起動ではスクリプト隣接の import ができず、各スクリプトを
-  自己完結にするため）。直すときは両方を直す。REPO_RE / DATE_RE は本スクリプト固有。
-  検証用の正規表現の終端は `\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
+helper の共有: gh_api / atomic_write_json / ORG_RE / FetchError は _common.py から import する
+  （定義は 1 か所）。REPO_RE / DATE_RE / parse_concatenated_json（ページ数も返す版）は本スクリプト固有。
+  検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api 経由のみ（読み取り専用）。トークンは扱わない。標準ライブラリだけで動く。
 """
@@ -53,14 +52,15 @@ import json
 import math
 import os
 import re
-import subprocess
 import sys
-import tempfile
 from datetime import date, datetime, timedelta, timezone
 
+# `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
+# append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from _common import ORG_RE, FetchError, atomic_write_json, gh_api  # noqa: E402
+
 SCHEMA_VERSION = 1
-GH_TIMEOUT = 120
-ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 SELF_HOSTED_LABEL = "self-hosted"
@@ -72,10 +72,6 @@ DEFAULT_MIN_REMAINING = 200
 DEFAULT_RATE_CHECK_EVERY = 25
 EXIT_RATE_LIMITED = 3
 ZERO_COLS = ("quota_minutes", "billable_minutes", "gross_usd", "discount_usd", "net_usd")
-
-
-class FetchError(Exception):
-    """取得・検証の失敗。main が日本語 1 行にして終了コード 1 で終える。"""
 
 
 class InvalidJob(FetchError):
@@ -180,20 +176,6 @@ def build_rows(entries, visibility, since):
 
 
 # ---- gh 層 ----
-
-def gh_api(args):
-    try:
-        r = subprocess.run(["gh", "api"] + args, capture_output=True, text=True,
-                           timeout=GH_TIMEOUT, shell=False)
-    except FileNotFoundError:
-        raise FetchError("gh コマンドが見つからない")
-    except subprocess.TimeoutExpired:
-        raise FetchError("gh api が %d 秒でタイムアウト" % GH_TIMEOUT)
-    if r.returncode != 0:
-        lines = (r.stderr or "").strip().splitlines()
-        raise FetchError("gh api 失敗: %s" % (lines[0][:200] if lines else "exit %d" % r.returncode))
-    return r.stdout
-
 
 def _json(text, what):
     try:
@@ -380,24 +362,6 @@ def load_cache(path, org):
             except ValueError:
                 raise bad
     return c
-
-
-def atomic_write_json(path, obj):
-    d = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(prefix=".%s." % os.path.basename(path), suffix=".tmp", dir=d)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=1)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 # ---- main ----
