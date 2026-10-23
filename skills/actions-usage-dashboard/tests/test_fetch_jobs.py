@@ -10,7 +10,9 @@ import os
 import shutil
 import subprocess
 import sys
+import signal
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -22,8 +24,16 @@ spec.loader.exec_module(fj)
 
 ORG = "acme-synth"
 
+# 一覧の縮小は「今日」基準の窓で決まるため、固定日付だと時間経過でテストが壊れる。相対日付にする
+TODAY = datetime.now(timezone.utc).date()
+D0 = (TODAY - timedelta(days=10)).isoformat()
+D1 = (TODAY - timedelta(days=9)).isoformat()
+D2 = (TODAY - timedelta(days=8)).isoformat()
+DM1 = (TODAY - timedelta(days=11)).isoformat()
+SINCE = (TODAY - timedelta(days=20)).isoformat()
+
 STUB = r'''#!%(py)s
-import json, os, sys
+import json, os, sys, time
 d = os.environ["STUB_DIR"]
 args = sys.argv[1:]
 with open(os.path.join(d, "calls.log"), "a") as f:
@@ -54,6 +64,8 @@ if path == "rate_limit":
     sys.exit(0)
 if fail_after is not None and n_api > fail_after:
     sys.stderr.write("HTTP 500 boom\n"); sys.exit(1)
+if cfg.get("sleep_after") is not None and n_api > cfg["sleep_after"]:
+    time.sleep(30)
 if path.startswith("orgs/"):
     repos = cfg["repos"]
     print(json.dumps(repos[:2])); print(json.dumps(repos[2:]))
@@ -85,7 +97,7 @@ def job(jid, labels, group, start, minutes, status="completed"):
             "started_at": start, "completed_at": c}
 
 
-def run(rid, created="2026-10-10T00:00:00Z", status="completed", attempt=1):
+def run(rid, created=D0 + "T00:00:00Z", status="completed", attempt=1):
     return {"id": rid, "status": status, "run_attempt": attempt, "created_at": created}
 
 
@@ -99,11 +111,11 @@ def base_cfg():
         "runs": {"pub-site": [run(1)], "priv-api": [run(2), run(3, status="in_progress")],
                  "old-archived": [run(9)]},
         "jobs": {
-            "1": [job(101, ["self-hosted", "linux"], "build-farm", "2026-10-10T10:00:00+00:00", 10),
-                  job(102, ["ubuntu-latest"], "GitHub Actions", "2026-10-10T10:00:00+00:00", 99)],
-            "2": [job(201, ["Self-Hosted"], "build-farm", "2026-10-10T23:30:00+00:00", 90),
-                  job(202, ["x"], "build-farm", "2026-10-10T10:00:00+00:00", 5, status="in_progress")],
-            "3": [job(301, ["self-hosted"], "build-farm", "2026-10-10T10:00:00+00:00", 7)],
+            "1": [job(101, ["self-hosted", "linux"], "build-farm", D0 + "T10:00:00+00:00", 10),
+                  job(102, ["ubuntu-latest"], "GitHub Actions", D0 + "T10:00:00+00:00", 99)],
+            "2": [job(201, ["Self-Hosted"], "build-farm", D0 + "T23:30:00+00:00", 90),
+                  job(202, ["x"], "build-farm", D0 + "T10:00:00+00:00", 5, status="in_progress")],
+            "3": [job(301, ["self-hosted"], "build-farm", D0 + "T10:00:00+00:00", 7)],
         },
     }
 
@@ -211,7 +223,7 @@ class Cli(unittest.TestCase):
         if os.path.exists(p):
             os.unlink(p)
 
-    def run_cli(self, extra=None, out=None, cache=None, org=ORG, since="2026-10-01"):
+    def run_cli(self, extra=None, out=None, cache=None, org=ORG, since=SINCE):
         env = dict(os.environ, PATH=self.stub + os.pathsep + os.environ.get("PATH", ""), STUB_DIR=self.stub)
         cmd = [sys.executable, "-I", "-B", SCRIPT, "--org", org, "--since", since,
                "--out", out or self.out, "--cache", cache or self.cache] + (extra or [])
@@ -226,8 +238,8 @@ class Cli(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         rows = self.rows()
         self.assertEqual([(x["day"], x["repo"], x["runner_group"], x["minutes"]) for x in rows],
-                         [("2026-10-10", "priv-api", "build-farm", 90.0),
-                          ("2026-10-10", "pub-site", "build-farm", 10.0)])
+                         [(D0, "priv-api", "build-farm", 90.0),
+                          (D0, "pub-site", "build-farm", 10.0)])
         # run 2 の job 201 は 23:30 開始 90 分で開始日に計上、202 は未完了で除外。run 3 は保留
         self.assertEqual({(x["repo"], x["minutes"]) for x in rows}, {("priv-api", 90.0), ("pub-site", 10.0)})
         self.assertFalse(any("old-archived" in c or "/9/" in c for c in self.calls()))
@@ -241,8 +253,8 @@ class Cli(unittest.TestCase):
         self.assertEqual(self.run_cli().returncode, 0)
         self.reset_calls()
         self.cfg["runs"]["pub-site"].append(run(4))
-        self.cfg["jobs"]["4"] = [job(401, ["self-hosted"], "g2", "2026-10-11T01:00:00+00:00", 4)]
-        self.cfg["jobs"]["3"] = [job(301, ["self-hosted"], "build-farm", "2026-10-10T10:00:00+00:00", 7)]
+        self.cfg["jobs"]["4"] = [job(401, ["self-hosted"], "g2", D1 + "T01:00:00+00:00", 4)]
+        self.cfg["jobs"]["3"] = [job(301, ["self-hosted"], "build-farm", D0 + "T10:00:00+00:00", 7)]
         self.cfg["runs"]["priv-api"][1]["status"] = "completed"  # 保留していた run 3 が完了
         self.write_cfg()
         r = self.run_cli()
@@ -257,7 +269,7 @@ class Cli(unittest.TestCase):
         # 再実行（attempt 増）で取り直す
         self.reset_calls()
         self.cfg["runs"]["pub-site"][0]["run_attempt"] = 2
-        self.cfg["jobs"]["1"] = [job(103, ["self-hosted"], "build-farm", "2026-10-10T10:00:00+00:00", 20)]
+        self.cfg["jobs"]["1"] = [job(103, ["self-hosted"], "build-farm", D0 + "T10:00:00+00:00", 20)]
         self.write_cfg()
         self.assertEqual(self.run_cli().returncode, 0)
         self.assertEqual(sum(x["minutes"] for x in self.rows()), 20 + 90 + 7 + 4)
@@ -311,13 +323,13 @@ class Cli(unittest.TestCase):
 
     def test_cache_keeps_run_with_in_period_job(self):
         # 期間前（10/09）に作られた run が、期間内（10/10）開始の job を持つ
-        self.cfg["runs"]["pub-site"] = [run(1, created="2026-10-09T23:00:00Z")]
+        self.cfg["runs"]["pub-site"] = [run(1, created=DM1 + "T23:00:00Z")]
         self.cfg["runs"]["priv-api"] = []
         self.write_cfg()
-        self.assertEqual(self.run_cli(since="2026-10-01").returncode, 0)
+        self.assertEqual(self.run_cli(since=SINCE).returncode, 0)
         self.assertEqual(sum(x["minutes"] for x in self.rows()), 10)
         for _ in range(2):  # 期間を狭めても、繰り返しても分数が減らない
-            self.assertEqual(self.run_cli(since="2026-10-10").returncode, 0)
+            self.assertEqual(self.run_cli(since=D0).returncode, 0)
             self.assertEqual(sum(x["minutes"] for x in self.rows()), 10)
 
     def test_renamed_repo_keeps_cached_minutes(self):
@@ -399,7 +411,7 @@ class Cli(unittest.TestCase):
         self.cfg["runs"] = {"pub-site": [run(i) for i in range(1, 121)]}
         self.cfg["repos"] = self.cfg["repos"][:1]
         self.cfg["jobs"] = {str(i): [] for i in range(1, 121)}
-        self.cfg["jobs"]["5"] = [job(1000 + i, ["self-hosted"], "g", "2026-10-10T10:00:00+00:00", 1)
+        self.cfg["jobs"]["5"] = [job(1000 + i, ["self-hosted"], "g", D0 + "T10:00:00+00:00", 1)
                                  for i in range(150)]
         self.write_cfg()
         r = self.run_cli()
@@ -412,7 +424,7 @@ class Cli(unittest.TestCase):
         # 1,000 件上限を超える期間は二分して取り直し、欠けも重複もないことを一覧件数で確かめる
         runs = []
         rid = 1
-        for day in ("2026-10-10", "2026-10-11", "2026-10-12"):
+        for day in (D0, D1, D2):
             for _ in range(400):
                 runs.append(run(rid, created=day + "T00:00:00Z", status="queued"))
                 rid += 1
@@ -439,7 +451,7 @@ class Cli(unittest.TestCase):
         for body in ("{not json", json.dumps({"schema_version": 1, "org": "other", "runs": {}}),
                      json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": {
                          "repo": "pub-site", "attempt": 1, "created_at": "",
-                         "agg": [{"day": "2026-10-10", "runner_group": "g", "minutes": -1}]}}}),
+                         "agg": [{"day": D0, "runner_group": "g", "minutes": -1}]}}}),
                      ) + tuple(json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": dict(
                          {"repo": "pub-site", "attempt": 1, "agg": []}, **extra)}})
                          for extra in ({}, {"created_at": None}, {"created_at": 20261010})):
@@ -453,11 +465,205 @@ class Cli(unittest.TestCase):
             self.assertFalse(os.path.exists(self.out))
         self.assertEqual(self.calls(), [])
 
+    def runs_list_calls(self):
+        return [c for c in self.calls() if "actions/runs -f" in c]
+
+    def test_second_run_lists_fewer_runs(self):
+        # 受け入れ条件: 2 回目以降は runs 一覧の API 呼び出しが減る（前回位置から取る）
+        old = (TODAY - timedelta(days=60)).isoformat() + "T00:00:00Z"
+        recent = (TODAY - timedelta(days=3)).isoformat() + "T00:00:00Z"
+        self.cfg["repos"] = self.cfg["repos"][:1]
+        self.cfg["runs"] = {"pub-site": [run(i, created=old) for i in range(1, 151)] + [run(1000, created=recent)]}
+        self.cfg["jobs"] = {}
+        self.write_cfg()
+        since = (TODAY - timedelta(days=90)).isoformat()
+        self.assertEqual(self.run_cli(since=since).returncode, 0)
+        first = self.runs_list_calls()
+        first_rows = self.rows()
+        self.reset_calls()
+        r = self.run_cli(since=since)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        second = self.runs_list_calls()
+        self.assertEqual((len(first), len(second)), (2, 1))
+        floor = (TODAY - timedelta(days=fj.RELIST_WINDOW_DAYS)).isoformat()
+        self.assertIn("created=>=%s" % floor, second[0])
+        self.assertEqual(self.rows(), first_rows)
+        self.assertIn("前回位置から 1 リポ", r.stdout)
+        self.assertLessEqual(len(r.stdout.splitlines()), 10)
+
+    def test_pending_old_run_keeps_lower_bound(self):
+        d = (TODAY - timedelta(days=60)).isoformat()
+        self.cfg["repos"] = self.cfg["repos"][:1]
+        self.cfg["runs"] = {"pub-site": [run(1, created=d + "T00:00:00Z"),
+                                         run(2, created=d + "T00:00:00Z", status="in_progress")]}
+        self.cfg["jobs"] = {"1": [job(101, ["self-hosted"], "g", d + "T10:00:00+00:00", 5)]}
+        self.write_cfg()
+        since = (TODAY - timedelta(days=90)).isoformat()
+        self.assertEqual(self.run_cli(since=since).returncode, 0)
+        self.reset_calls()
+        self.cfg["runs"]["pub-site"][1]["status"] = "completed"
+        self.cfg["jobs"]["2"] = [job(201, ["self-hosted"], "g", d + "T11:00:00+00:00", 7)]
+        self.write_cfg()
+        self.assertEqual(self.run_cli(since=since).returncode, 0)
+        # 未完了だった run の作成日から一覧するため、窓より古くても完了後に拾える
+        self.assertIn("created=>=%s" % d, self.runs_list_calls()[0])
+        self.assertEqual(sum(x["minutes"] for x in self.rows()), 12)
+
+    def test_earlier_since_relists_full_range(self):
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.reset_calls()
+        earlier = (TODAY - timedelta(days=30)).isoformat()
+        self.assertEqual(self.run_cli(since=earlier).returncode, 0)
+        lists = self.runs_list_calls()
+        self.assertEqual(len(lists), 2)
+        self.assertTrue(all("created=>=%s" % earlier in c for c in lists))
+
+    def test_truncated_warning_persists_on_second_run(self):
+        self.cfg["repos"] = self.cfg["repos"][:1]
+        self.cfg["runs"] = {"pub-site": [run(i, created=D0 + "T00:00:00Z", status="queued") for i in range(1, 1101)]}
+        self.cfg["jobs"] = {}
+        self.write_cfg()
+        for _ in range(2):
+            r = self.run_cli()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("1,000 件上限", r.stdout)
+
+    def test_tampered_future_cursor_does_not_skip_listing(self):
+        wide = (TODAY - timedelta(days=90)).isoformat()
+        self.assertEqual(self.run_cli(since=wide).returncode, 0)
+        p = os.path.join(self.cache, "jobs-cache-%s.json" % ORG)
+        with open(p) as f:
+            c = json.load(f)
+        future = (TODAY + timedelta(days=100)).isoformat()
+        c["cursor"] = {"pub-site": {"since": wide, "from": future}}
+        with open(p, "w") as f:
+            json.dump(c, f)
+        self.reset_calls()
+        self.assertEqual(self.run_cli(since=wide).returncode, 0)
+        floor = (TODAY - timedelta(days=fj.RELIST_WINDOW_DAYS)).isoformat()
+        self.assertTrue(any("repos/%s/pub-site/actions/runs" % ORG in c and "created=>=%s" % floor in c
+                            for c in self.calls()))
+
+    def test_bad_cursor_stops(self):
+        os.makedirs(self.cache)
+        p = os.path.join(self.cache, "jobs-cache-%s.json" % ORG)
+        good = {"since": SINCE, "from": SINCE}
+        for cur in ("x", {"bad name!": good}, {"pub-site": "x"}, {"pub-site": {"since": SINCE}},
+                    {"pub-site": {"since": SINCE, "from": "2026-13-01"}},
+                    {"pub-site": {"since": SINCE, "from": "2026-10-1"}}):
+            body = json.dumps({"schema_version": 1, "org": ORG, "runs": {}, "cursor": cur})
+            with open(p, "w") as f:
+                f.write(body)
+            r = self.run_cli()
+            self.assertEqual(r.returncode, 1, cur)
+            self.assertIn("キャッシュが壊れている", r.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_progress_stderr(self):
+        r = self.run_cli(["--progress-interval", "0"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        prog = [l for l in r.stderr.splitlines() if l.startswith("進捗:")]
+        self.assertTrue(any("runs 一覧 2/2" in l for l in prog), prog)
+        self.assertTrue(any("jobs 取得 2/2" in l for l in prog), prog)
+        for name in ("pub-site", "priv-api", "old-archived"):
+            self.assertNotIn(name, r.stderr)
+        # 既定の間隔では高速なスタブの進捗は各フェーズの最後の 1 行ずつに収まる
+        self.reset_calls()
+        shutil.rmtree(self.cache)
+        r = self.run_cli()
+        self.assertLessEqual(len([l for l in r.stderr.splitlines() if l.startswith("進捗:")]), 2)
+
+    def test_max_seconds_resume_matches_uninterrupted(self):
+        ref_out = os.path.join(self.root, "ref.json")
+        self.assertEqual(self.run_cli(out=ref_out, cache=os.path.join(self.root, "refcache")).returncode, 0)
+        codes = []
+        for _ in range(30):
+            r = self.run_cli(["--max-seconds", "0.001"])
+            codes.append(r.returncode)
+            if r.returncode == 0:
+                break
+            self.assertEqual(r.returncode, 4, r.stderr)
+            self.assertFalse(os.path.exists(self.out))
+            self.assertIn("すぐ再実行", r.stderr)
+        self.assertEqual(codes[-1], 0, codes)
+        self.assertIn(4, codes)
+        self.assertEqual(self.rows(), self.rows(ref_out))
+
+    def test_max_seconds_invalid_job_run_does_not_block_progress(self):
+        # 不正な job を含む run が時間上限をまたいでも、同じ周回では取り直さず後続の run へ進む
+        self.cfg["jobs"]["1"] = [{"id": "bad", "labels": []}]
+        self.write_cfg()
+        codes = []
+        for _ in range(30):
+            r = self.run_cli(["--max-seconds", "0.001"])
+            codes.append(r.returncode)
+            if r.returncode == 0:
+                break
+            self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertEqual(codes[-1], 0, codes)
+        bad_fetches = [c for c in self.calls() if "actions/runs/1/jobs" in c]
+        self.assertEqual(len(bad_fetches), 1, bad_fetches)
+        with open(self.out) as f:
+            self.assertTrue(any("スキップ" in w and "run 1" in w for w in json.load(f)["warnings"]))
+        self.assertTrue(len(self.rows()) >= 1)
+        # 周回が終わった（listing を捨てた）後の実行では、スキップ分も再試行される
+        self.reset_calls()
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertTrue(any("actions/runs/1/jobs" in c for c in self.calls()))
+
+    def test_killed_run_keeps_checkpoint(self):
+        ref_out = os.path.join(self.root, "ref.json")
+        self.assertEqual(self.run_cli(out=ref_out, cache=os.path.join(self.root, "refcache")).returncode, 0)
+        self.reset_calls()
+        self.cfg["sleep_after"] = 3  # repos 1 + runs 2 回の後の API 呼び出し（jobs）で眠る
+        self.write_cfg()
+        env = dict(os.environ, PATH=self.stub + os.pathsep + os.environ.get("PATH", ""), STUB_DIR=self.stub)
+        cmd = [sys.executable, "-I", "-B", SCRIPT, "--org", ORG, "--since", SINCE, "--out", self.out,
+               "--cache", self.cache, "--progress-interval", "0"]
+        proc = subprocess.Popen(cmd, env=env, cwd=self.work, start_new_session=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.time() + 20
+            while time.time() < deadline and len([c for c in self.calls() if not c.startswith("api rate_limit")]) < 4:
+                time.sleep(0.05)
+            time.sleep(0.2)
+        finally:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        self.assertFalse(os.path.exists(self.out))
+        with open(os.path.join(self.cache, "jobs-cache-%s.json" % ORG)) as f:
+            saved = json.load(f)
+        self.assertTrue(saved.get("listing", {}).get("repos") or saved["runs"])
+        self.cfg["sleep_after"] = None
+        self.write_cfg()
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertEqual(self.rows(), self.rows(ref_out))
+
+    def test_relist_floor_and_next_cursor(self):
+        t = fj.date(2026, 10, 23)
+        base = t - timedelta(days=fj.RELIST_WINDOW_DAYS)
+        since = fj.date(2026, 6, 1)
+        self.assertEqual(fj.relist_floor(None, since, t), since)
+        ent = {"since": since.isoformat(), "from": base.isoformat()}
+        self.assertEqual(fj.relist_floor(ent, since, t), base)
+        self.assertEqual(fj.relist_floor(ent, fj.date(2026, 5, 1), t), fj.date(2026, 5, 1))
+        self.assertEqual(fj.relist_floor(dict(ent, **{"from": "2027-01-01"}), since, t), base)
+        items = [{"id": 1, "run_attempt": 1, "created_at": "2026-08-01T00:00:00Z"},
+                 {"id": 2, "run_attempt": 1, "created_at": "2026-09-01T00:00:00Z"}]
+        cur = fj.next_cursor_entry(items, lambda i, a: i == 2, [fj.date(2026, 7, 1)], since, t)
+        self.assertEqual(cur, {"since": "2026-06-01", "from": "2026-07-01"})
+        cur = fj.next_cursor_entry(items, lambda i, a: True, [], since, t)
+        self.assertEqual(cur["from"], base.isoformat())
+        cur = fj.next_cursor_entry([{"id": 3, "run_attempt": 1, "created_at": ""}], lambda i, a: False, [], since, t)
+        self.assertEqual(cur["from"], "2026-06-01")
+
     def test_bad_args_never_call_gh(self):
         future = (datetime.now(timezone.utc) + timedelta(days=3)).date().isoformat()
         a_file = os.path.join(self.work, "afile")
         open(a_file, "w").close()
         cases = [
+            dict(extra=["--max-seconds", "-1"]), dict(extra=["--progress-interval", "-1"]),
+            dict(extra=["--max-seconds", "nan"]),
             dict(org="bad_org!"), dict(since="2026-10-1"), dict(since="2026-13-01"), dict(since=future),
             dict(out=self.work), dict(out=os.path.join(self.work, "nodir", "x.json")), dict(cache=a_file),
         ]
