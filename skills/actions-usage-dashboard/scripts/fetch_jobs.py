@@ -59,7 +59,7 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
   キャッシュ済み履歴は集計に残す。
 
 helper の共有: gh_api / atomic_write_json / ORG_RE / FetchError は _common.py から import する
-  （定義は 1 か所）。REPO_RE / DATE_RE / parse_concatenated_json（ページ数も返す版）は本スクリプト固有。
+  （定義は 1 か所）。parse_concatenated_json も _common.py から import する。REPO_RE / DATE_RE は本スクリプト固有。
   検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api 経由のみ（読み取り専用）。トークンは扱わない。標準ライブラリだけで動く。
@@ -76,7 +76,9 @@ from datetime import date, datetime, timedelta, timezone
 # `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from _common import ORG_RE, FetchError, atomic_write_json, gh_api  # noqa: E402
+from _common import (  # noqa: E402
+    ORG_RE, FetchError, atomic_write_json, gh_api, parse_concatenated_json,
+)
 
 SCHEMA_VERSION = 1
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
@@ -276,25 +278,6 @@ def _json(text, what):
         return json.loads(text)
     except ValueError:
         raise FetchError("%s の応答を JSON として解析できない" % what)
-
-
-def parse_concatenated_json(text):
-    """gh --paginate が連結した JSON 配列（[..][..]）を 1 本のリストにする。"""
-    dec, i, n, out, pages = json.JSONDecoder(), 0, len(text), [], 0
-    while i < n:
-        while i < n and text[i].isspace():
-            i += 1
-        if i >= n:
-            break
-        try:
-            obj, i = dec.raw_decode(text, i)
-        except ValueError:
-            raise FetchError("リポジトリ一覧の JSON を解析できない")
-        if not isinstance(obj, list):
-            raise FetchError("リポジトリ一覧が配列ではない")
-        out.extend(obj)
-        pages += 1
-    return out, pages
 
 
 class GhClient:

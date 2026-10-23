@@ -218,7 +218,9 @@ class BuildRowsTest(unittest.TestCase):
 
     def test_helpers(self):
         self.assertEqual(fb.month_range("2025-11", "2026-02"), ["2025-11", "2025-12", "2026-01", "2026-02"])
-        self.assertEqual(len(fb.parse_concatenated_json('[{"a":1}]\n[{"a":2}][]')), 2)
+        items, pages = fb.parse_concatenated_json('[{"a":1}]\n[{"a":2}][]')
+        self.assertEqual(len(items), 2)
+        self.assertEqual(pages, 3)
 
 
 STUB = """#!{py}
@@ -384,7 +386,8 @@ class SharedCommonTest(unittest.TestCase):
         import _common
         expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
         self.assertEqual(os.path.realpath(_common.__file__), expected)
-        for name in ('FetchError', 'ORG_RE', 'gh_api', 'atomic_write_json'):
+        for name in ('FetchError', 'ORG_RE', 'MONTH_RE', 'gh_api', 'atomic_write_json',
+                     'parse_concatenated_json'):
             self.assertIs(getattr(fb, name), getattr(_common, name), name)
 
 

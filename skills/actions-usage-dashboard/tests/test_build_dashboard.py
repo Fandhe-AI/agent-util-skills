@@ -312,6 +312,31 @@ class CommonParityTest(unittest.TestCase):
         self.assertEqual(inspect.getsource(bd.atomic_write_json),
                          inspect.getsource(cm.atomic_write_json))
 
+    def test_safe_matches_summarize(self):
+        """safe / CTRL_RE の正典は summarize.py（Issue #158）。既定長だけが意図した差。"""
+        import importlib.util
+        import inspect
+        scripts = os.path.join(HERE, "..", "scripts")
+        sys.path.append(scripts)
+        spec = importlib.util.spec_from_file_location("_summarize_parity", os.path.join(scripts, "summarize.py"))
+        sm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sm)
+        self.assertEqual(bd.CTRL_RE.pattern, sm.CTRL_RE.pattern)
+        self.assertEqual(bd.CTRL_RE.flags, sm.CTRL_RE.flags)
+        self.assertEqual(inspect.signature(bd.safe).parameters["limit"].default, 300)
+        self.assertEqual(inspect.signature(sm.safe).parameters["limit"].default, sm.MAX_NAME_LEN)
+        self.assertEqual(sm.MAX_NAME_LEN, 60)
+        ctrl = "\x00\x1b\x7f\x85\x9f"
+        for limit in (1, 5, 60, 300):
+            samples = ["", ctrl, "a" + ctrl + "b", ValueError("e\x1bx"), 12345]
+            samples += ["x" * n for n in (limit - 1, limit, limit + 1) if n >= 0]
+            samples.append(ctrl + "y" * (limit + 5))
+            for s in samples:
+                got = bd.safe(s, limit)
+                self.assertEqual(got, sm.safe(s, limit), (limit, s))
+                self.assertLessEqual(len(got), limit)
+                self.assertIsNone(bd.CTRL_RE.search(got))
+
     def test_does_not_import_common(self):
         with open(SCRIPT, encoding="utf-8") as f:
             src = f.read()

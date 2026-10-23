@@ -25,7 +25,7 @@
   変わっていないと利用者が保証できる場合だけ --assume-current-visibility で現在値を採る。
 
 アクセス: gh api 経由のみ。トークンは扱わない。標準ライブラリだけで動く。
-helper の共有: FetchError / gh_api / atomic_write_json / ORG_RE は _common.py から import する。
+helper の共有: FetchError / gh_api / atomic_write_json / ORG_RE / MONTH_RE / parse_concatenated_json は _common.py から import する。
 """
 import argparse
 import json
@@ -38,10 +38,11 @@ from datetime import datetime, timezone
 # `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from _common import ORG_RE, FetchError, atomic_write_json, gh_api  # noqa: E402
+from _common import (  # noqa: E402
+    MONTH_RE, ORG_RE, FetchError, atomic_write_json, gh_api, parse_concatenated_json,
+)
 
 SCHEMA_VERSION = 1
-MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])\Z")
 LINUX_PRICE_SKU = "actions linux"
 UNATTRIBUTED = "(unattributed)"
 # 区分の並び順（行の決定的ソートにも使う）
@@ -83,24 +84,6 @@ def month_range(since, until):
     while (y, m) <= (ye, me):
         out.append("%04d-%02d" % (y, m))
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
-    return out
-
-
-def parse_concatenated_json(text):
-    """gh --paginate が連結した JSON 配列（[..][..]）を 1 本のリストにする。"""
-    dec, i, n, out = json.JSONDecoder(), 0, len(text), []
-    while i < n:
-        while i < n and text[i].isspace():
-            i += 1
-        if i >= n:
-            break
-        try:
-            obj, i = dec.raw_decode(text, i)
-        except ValueError:
-            raise FetchError("リポジトリ一覧の JSON を解析できない")
-        if not isinstance(obj, list):
-            raise FetchError("リポジトリ一覧が配列ではない")
-        out.extend(obj)
     return out
 
 
@@ -277,7 +260,8 @@ def summarize(rows, months, out_path, since, until):
 def fetch_visibility(org):
     text = gh_api(["--paginate", "orgs/%s/repos?per_page=100&type=all" % org])
     out = {}
-    for repo in parse_concatenated_json(text):
+    repos, _ = parse_concatenated_json(text)
+    for repo in repos:
         if not isinstance(repo, dict) or not isinstance(repo.get("name"), str):
             continue
         vis = repo.get("visibility")
