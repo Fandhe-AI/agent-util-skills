@@ -168,7 +168,8 @@ window.UsageAgg = (function () {
     self_hosted: { label: 'セルフホスト', idx: 2 }
   };
   const AXES = ['charge_class', 'repo', 'runner_type', 'visibility'];
-  const OTHER = '__other__';
+  // 実データの識別子（リポジトリ名は [A-Za-z0-9._-]）と交わらないよう、制御文字を含む名前空間に置く。
+  const OTHER = '\u0000other';
   const OTHER_LABEL = 'その他';
   const TOP_N = 7;
 

@@ -269,3 +269,21 @@ test('利用ゼロの月でも絞り込み・全期間・billing 未取得・準
   assert.equal(paintRemaining([], selOf(), '2026-11', covFull, false), '不明（集計を取得できていない）')
   assert.equal(paintRemaining([], selOf({ plan: null }), '2026-11', covFull, true), 'プラン未指定のため不明')
 })
+
+test('「その他」の識別子は __other__ という実名リポジトリと衝突しない', () => {
+  const mk = (repo, minutes) => ({ month: '2026-10', day: '2026-10-01', repo, runner_type: 'ubuntu', visibility: 'private', charge_class: 'included', minutes, quota_minutes: minutes })
+  const idsOf = (rows) => plain(U.daily(rows, { period: '2026-10', group_by: 'repo', include_free: true }))
+  // 7 件以下: 実名のまま系列になり、その他は現れない。
+  const few = idsOf([mk('__other__', 10), mk('a', 5), mk('b', 3)])
+  assert.deepEqual(few.groups.map((g) => g.id), ['__other__', 'a', 'b'])
+  assert.ok(!few.groups.some((g) => g.id === U.OTHER))
+  // 上位に入る場合: 圏外 2 件（3 + 2 分）は実名の __other__（10 分）と別系列になる。
+  const rows = [mk('__other__', 10), ...[9, 8, 7, 6, 5, 4, 3, 2].map((m, i) => mk(`r${i}`, m))]
+  const many = idsOf(rows)
+  const total = (id) => many.groups.find((g) => g.id === id).total
+  assert.equal(many.groups.length, 8)
+  assert.equal(total('__other__'), 10)
+  assert.equal(total(U.OTHER), 5)
+  assert.notEqual(U.OTHER, '__other__')
+  assert.doesNotMatch(U.OTHER, /^[A-Za-z0-9._-]+$/)
+})
