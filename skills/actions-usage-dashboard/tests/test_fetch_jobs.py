@@ -295,6 +295,34 @@ class Cli(unittest.TestCase):
             self.assertFalse(any("/runs/%s/jobs" % rid in c for c in self.calls()))
         self.assertEqual(self.rows(), self.rows(ref_out))
 
+    def test_jobs_requested_with_latest_filter(self):
+        self.assertEqual(self.run_cli().returncode, 0)
+        jobs_calls = [c for c in self.calls() if "/jobs" in c]
+        self.assertTrue(jobs_calls)
+        self.assertTrue(all("filter=latest" in c for c in jobs_calls))
+
+    def test_cache_keeps_run_with_in_period_job(self):
+        # 期間前（10/09）に作られた run が、期間内（10/10）開始の job を持つ
+        self.cfg["runs"]["pub-site"] = [run(1, created="2026-10-09T23:00:00Z")]
+        self.cfg["runs"]["priv-api"] = []
+        self.write_cfg()
+        self.assertEqual(self.run_cli(since="2026-10-01").returncode, 0)
+        self.assertEqual(sum(x["minutes"] for x in self.rows()), 10)
+        for _ in range(2):  # 期間を狭めても、繰り返しても分数が減らない
+            self.assertEqual(self.run_cli(since="2026-10-10").returncode, 0)
+            self.assertEqual(sum(x["minutes"] for x in self.rows()), 10)
+
+    def test_renamed_repo_keeps_cached_minutes(self):
+        self.assertEqual(self.run_cli().returncode, 0)
+        before = sum(x["minutes"] for x in self.rows())
+        self.cfg["repos"][0]["name"] = "pub-site-renamed"
+        self.cfg["runs"]["pub-site-renamed"] = self.cfg["runs"].pop("pub-site")
+        self.write_cfg()
+        self.assertEqual(self.run_cli().returncode, 0)
+        rows = self.rows()
+        self.assertEqual(sum(x["minutes"] for x in rows), before)
+        self.assertIn("pub-site-renamed", {x["repo"] for x in rows})
+
     def test_deleted_run_stays_in_output(self):
         self.assertEqual(self.run_cli().returncode, 0)
         before = sum(x["minutes"] for x in self.rows())

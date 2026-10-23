@@ -301,7 +301,7 @@ class GhClient:
         jobs = []
         for page in range(1, MAX_JOB_PAGES + 1):
             text = self._call("jobs", ["-X", "GET", "repos/%s/%s/actions/runs/%d/jobs" % (org, repo, run_id),
-                                       "-f", "filter=all", "-f", "per_page=%d" % PER_PAGE,
+                                       "-f", "filter=latest", "-f", "per_page=%d" % PER_PAGE,
                                        "-f", "page=%d" % page])
             d = _json(text, "jobs")
             lst = d.get("jobs") if isinstance(d, dict) else None
@@ -514,6 +514,8 @@ def main(argv=None):
         for rid, att, repo, run in listed:
             ent = cache["runs"].get(str(rid))
             if ent is not None and att <= ent["attempt"]:
+                # リポジトリ名変更後も出力判定（visibility）から外れないよう現在名へ更新する
+                ent["repo"] = repo
                 stats["cached"] += 1
                 continue
             if run.get("status") != "completed":
@@ -539,7 +541,10 @@ def main(argv=None):
         # 一覧に無い run（削除・1,000 件上限の欠落）も、対象リポジトリのキャッシュ済み履歴として残す
         entries = [e for k, e in cache["runs"].items() if e["repo"] in visibility and k not in stale]
         # --since より前に作られた run はこの期間では再参照されないため、キャッシュの無制限な増加を防ぐ
-        for k in [k for k, e in cache["runs"].items() if e["created_at"][:10] and e["created_at"][:10] < a.since]:
+        # ただし期間内の day を持つ agg が残る run（期間内に開始した job を含む）は履歴として保持する
+        for k in [k for k, e in cache["runs"].items()
+                  if e["created_at"][:10] and e["created_at"][:10] < a.since
+                  and not any(x["day"] >= a.since for x in e["agg"])]:
             del cache["runs"][k]
         rows = build_rows(entries, visibility, a.since)
         cache.pop("listing", None)
