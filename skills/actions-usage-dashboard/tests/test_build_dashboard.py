@@ -223,5 +223,29 @@ class ValidationTests(unittest.TestCase):
             self.assertIsNone(re.search(r"^\s*(import|from)\s+%s\b" % m, src, re.M), m)
 
 
+class CollisionTests(unittest.TestCase):
+    def test_rows_in_out_dir_rejected_without_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            rows = os.path.join(d, "dataset-billing.json")
+            with open(BILLING, "rb") as f:
+                data = f.read()
+            with open(rows, "wb") as f:
+                f.write(data)
+            for extra in ([], ["--asset-url", "/_blob/u0"]):
+                rc, _, _ = run(["--org", "example-org", "--out-dir", d, "--rows", rows] + extra)
+                self.assertEqual(rc, 1)
+                with open(rows, "rb") as f:
+                    self.assertEqual(f.read(), data)
+
+    def test_update_stage1_removes_stale_batch(self):
+        with tempfile.TemporaryDirectory() as d:
+            bp = os.path.join(d, "batch.json")
+            with open(bp, "w") as f:
+                f.write("[]")
+            rc, _, _ = run(base(d, (BILLING,)) + ["--update"])
+            self.assertEqual(rc, 0)
+            self.assertFalse(os.path.exists(bp))
+
+
 if __name__ == "__main__":
     unittest.main()

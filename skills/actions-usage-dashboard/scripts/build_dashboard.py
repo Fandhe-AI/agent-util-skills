@@ -249,6 +249,15 @@ def run(a):
     stage1 = not a.asset_url
     if_ver = parse_if_versions(a.if_version, ids) if (a.update and not stage1) else None
     out_dir = os.path.realpath(a.out_dir)
+    # 出力先の固定名が入力 rows と同じ実体を指すと、削除・上書きで rows を壊す。変更前に拒否する。
+    reserved = ["batch.json", "dash-meta.json", "dash-params.json", "index.json"]
+    for did in DATASET_IDS:
+        reserved += ["dataset-%s.json" % did, "dataset-%s.update.json" % did]
+    outs = set(os.path.realpath(os.path.join(out_dir, n)) for n in reserved)
+    for e in entries:
+        if os.path.realpath(e["path"]) in outs:
+            raise BuildError("--rows が --out-dir の生成物と衝突する: %s（別の --out-dir を指定する）"
+                             % safe(os.path.basename(e["path"])))
 
     # 書く内容をすべて組み立て、検査を通ってからファイルを書く。
     files = {}
@@ -286,9 +295,11 @@ def run(a):
         raise BuildError("batch の本文の合計が 1 MiB を超える（%d バイト）" % total)
 
     os.makedirs(out_dir, exist_ok=True)
-    if stage1 and not a.update:
+    if stage1:
         # 古い url のまま書く事故を防ぐため、固定名の前回成果物だけを消す。
-        for fn in ("batch.json", "dataset-billing.json", "dataset-jobs.json"):
+        # --update でも前回の batch.json（op: set など）を残すと誤使用で params が初期値に戻る。
+        names = ["batch.json"] if a.update else ["batch.json", "dataset-billing.json", "dataset-jobs.json"]
+        for fn in names:
             try:
                 os.unlink(os.path.join(out_dir, fn))
             except FileNotFoundError:
