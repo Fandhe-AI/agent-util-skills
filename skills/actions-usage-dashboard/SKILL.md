@@ -14,6 +14,8 @@ user-invocable: true
 
 org の Actions 利用分数を billing usage API から取得し、日次の行データ（JSON）へ正規化する。GitHub ホスト分は `scripts/fetch_billing.py`、セルフホスト分は `scripts/fetch_jobs.py` が担当する。
 
+データ源の項目の対応・換算式・判定ルール・権限・注意点は [`references/data-sources.md`](references/data-sources.md) を参照する。
+
 ## 使い方
 
 以下のコマンドの `<skill-root>` は、この SKILL.md が置かれたディレクトリ（導入先により `skills/` / `.agents/skills/` / `.claude/skills/` 配下の `actions-usage-dashboard`）の絶対パスに読み替える。cwd 直下の `skills/` を前提にしない。
