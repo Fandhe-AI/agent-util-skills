@@ -30,7 +30,7 @@ skills/                               -- 本リポジトリが上流ソースと
   actions-usage-dashboard/
     references/                       -- data-sources.md（API 項目と出力列の対応・有料分と含有枠の換算式・セルフホスト判定・権限・レート制限・終了コード）
     templates/                        -- dashboard/index.html（数値を持たない Dashboard 型ページ雛形。集計・グルーピング切替はページ内で行う）
-    scripts/                          -- fetch_billing.py（billing usage API → GitHub ホストランナーの日次行）、fetch_jobs.py（jobs API → セルフホストの日次行・増分キャッシュ）、summarize.py（ターミナル向け 20 行以内の要約・セルフホスト移行候補）、build_dashboard.py（Artifact 書き込み用 JSON・batch の一括生成）
+    scripts/                          -- _common.py（fetch_billing / fetch_jobs / summarize 共通の gh_api・atomic_write_json・FetchError・ORG_RE。build_dashboard は import せず複製しテストで一致検査）、fetch_billing.py（billing usage API → GitHub ホストランナーの日次行）、fetch_jobs.py（jobs API → セルフホストの日次行・増分キャッシュ）、summarize.py（ターミナル向け 20 行以内の要約・セルフホスト移行候補）、build_dashboard.py（Artifact 書き込み用 JSON・batch の一括生成）
     tests/                            -- test_fetch_billing.py・test_fetch_jobs.py・test_summarize.py・test_build_dashboard.py（回帰テスト）、*.test.mjs（node:test。Python テストのブリッジと dashboard-template.test.mjs による雛形検証）、fixtures/dashboard/（合成データ）
   setup-github-pages/
     references/                       -- site-format.md（nav.toml スキーマ・予約アセット名・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）、update-recovery.md（更新失敗時の復旧手順）

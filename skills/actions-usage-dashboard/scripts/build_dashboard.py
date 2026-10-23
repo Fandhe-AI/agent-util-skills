@@ -24,9 +24,10 @@
 batch.json にはローカルの絶対パスが入る。このファイル自体は store へ送らない
   （ArtifactData が file_path を読み、参照先の中身だけを文書として送る）。
 
-helper の複製: ORG_RE / atomic_write_json / safe は fetch_billing.py と同じ実装を複製している。
-  python3 -I 起動ではスクリプトの隣のモジュールを import できないため。
-  直すときは fetch_billing.py と揃える。標準ライブラリだけで動く。
+helper の複製: ORG_RE / atomic_write_json / safe は複製である。正典は _common.py（fetch 系が共有）だが、
+  「ネットワークに出ない」保証（subprocess を import しない）を守るため、ここでは import しない。
+  ORG_RE / atomic_write_json が _common.py と一致することは tests/test_build_dashboard.py が検査する。
+  標準ライブラリだけで動く。
 """
 import argparse
 import json

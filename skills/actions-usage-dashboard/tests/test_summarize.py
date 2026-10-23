@@ -406,5 +406,16 @@ class CliTests(Base):
         self.assertNotIn("\x1b", r.stdout)
 
 
+class SharedCommonTest(unittest.TestCase):
+    """helper の定義が scripts/_common.py の 1 か所であることを固定する（Issue #141）。"""
+
+    def test_helpers_are_shared_with_common(self):
+        import _common
+        expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
+        self.assertEqual(os.path.realpath(_common.__file__), expected)
+        for name in ('FetchError', 'ORG_RE', 'gh_api'):
+            self.assertIs(getattr(sm, name), getattr(_common, name), name)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -281,6 +281,27 @@ class ValidationTests(unittest.TestCase):
             self.assertIsNone(re.search(r"^\s*(import|from)\s+%s\b" % m, src, re.M), m)
 
 
+class CommonParityTest(unittest.TestCase):
+    """build_dashboard.py は _common.py を import せず複製する（ネットワーク非依存の保証を守るため）。
+    複製が正典の _common.py と乖離しないことをここで固定する（Issue #141）。"""
+
+    def test_copies_match_common(self):
+        import importlib.util
+        import inspect
+        path = os.path.join(HERE, "..", "scripts", "_common.py")
+        spec = importlib.util.spec_from_file_location("_common_parity", path)
+        cm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cm)
+        self.assertEqual(bd.ORG_RE.pattern, cm.ORG_RE.pattern)
+        self.assertEqual(bd.ORG_RE.flags, cm.ORG_RE.flags)
+        self.assertEqual(inspect.getsource(bd.atomic_write_json),
+                         inspect.getsource(cm.atomic_write_json))
+
+    def test_does_not_import_common(self):
+        src = open(SCRIPT, encoding="utf-8").read()
+        self.assertIsNone(re.search(r"^\s*(import|from)\s+_common\b", src, re.M))
+
+
 class CollisionTests(unittest.TestCase):
     def test_rows_in_out_dir_rejected_without_change(self):
         with tempfile.TemporaryDirectory() as d:
