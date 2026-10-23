@@ -17,6 +17,9 @@
   アップロードで得た /_blob/ の url を --rows と同じ順で --asset-url に渡して再実行すると
   batch.json が完成する。--update は既存 dataset の source と updated だけを書き換える
   op: update を作る（if_version は --if-version <id>=<N> で受ける）。
+  --update --add-dataset jobs は、作成時に無かった dataset を op: set（全体）で足し、
+  既存分の update と同じ batch に入れる。「--if-version が無ければ新規」と推測しないのは、
+  書き忘れが版固定なしの上書きにならないよう fail-closed にするため。
 
 batch.json にはローカルの絶対パスが入る。このファイル自体は store へ送らない
   （ArtifactData が file_path を読み、参照先の中身だけを文書として送る）。
@@ -195,7 +198,7 @@ def parse_if_versions(items, ids):
             raise BuildError("--if-version %s が重複している" % m.group(1))
         got[m.group(1)] = int(m.group(2))
     if set(got) != set(ids):
-        raise BuildError("--if-version は --rows の dataset（%s）ごとに 1 つ必要" % ", ".join(ids))
+        raise BuildError("--if-version は --add-dataset 以外の dataset（%s）ごとに 1 つ必要" % ", ".join(ids))
     return got
 
 
@@ -207,6 +210,8 @@ def main(argv=None):
     ap.add_argument("--asset-url", action="append", default=[], help="アップロード後の /_blob/ url（--rows と同順）")
     ap.add_argument("--update", action="store_true")
     ap.add_argument("--if-version", action="append", default=[], help="<id>=<N>（--update 用）")
+    ap.add_argument("--add-dataset", action="append", default=[], choices=["jobs"],
+                    help="--update で store にまだ無い dataset を op: set で作る")
     ap.add_argument("--title")
     ap.add_argument("--plan-included-minutes", type=int)
     ap.add_argument("--updated-at")
@@ -246,8 +251,19 @@ def run(a):
             raise BuildError("--asset-url は /_blob/<id> 形式のみ受け付ける")
     if a.if_version and not a.update:
         raise BuildError("--if-version は --update と併用する")
+    adds = list(a.add_dataset)
+    if adds and not a.update:
+        raise BuildError("--add-dataset は --update と併用する")
+    if len(set(adds)) != len(adds):
+        raise BuildError("--add-dataset が重複している")
+    for d in adds:
+        if d not in ids:
+            raise BuildError("--add-dataset %s には対応する --rows が必要" % d)
+        if any(i.startswith(d + "=") for i in a.if_version):
+            raise BuildError("--add-dataset %s と --if-version %s は同時に指定できない" % (d, d))
     stage1 = not a.asset_url
-    if_ver = parse_if_versions(a.if_version, ids) if (a.update and not stage1) else None
+    if_ver = (parse_if_versions(a.if_version, [i for i in ids if i not in adds])
+              if (a.update and not stage1) else None)
     out_dir = os.path.realpath(a.out_dir)
     # 出力先の固定名が入力 rows と同じ実体を指すと、削除・上書きで rows を壊す。変更前に拒否する。
     reserved = ["batch.json", "dash-meta.json", "dash-params.json", "index.json"]
@@ -264,10 +280,19 @@ def run(a):
     batch = []
     if a.update:
         if not stage1:
-            for e, u in zip(entries, a.asset_url):
-                fn = "dataset-%s.update.json" % e["id"]
-                files[fn] = build_update(u, e["path"], updated)
-                batch.append(write_entry("datasets", e["id"], fn, out_dir, "update", if_ver[e["id"]]))
+            by_id = dict((e["id"], (e, u)) for e, u in zip(entries, a.asset_url))
+            for did in DATASET_IDS:
+                if did not in by_id:
+                    continue
+                e, u = by_id[did]
+                if did in adds:
+                    fn = "dataset-%s.json" % did
+                    files[fn] = build_dataset(did, u, e["path"], updated)
+                    batch.append(write_entry("datasets", did, fn, out_dir))
+                else:
+                    fn = "dataset-%s.update.json" % did
+                    files[fn] = build_update(u, e["path"], updated)
+                    batch.append(write_entry("datasets", did, fn, out_dir, "update", if_ver[did]))
     else:
         try:
             with open(a.template, "rb") as f:
@@ -298,7 +323,8 @@ def run(a):
     if stage1:
         # 古い url のまま書く事故を防ぐため、固定名の前回成果物だけを消す。
         # --update でも前回の batch.json（op: set など）を残すと誤使用で params が初期値に戻る。
-        names = ["batch.json"] if a.update else ["batch.json", "dataset-billing.json", "dataset-jobs.json"]
+        names = (["batch.json"] + ["dataset-%s.json" % d for d in adds] if a.update
+                 else ["batch.json", "dataset-billing.json", "dataset-jobs.json"])
         for fn in names:
             try:
                 os.unlink(os.path.join(out_dir, fn))
@@ -311,7 +337,10 @@ def run(a):
         atomic_write_json(bp, batch)
         print("ArtifactData の batch の writes に %s の中身（%d 件）を渡す。" % (safe(bp), len(batch)))
         if a.update:
-            print("更新は dataset の source と updated だけを書き換える（if_version で版を固定）。")
+            for d in adds:
+                print("%s は新しい dataset として作る（op: set）。既にあれば store が拒否する。"
+                      "その場合は --add-dataset を外し --if-version %s=<N> にする。" % (d, d))
+            print("既存 dataset は source と updated だけを書き換える（if_version で版を固定）。")
         else:
             print("書き込み後、summarize.py の check モードで内容を確認する。")
     else:
@@ -319,7 +348,7 @@ def run(a):
         for i, e in enumerate(entries, 1):
             print("  %d. %s" % (i, safe(e["path"])))
         print("返った url を同じ順で --asset-url に渡し、同じ引数で再実行する%s。"
-              % ("（--update は --if-version <id>=<N> も必要）" if a.update else ""))
+              % ("（--update は既存 dataset ごとに --if-version <id>=<N>、新しく足す dataset に --add-dataset <id> が必要）" if a.update else ""))
         print("注意: 添付したファイルはダッシュボードを開ける全員が読める。")
     return 0
 
