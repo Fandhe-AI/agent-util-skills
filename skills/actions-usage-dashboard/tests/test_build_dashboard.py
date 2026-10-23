@@ -2,7 +2,7 @@
 """build_dashboard.py の回帰テスト。
 
 役割: batch.json の形（ArtifactData batch の writes）、index.json の 256 KB 検査、
---update が dataset の source と updated だけを変えること、--add-dataset による新 dataset の set、入力検証の fail-closed を固定する。
+--update が dataset の source と updated だけを変えること（jobs だけの更新を含む）、--add-dataset による新 dataset の set、入力検証の fail-closed を固定する。
 build-dashboard.test.mjs から `node --test` 経由で実行される。
 
 fixture は既存の合成データ（org は example-org）。本リポは PUBLIC のため実在の値を入れない。
@@ -184,6 +184,65 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(merged["source"]["kind"], created["source"]["kind"])
         self.assertEqual(merged["source"]["name"], created["source"]["name"])
         self.assertEqual(merged["source"]["url"], "/_blob/n0")
+
+    def jobs_only(self, *extra):
+        return run(base(self.out, (JOBS,)) + ["--update"] + list(extra))
+
+    def test_jobs_only_update(self):
+        rc, out, err = self.jobs_only("--asset-url", "/_blob/n0", "--if-version", "jobs=5")
+        self.assertEqual(rc, 0, err)
+        b = load(self.out, "batch.json")
+        self.assertEqual([(w["op"], w["collection"], w["doc_id"]) for w in b], [("update", "datasets", "jobs")])
+        self.assertEqual(b[0]["if_version"], 5)
+        upd = load(self.out, "dataset-jobs.update.json")
+        self.assertEqual(set(upd), {"source", "updated"})
+        self.assertEqual(upd["source"]["url"], "/_blob/n0")
+        for n in ("dataset-billing.update.json", "dash-meta.json", "index.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.out, n)), n)
+        self.assertNotIn("example-org/", out)
+
+    def test_jobs_only_add(self):
+        rc, _, err = self.jobs_only("--asset-url", "/_blob/n0", "--add-dataset", "jobs")
+        self.assertEqual(rc, 0, err)
+        b = load(self.out, "batch.json")
+        self.assertEqual([(w["op"], w["doc_id"]) for w in b], [("set", "jobs")])
+        self.assertNotIn("if_version", b[0])
+        self.assertEqual(set(load(self.out, "dataset-jobs.json")), {"title", "description", "source", "updated"})
+
+    def test_jobs_only_stage1(self):
+        with open(os.path.join(self.out, "batch.json"), "w") as f:
+            f.write("[]")
+        rc, out, err = self.jobs_only()
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")))
+        self.assertIn("jobs.json", out)
+        self.assertNotIn("billing.json", out)
+
+    def test_jobs_only_invalid(self):
+        cases = [
+            ["--asset-url", "/_blob/n0", "--if-version", "billing=3"],
+            ["--asset-url", "/_blob/n0", "--if-version", "jobs=5", "--if-version", "billing=3"],
+            ["--asset-url", "/_blob/n0"],
+            ["--asset-url", "/_blob/n0", "--add-dataset", "jobs", "--if-version", "jobs=1"],
+        ]
+        for c in cases:
+            rc, _, _ = self.jobs_only(*c)
+            self.assertEqual(rc, 1, c)
+            self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")), c)
+
+    def test_create_requires_billing(self):
+        rc, _, err = run(base(self.out, (JOBS,)) + ["--asset-url", "/_blob/u0"])
+        self.assertEqual(rc, 1)
+        self.assertIn("billing", err)
+        for n in ("index.json", "batch.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.out, n)), n)
+
+    def test_add_dataset_choices_fixed(self):
+        rc, _, _ = self.jobs_only("--add-dataset", "warnings", "--asset-url", "/_blob/n0")
+        self.assertEqual(rc, 2)
+        with open(SCRIPT, encoding="utf-8") as f:
+            src = f.read()
+        self.assertRegex(src, r'add_argument\("--add-dataset"[^)]*choices=\["jobs"\]')
 
     def test_t9_bad_if_version(self):
         for ifv in [("billing=3",), ("billing=3", "billing=4"), ("billing=x", "jobs=1"),
