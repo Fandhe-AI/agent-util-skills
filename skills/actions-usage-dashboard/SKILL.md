@@ -76,7 +76,7 @@ python3 <skill-root>/scripts/build_dashboard.py --org "<org>" --rows "<billing.j
 2. 版の取得: `ArtifactData list`（collection `datasets`）で各 dataset の `version` を得る。文書は source と updated だけの小さなもの
 3. 取得: 作成フローの手順 2 と同じ。jobs は同じキャッシュで増分取得する
 4. 1 段目: `build_dashboard.py ... --update`。アップロードの一覧が出る
-5. 公開前の承認とアップロード: 作成フローの手順 4（公開前の承認）を今回の実行で改めて取り、承認を得てから手順 6 を行う。更新のたびに新しいデータが同じダッシュボードに載るため、前回の承認は流用しない。承認が取れない場合は 1 段目で止め、「未完了（公開範囲の承認未取得）」と報告する
+5. 公開前の承認とアップロード: 作成フローの手順 4（公開前の承認）を今回の実行で改めて取り、承認を得てから作成フローの手順 6（アップロード）を行う。更新のたびに新しいデータが同じダッシュボードに載るため、前回の承認は流用しない。承認が取れない場合は 1 段目で止め、「未完了（公開範囲の承認未取得）」と報告する
 6. 2 段目: `--update --asset-url <url> [...] --if-version billing=<N> [--if-version jobs=<N>]`
 7. 書き込み: `batch.json` を Read し、`ArtifactData batch` の `writes` へ渡す。書き換わるのは dataset の source と updated だけで、`dash/params` などは変わらない
 8. check 文書の確認と `summarize.py`: 作成フローの手順 9〜10 と同じ
