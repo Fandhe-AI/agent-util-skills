@@ -433,6 +433,57 @@ class Hardening145Tests(Base):
         self.assertFalse(os.path.exists(log))
 
 
+class PlanNameSanitizeTests(Base):
+    """plan.name は --json でも DEL・C1 が生で出るため、テキストと同じ safe() 規則で無害化する（Issue #159）。"""
+
+    DIRTY = "te\x1b[2Jam\u009bx\x7fy\u0085z"
+
+    def fake_plan_gh(self, printf_arg):
+        bindir = os.path.join(self.td.name, "bin")
+        os.makedirs(bindir)
+        p = os.path.join(bindir, "gh")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\nprintf '%s\\n'\nexit 0\n" % printf_arg)
+        os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
+        return bindir
+
+    def test_plan_name_from_gh_is_sanitized(self):
+        bindir = self.fake_plan_gh("te\\033[2Jam\\302\\233x\\177y\\302\\205z")
+        for extra in ([], ["--json"]):
+            r = self.run_cli(self.files() + extra, bindir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for ch in ("\x1b", "\x7f", "\x9b", "\x85"):
+                self.assertNotIn(ch, r.stdout)
+        out = json.loads(r.stdout)["plan"]["name"]
+        self.assertIsNone(sm.CTRL_RE.search(out))
+        self.assertEqual(out, "te?[2Jam?x?y?z")
+
+    def test_plan_flag_is_sanitized_in_json(self):
+        r = self.run_cli(self.files() + ["--plan", self.DIRTY, "--json"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for ch in ("\x1b", "\x7f", "\x9b", "\x85"):
+            self.assertNotIn(ch, r.stdout)
+
+    def test_long_plan_name_truncated_in_json(self):
+        r = self.run_cli(self.files() + ["--plan", "a" * 100, "--json"])
+        name = json.loads(r.stdout)["plan"]["name"]
+        self.assertEqual(len(name), sm.MAX_NAME_LEN)
+        self.assertTrue(name.endswith("…"))
+
+    def test_plan_none_stays_null(self):
+        r = self.run_cli(self.files() + ["--json"], self.failing_gh())
+        self.assertIsNone(json.loads(r.stdout)["plan"]["name"])
+
+    def failing_gh(self):
+        bindir = os.path.join(self.td.name, "bin")
+        os.makedirs(bindir)
+        p = os.path.join(bindir, "gh")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
+        return bindir
+
+
 class SharedCommonTest(unittest.TestCase):
     """helper の定義が scripts/_common.py の 1 か所であることを固定する（Issue #141）。"""
 
