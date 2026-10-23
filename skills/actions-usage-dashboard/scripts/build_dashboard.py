@@ -34,10 +34,10 @@ import tempfile
 from datetime import datetime, timezone
 
 SCHEMA_VERSION = 1
-ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
-BLOB_RE = re.compile(r"^/_blob/[A-Za-z0-9_-]{1,200}$")
-IFV_RE = re.compile(r"^(billing|jobs)=([0-9]+)$")
-ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
+BLOB_RE = re.compile(r"^/_blob/[A-Za-z0-9_-]{1,200}\Z")
+IFV_RE = re.compile(r"^(billing|jobs)=([0-9]+)\Z")
+ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 MAX_ROWS_BYTES = 8 * 1024 * 1024
 MAX_DOC_BYTES = 256 * 1024
