@@ -1,0 +1,164 @@
+// dashboard-template.test.mjs — templates/dashboard/index.html の回帰テスト。
+//
+// ページ本体は claude.ai の Dashboard 型 Artifact 上でしか動かないため、jsdom は使わない。
+// 代わりに <script id="usage-agg"> の集計関数だけを取り出して node:vm で評価し、合成 fixture
+// （tests/fixtures/dashboard/）に対する値と、ページ全体の静的な制約（数値の直書き・危険な API・
+// 外部参照・サイズ）を検証する。期待値は fixture から手計算した定数で、集計関数で再計算しない。
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const TESTS_DIR = dirname(fileURLToPath(import.meta.url))
+const HTML = readFileSync(join(TESTS_DIR, '..', 'templates', 'dashboard', 'index.html'), 'utf8')
+const billing = JSON.parse(readFileSync(join(TESTS_DIR, 'fixtures', 'dashboard', 'billing.json'), 'utf8')).rows
+const jobs = JSON.parse(readFileSync(join(TESTS_DIR, 'fixtures', 'dashboard', 'jobs.json'), 'utf8')).rows
+
+const blocks = [...HTML.matchAll(/<script id="usage-agg">([\s\S]*?)<\/script>/g)]
+assert.equal(blocks.length, 1, 'usage-agg ブロックが 1 件だけあること')
+const sandbox = { window: {} }
+runInNewContext(blocks[0][1], sandbox)
+const U = sandbox.window.UsageAgg
+
+// vm の別 realm の配列・オブジェクトを deepEqual で比較できるよう、JSON 往復で素の値にする。
+const plain = (v) => JSON.parse(JSON.stringify(v))
+const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg ?? ''} ${a} != ${b}`)
+
+const facts = plain(U.facts(billing, jobs))
+const totalsRows = plain(U.totals(facts))
+const axisRows = plain(U.byAxis(facts))
+const totalOf = (period, runner = '*', repo = '*') => totalsRows.find((r) => r.key === U.keyOf([period, runner, repo]))
+const groupsOf = (axis, period = '*', runner = '*', repo = '*') =>
+  axisRows.filter((r) => r.period === period && r.runner_type === runner && r.repo === repo && r.axis === axis)
+
+const CLASS_FIELDS = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'].map((c) => `${c}_minutes`)
+const sumFields = (row) => CLASS_FIELDS.reduce((s, f) => s + row[f], 0)
+
+test('T1 料金区分の和が総分数に一致する', () => {
+  const all = totalOf('*')
+  near(all.total_minutes, 665.5, '総分数')
+  near(sumFields(all), all.total_minutes, '区分の和')
+  near(all.paid_minutes, 40)
+  near(all.included_minutes, 460.5)
+  near(all.public_free_minutes, 60)
+  near(all.unknown_minutes, 55)
+  near(all.self_hosted_minutes, 50)
+  near(all.quota_minutes, 882.5)
+  near(all.gross_usd, 1.04)
+  near(all.net_usd, 0.32)
+  assert.equal(all.latest_day, '2026-10-03')
+  const sep = totalOf('2026-09')
+  near(sep.total_minutes, 550)
+  near(sumFields(sep), sep.total_minutes)
+  const oct = totalOf('2026-10')
+  near(oct.total_minutes, 115.5)
+  near(sumFields(oct), oct.total_minutes)
+})
+
+test('T2 軸ごとの合計が総分数に一致する（絞り込みの組み合わせでも）', () => {
+  for (const axis of U.AXES) {
+    const sum = groupsOf(axis).reduce((s, r) => s + r.minutes, 0)
+    near(sum, 665.5, axis)
+  }
+  const cases = [
+    ['*', 'macos', '*', 88],
+    ['*', '*', 'repo-a', 167.5],
+    ['2026-10', 'ubuntu', 'repo-a', 37.5]
+  ]
+  for (const [period, runner, repo, expected] of cases) {
+    for (const axis of U.AXES) {
+      const sum = groupsOf(axis, period, runner, repo).reduce((s, r) => s + r.minutes, 0)
+      near(sum, expected, `${axis} ${period} ${runner} ${repo}`)
+    }
+    near(totalOf(period, runner, repo).total_minutes, expected)
+  }
+  const runner = Object.fromEntries(groupsOf('runner_type').map((r) => [r.group, r.minutes]))
+  near(runner.ubuntu, 367.5)
+  near(runner['self-hosted'], 50)
+  near(runner.other, 40)
+  const vis = Object.fromEntries(groupsOf('visibility').map((r) => [r.group, r.minutes]))
+  near(vis.private, 465.5)
+  near(vis.public, 75)
+  near(vis.internal, 70)
+  near(vis.unknown, 55)
+})
+
+test('T3 上位 7 件 + その他', () => {
+  const m = U.daily(facts, { period: 'all', group_by: 'repo', include_free: true })
+  assert.deepEqual(plain(m.groups.map((g) => g.id)), ['repo-a', 'repo-b', 'repo-c', 'repo-e', 'repo-d', 'repo-f', 'repo-g', U.OTHER])
+  near(m.groups[7].total, 80)
+  near(m.groups.reduce((s, g) => s + g.total, 0), 665.5)
+  const cls = U.daily(facts, { period: 'all', group_by: 'charge_class', include_free: true })
+  assert.deepEqual(plain(cls.groups.map((g) => g.id)), ['paid', 'included', 'public_free', 'unknown', 'self_hosted'])
+  const ties = plain(U.topGroups([{ group: 'b', value: 1 }, { group: 'a', value: 1 }, { group: 'c', value: 1 }], 2))
+  assert.deepEqual(ties, [{ group: 'a', value: 1 }, { group: 'b', value: 1 }, { group: U.OTHER, value: 1 }])
+  assert.equal(U.topGroups([{ group: 'a', value: 1 }], 7).length, 1)
+})
+
+test('T4 無料枠を除くと quota_minutes の値になる', () => {
+  const m = U.daily(facts, { period: 'all', group_by: 'charge_class', include_free: false })
+  const total = (id) => m.groups.find((g) => g.id === id).total
+  near(total('included'), 882.5)
+  near(total('paid'), 0)
+  near(total('self_hosted'), 0)
+  assert.equal(m.metric, 'quota_minutes')
+  const oct = U.daily(facts, { period: 'latest', group_by: 'charge_class', include_free: true })
+  assert.equal(oct.period, '2026-10')
+  assert.equal(oct.days[0], '2026-10-01')
+  assert.equal(oct.days.length, 3)
+})
+
+test('T5 dataset が 1 つでも 2 つでも動く', () => {
+  const one = plain(U.facts(billing, []))
+  assert.equal(one.filter((f) => f.charge_class === 'self_hosted').length, 0)
+  assert.equal(plain(U.facts(billing, undefined)).length, one.length)
+  const two = plain(U.facts(billing, jobs))
+  near(two.filter((f) => f.charge_class === 'self_hosted').reduce((s, f) => s + f.minutes, 0), 50)
+  assert.doesNotThrow(() => U.totals(U.facts([], [])))
+})
+
+test('T6 calc に渡す関数は自己完結している', () => {
+  const rebuilt = (f) => runInNewContext('(' + f.toString() + ')', {})
+  assert.deepEqual(plain(rebuilt(U.facts)(billing, jobs)), facts)
+  assert.deepEqual(plain(rebuilt(U.totals)(facts)), totalsRows)
+  assert.deepEqual(plain(rebuilt(U.byAxis)(facts)), axisRows)
+})
+
+test('T7 入力の頑健性', () => {
+  assert.equal(facts.reduce((s, f) => s + f.invalid, 0), 2)
+  const weird = facts.find((f) => f.repo === 'repo-b' && f.day === '2026-10-03')
+  assert.equal(weird.charge_class, 'unknown')
+  assert.equal(weird.minutes, 0)
+  assert.equal(facts.find((f) => f.minutes === 12.5).quota_minutes, 12.5)
+  assert.equal(U.resolvePeriod('latest', facts), '2026-10')
+  assert.equal(U.resolvePeriod('all', facts), '*')
+  assert.equal(U.resolvePeriod('2026-09', facts), '2026-09')
+  assert.equal(U.keyOf(['a&b', 'c=d', '100%', 'x|y']), 'a%26b|c%3Dd|100%25|x%7Cy')
+})
+
+test('T8 数値のリテラル配列がない', () => {
+  assert.doesNotMatch(HTML, /\[\s*-?\d+(?:\.\d+)?\s*(?:,\s*-?\d+(?:\.\d+)?\s*)+\]/)
+})
+
+test('T9 禁止パターンがない', () => {
+  const forbidden = [
+    /innerHTML/, /\.html\(/, /insertAdjacentHTML/, /document\.write/,
+    /<[^>]*\son[a-z]+\s*=/i, /<form[\s>]/i, /<iframe/i, /<meta[\s>]/i, /<base[\s>]/i,
+    /\s(?:src|href)\s*=\s*["']?(?:https?:)?\/\//i,
+    /localStorage/, /sessionStorage/, /document\.cookie/,
+    /\bfetch\(/, /XMLHttpRequest/, /\bimport\b/, /\bexport\b/, /console\./
+  ]
+  for (const re of forbidden) assert.doesNotMatch(HTML, re, String(re))
+  const markup = HTML.replace(/<script[\s\S]*?<\/script>/g, '').replace(/<style[\s\S]*?<\/style>/g, '')
+  assert.doesNotMatch(markup, />\s*[\d.,$]+\s*</, 'マークアップに数値の直書きがある')
+})
+
+test('T10 サイズと契約', () => {
+  assert.ok(Buffer.byteLength(HTML) < 256 * 1024, '256 KB 未満')
+  const ids = new Set()
+  for (const m of HTML.matchAll(/data-source="([^"]+)"/g)) m[1].split(/\s+/).forEach((i) => ids.add(i))
+  for (const id of ids) assert.ok(['billing', 'jobs', 'facts', 'totals', 'by_axis'].includes(id), id)
+  assert.equal((HTML.match(/dash\.calc\(/g) || []).length, 3)
+})

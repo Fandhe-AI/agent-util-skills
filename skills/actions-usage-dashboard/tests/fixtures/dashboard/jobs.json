@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "source": "jobs",
+  "org": "example-org",
+  "since": "2026-10-01",
+  "until": "2026-10-03",
+  "generated_at": "2026-10-03T12:00:00Z",
+  "rows": [
+    {"day": "2026-10-01", "repo": "repo-a", "visibility": "private", "sku": "self-hosted", "runner_type": "self-hosted", "charge_class": "self_hosted", "runner_group": "default", "minutes": 30, "quota_minutes": 0, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0},
+    {"day": "2026-10-03", "repo": "repo-k", "visibility": "private", "sku": "self-hosted", "runner_type": "self-hosted", "charge_class": "self_hosted", "runner_group": "default", "minutes": 20, "quota_minutes": 0, "billable_minutes": 0, "gross_usd": 0, "discount_usd": 0, "net_usd": 0}
+  ]
+}
