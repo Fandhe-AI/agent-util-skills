@@ -223,6 +223,11 @@ test('全期間の照合は当日で上限を切る（月末まで広がった b
   assert.equal(U.coverage(b, '*', '2026-10-20', j), 'full')
 })
 
-test('paintTotals のゼロ補完は準備完了時だけ行う', () => {
-  assert.match(HTML, /if \(ready && !row && cov\.billing/)
+test('paintTotals のゼロ補完は準備完了時だけ、項目の取得元（セルフホストは jobs）の取得状況で行う', () => {
+  assert.match(HTML, /const zeroOk = ready && src\.every\(\(k\) => cov\[k\] !== 'none' && cov\[k\] !== 'unknown'\)/)
+  assert.match(HTML, /field === 'self_hosted_minutes' \? \['jobs'\]/)
+})
+
+test('paintWarnings は billing / jobs の JSON 内 warnings も引き継ぐ', () => {
+  assert.match(HTML, /\['billing', 'jobs'\]\.forEach\(\(k\) => \{[\s\S]*?\.warnings/)
 })

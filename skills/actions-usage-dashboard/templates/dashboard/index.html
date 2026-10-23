@@ -556,21 +556,22 @@ function paintControls(sel, facts, sources) {
 function paintTotals(rows, sel, period, cov, ready) {
   const byKey = new Map((rows || []).map((r) => [r.key, r]));
   const key = U.keyOf([period, sel.runner_type || '*', sel.repo || '*']);
-  let row = byKey.get(key);
+  const row = byKey.get(key);
   // 取得済み期間に該当行がないときは未取得ではなく利用ゼロ。取得なし・不明は従来どおり「—」。
-  if (ready && !row && cov.billing !== 'none' && cov.billing !== 'unknown') {
-    row = { key: key, total_minutes: 0, quota_minutes: 0, gross_usd: 0, net_usd: 0, paid_minutes: 0, included_minutes: 0, public_free_minutes: 0, unknown_minutes: 0, self_hosted_minutes: 0 };
-  }
+  // ゼロ補完は項目ごとに、その項目の取得元（セルフホスト分は jobs、他は billing）の取得状況だけで判定する。
+  const zeroRow = { key: key, total_minutes: 0, quota_minutes: 0, gross_usd: 0, net_usd: 0, paid_minutes: 0, included_minutes: 0, public_free_minutes: 0, unknown_minutes: 0, self_hosted_minutes: 0 };
   page.querySelectorAll('[data-source="totals"]').forEach((el) => {
     const field = el.getAttribute('data-field');
     el.setAttribute('data-where', 'key=' + encodeURIComponent(key));
     let text = '—';
     // jobs が未接続なら合計は billing だけで算出する（Coverage notes と同じ扱い）。
     const src = field === 'self_hosted_minutes' ? ['jobs'] : (field === 'total_minutes' && cov.jobsConnected ? ['billing', 'jobs'] : ['billing']);
-    if (row && !src.some((k) => cov[k] === 'none')) {
-      text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(row[field]) : fmtMin(row[field]);
+    const zeroOk = ready && src.every((k) => cov[k] !== 'none' && cov[k] !== 'unknown');
+    const r = row || (zeroOk ? zeroRow : null);
+    if (r && !src.some((k) => cov[k] === 'none')) {
+      text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(r[field]) : fmtMin(r[field]);
       // 区分不明の利用がある範囲では含有枠の消費は下限値になる。
-      if (field === 'quota_minutes' && row.unknown_minutes > 0) text += ' 以上';
+      if (field === 'quota_minutes' && r.unknown_minutes > 0) text += ' 以上';
     }
     el.textContent = text;
   });
@@ -595,9 +596,15 @@ function paintTotals(rows, sel, period, cov, ready) {
 function paintWarnings() {
   const el = $('#aud-warnings');
   const w = dash.data('warnings');
-  const items = w && w.status === 'ok' && Array.isArray(w.data)
-    ? w.data.filter((x) => typeof x === 'string' && x !== '').slice(0, 20)
-    : [];
+  const all = w && w.status === 'ok' && Array.isArray(w.data) ? w.data.slice() : [];
+  // billing / jobs の JSON 自体の warnings も引き継ぐ（warnings dataset は任意）。
+  ['billing', 'jobs'].forEach((k) => {
+    const d = dash.data(k);
+    if (d && d.status === 'ok' && d.data && Array.isArray(d.data.warnings)) {
+      d.data.warnings.slice(0, 20).forEach((x) => { if (typeof x === 'string') all.push(k + ': ' + x); });
+    }
+  });
+  const items = Array.from(new Set(all.filter((x) => typeof x === 'string' && x !== ''))).slice(0, 20);
   el.replaceChildren(...items.map((t) => {
     const li = document.createElement('li');
     li.textContent = '注意: ' + t.slice(0, 300);
