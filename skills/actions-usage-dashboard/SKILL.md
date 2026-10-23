@@ -3,7 +3,7 @@ name: actions-usage-dashboard
 description: >
   org の GitHub Actions 利用分数ダッシュボード用データ取得スキル。「Actions の使用量を集計して」
   「課金分数を日次で出して」「billing usage を取得して」で使用。billing usage API から
-  GitHub ホストランナーの日 x リポジトリ x SKU x 料金区分（paid / included / public_free）の行を
+  GitHub ホストランナーの日 x リポジトリ x SKU x 料金区分（paid / included / public_free / unknown）の行を
   JSON へ書く。fetch_billing.py を提供。ダッシュボード HTML 化は create-html-report も参照。
 user-invocable: true
 ---
@@ -40,6 +40,7 @@ org 名と期間を確認する。`--out` の親ディレクトリは存在し�
 
 - 有料分は公開範囲ではなく元明細ごとの `netAmount / pricePerUnit` から求める（単価の異なる明細を平均して割らない）
 - `quota_minutes` は Linux 単価（前月引き継ぎ）で換算した含有枠消費分。paid 行は 0、included 行は含有枠に対応する金額分のみを換算する
+- 非有料分は既定で `unknown`（`quota_minutes` は 0）。API が返すのは現在の公開範囲だけで、公開範囲を途中で変えたリポジトリの過去分を誤分類しないため。期間中に公開範囲が変わっていないと保証できる場合だけ `--assume-current-visibility` を付けると、現在値で `included` / `public_free` を確定する
 - セルフホストランナーは対象外（jobs 側で扱う）
 
 ## 検証

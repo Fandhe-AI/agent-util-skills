@@ -67,7 +67,7 @@ def index(rows):
 
 class BuildRowsTest(unittest.TestCase):
     def setUp(self):
-        self.rows, self.prices = fb.build_rows(PAYLOADS, VISIBILITY, ORG)
+        self.rows, self.prices = fb.build_rows(PAYLOADS, VISIBILITY, ORG, True)
         self.idx = index(self.rows)
 
     def test_minutes_sum_matches_source_per_unit(self):
@@ -110,6 +110,22 @@ class BuildRowsTest(unittest.TestCase):
         self.assertAlmostEqual(sum(r["quota_minutes"] for r in rows9), 62.5)
         self.assertEqual([r["quota_minutes"] for r in rows9 if r["charge_class"] == "paid"], [0.0])
 
+    def test_visibility_change_not_decided_by_current_value(self):
+        # 現在は public でも過去は private だった可能性があるため、既定では確定しない
+        rows, _ = fb.build_rows(PAYLOADS, VISIBILITY, ORG)
+        for r in rows:
+            self.assertNotIn(r["charge_class"], ("included", "public_free"))
+            if r["charge_class"] == "unknown":
+                self.assertEqual(r["quota_minutes"], 0.0)
+        self.assertEqual(sum(r["minutes"] for r in rows if r["day"] == "2026-07-02" and r["repo"] == "pub-site"), 20)
+        # 有料分は公開範囲に依らず paid のまま
+        self.assertIn(("2026-09-01", "priv-api", "Actions Linux", "paid"), index(rows))
+
+    def test_cli_flag_assumes_current_visibility(self):
+        with self.subTest("flag"):
+            rows, _ = fb.build_rows(PAYLOADS, VISIBILITY, ORG, True)
+            self.assertIn(("2026-07-02", "pub-site", "Actions Linux", "public_free"), index(rows))
+
     def test_runner_type(self):
         expect = {
             "Actions Linux": "ubuntu", "Actions Linux 4-core": "ubuntu",
@@ -145,7 +161,7 @@ class BuildRowsTest(unittest.TestCase):
             item("2026-07-01", "priv-api", "Actions Linux", 10, 0.008, 0.08, 0.08),
             item("2026-07-01", "priv-api", "Actions Linux", 10, 0.016, 0.16, 0.0),
         ]}}
-        rows, _ = fb.build_rows(pay, VISIBILITY, ORG)
+        rows, _ = fb.build_rows(pay, VISIBILITY, ORG, True)
         by = {r["charge_class"]: r for r in rows}
         self.assertEqual(by["paid"]["minutes"], 10)
         self.assertEqual(by["paid"]["billable_minutes"], 10)
@@ -158,8 +174,8 @@ class BuildRowsTest(unittest.TestCase):
         # 返却順を入れ替えても換算単価と quota が変わらない
         a = item("2026-07-01", "priv-api", "Actions Linux", 10, 0.008, 0.08, 0.08)
         b = item("2026-07-01", "priv-api", "Actions Linux", 10, 0.016, 0.16, 0.0)
-        r1, p1 = fb.build_rows({"2026-07": {"usageItems": [a, b]}}, VISIBILITY, ORG)
-        r2, p2 = fb.build_rows({"2026-07": {"usageItems": [b, a]}}, VISIBILITY, ORG)
+        r1, p1 = fb.build_rows({"2026-07": {"usageItems": [a, b]}}, VISIBILITY, ORG, True)
+        r2, p2 = fb.build_rows({"2026-07": {"usageItems": [b, a]}}, VISIBILITY, ORG, True)
         self.assertEqual(r1, r2)
         self.assertEqual(p1, p2)
         self.assertEqual(p1["2026-07"], 0.008)
@@ -170,22 +186,22 @@ class BuildRowsTest(unittest.TestCase):
         self.assertFalse([r for r in self.rows if r["sku"] in ("Actions storage", "Copilot premium")])
         keys = [(r["day"], r["repo"], r["sku"], fb.CHARGE_ORDER[r["charge_class"]]) for r in self.rows]
         self.assertEqual(keys, sorted(keys))
-        again, _ = fb.build_rows(dict(reversed(list(PAYLOADS.items()))), VISIBILITY, ORG)
+        again, _ = fb.build_rows(dict(reversed(list(PAYLOADS.items()))), VISIBILITY, ORG, True)
         self.assertEqual(again, self.rows)
 
     def test_missing_linux_price_errors_only_when_needed(self):
         only_aug = {"2026-08": PAYLOADS["2026-08"]}
         with self.assertRaises(fb.FetchError):
-            fb.build_rows(only_aug, VISIBILITY, ORG)
+            fb.build_rows(only_aug, VISIBILITY, ORG, True)
         public_only = {"2026-08": {"usageItems": [item("2026-08-01", "pub-site", "Actions macOS", 5, 0.08, 0.4, 0.0)]}}
-        rows, _ = fb.build_rows(public_only, VISIBILITY, ORG)
+        rows, _ = fb.build_rows(public_only, VISIBILITY, ORG, True)
         self.assertEqual(rows[0]["charge_class"], "public_free")
 
     def test_invalid_numbers_rejected(self):
         for bad in (-1, float("nan"), True, "5", None):
             payload = {"2026-07": {"usageItems": [item("2026-07-01", "priv-api", "Actions Linux", bad, 0.008, 0.8, 0.0)]}}
             with self.assertRaises(fb.FetchError, msg=repr(bad)):
-                fb.build_rows(payload, VISIBILITY, ORG)
+                fb.build_rows(payload, VISIBILITY, ORG, True)
 
     def test_helpers(self):
         self.assertEqual(fb.month_range("2025-11", "2026-02"), ["2025-11", "2025-12", "2026-01", "2026-02"])
@@ -215,7 +231,7 @@ sys.stdout.write(open(p).read() if os.path.exists(p) else '{"usageItems": []}')
 class FloatEdgeTest(unittest.TestCase):
     def build(self, qty, price, gross, net, repo="priv-api"):
         payload = {"2026-10": {"usageItems": [item("2026-10-01", repo, "Actions Linux", qty, price, gross, net)]}}
-        rows, _ = fb.build_rows(payload, VISIBILITY, ORG)
+        rows, _ = fb.build_rows(payload, VISIBILITY, ORG, True)
         return rows
 
     def test_fully_paid_has_no_ghost_row_and_zero_quota(self):

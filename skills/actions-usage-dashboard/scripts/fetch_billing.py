@@ -16,8 +16,13 @@
    linux_price_per_minute: {YYYY-MM: 単価}, rows: [...]}
   row = day / repo / visibility / sku / runner_type / charge_class / minutes /
         quota_minutes / billable_minutes / gross_usd / discount_usd / net_usd
-  charge_class: paid（金額が発生した分）/ included（含有枠）/ public_free（公開リポの無料分）。
-  公開範囲だけでは決めず、netAmount から有料分を判定する。
+  charge_class: paid（金額が発生した分）/ included（含有枠）/ public_free（公開リポの無料分）/
+  unknown（利用日時点の公開範囲を確認できない非有料分）。
+  有料分は公開範囲ではなく netAmount から判定する。非有料分の included / public_free は
+  利用日時点の公開範囲が前提だが、API が返すのは現在の公開範囲だけで履歴を取れない。
+  公開範囲が途中で変わったリポジトリの過去分を誤分類（quota の消失・過大計上）しないよう、
+  既定では非有料分を unknown とし quota_minutes を 0 にする。公開範囲が期間中に
+  変わっていないと利用者が保証できる場合だけ --assume-current-visibility で現在値を採る。
 
 アクセス: gh api 経由のみ。トークンは扱わない。標準ライブラリだけで動く。
 """
@@ -38,7 +43,7 @@ MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 LINUX_PRICE_SKU = "actions linux"
 UNATTRIBUTED = "(unattributed)"
 # 区分の並び順（行の決定的ソートにも使う）
-CHARGE_ORDER = {"paid": 0, "included": 1, "public_free": 2}
+CHARGE_ORDER = {"paid": 0, "included": 1, "public_free": 2, "unknown": 3}
 # SKU（正規化後）に対する runner_type の対応表。上から順に照合し、最初に当たったものを採る。
 # 実データで SKU 表記が異なる場合はここのキーワードだけを直す。
 RUNNER_TYPE_RULES = (
@@ -178,8 +183,12 @@ def _r(x):
     return round(x, 6)
 
 
-def build_rows(month_payloads, visibility, org):
-    """月別 payload から区分展開済みの行と、使用した Linux 単価の表を返す。"""
+def build_rows(month_payloads, visibility, org, assume_current=False):
+    """月別 payload から区分展開済みの行と、使用した Linux 単価の表を返す。
+
+    assume_current が False の間、非有料分は利用日時点の公開範囲を確認できないため
+    unknown とし、quota へ計上しない。True のときだけ現在の公開範囲で分類する。
+    """
     vis_map = {k.lower(): v for k, v in visibility.items()}
     rows, price_map, prev = [], {}, None
     for month in sorted(month_payloads):
@@ -193,7 +202,10 @@ def build_rows(month_payloads, visibility, org):
             public = vis == "public"
             minutes, gross, net = u["q"], u["g"], u["n"]
             paid, gpaid = u["paid"], u["gpaid"]
-            rest_cls = "public_free" if public else "included"
+            if not assume_current:
+                rest_cls = "unknown"
+            else:
+                rest_cls = "public_free" if public else "included"
             parts = []
             if paid > 0:
                 parts.append(("paid", paid))
@@ -209,7 +221,7 @@ def build_rows(month_payloads, visibility, org):
                     net_c = net if paid <= 0 else 0.0
                     gross_c = _r(gross if paid <= 0 else max(gross - gpaid, 0.0))
                 # quota は含有枠を消費した分だけ。paid 行と公開リポは 0
-                if cls == "paid" or public or gross_c <= 0:
+                if cls in ("paid", "unknown") or public or gross_c <= 0:
                     quota = 0.0
                 elif price is None:
                     raise FetchError("%s: Linux 単価を決められず quota を換算できない" % month)
@@ -246,10 +258,12 @@ def summarize(rows, months, out_path, since, until):
     return [
         "出力: %s" % out_path,
         "期間: %s..%s（UTC・%d か月）" % (since, until, len(months)),
-        "行数: %d（paid %d / included %d / public_free %d）" % (
-            len(rows), by_cls["paid"][0], by_cls["included"][0], by_cls["public_free"][0]),
-        "分数: paid %.1f / included %.1f / public_free %.1f（quota 換算 %.1f）" % (
-            by_cls["paid"][1], by_cls["included"][1], by_cls["public_free"][1], quota),
+        "行数: %d（paid %d / included %d / public_free %d / unknown %d）" % (
+            len(rows), by_cls["paid"][0], by_cls["included"][0], by_cls["public_free"][0],
+            by_cls["unknown"][0]),
+        "分数: paid %.1f / included %.1f / public_free %.1f / unknown %.1f（quota 換算 %.1f）" % (
+            by_cls["paid"][1], by_cls["included"][1], by_cls["public_free"][1],
+            by_cls["unknown"][1], quota),
         "月別合計(分/net USD): %s" % mtxt,
     ]
 
@@ -314,6 +328,8 @@ def main(argv=None):
     ap.add_argument("--since", required=True, help="YYYY-MM")
     ap.add_argument("--until", help="YYYY-MM（既定は UTC の当月）")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--assume-current-visibility", action="store_true",
+                    help="期間中に公開範囲が変わっていない前提で、現在の公開範囲により included / public_free を確定する")
     a = ap.parse_args(argv)
     now = datetime.now(timezone.utc)
     current = "%04d-%02d" % (now.year, now.month)
@@ -337,7 +353,7 @@ def main(argv=None):
                 payloads[m] = fetch_month(a.org, m)
             except FetchError as e:
                 raise FetchError("%s の取得に失敗: %s" % (m, e))
-        rows, price_map = build_rows(payloads, visibility, a.org)
+        rows, price_map = build_rows(payloads, visibility, a.org, a.assume_current_visibility)
         atomic_write_json(a.out, {
             "schema_version": SCHEMA_VERSION, "source": "billing", "org": a.org,
             "since": a.since, "until": until,
