@@ -104,10 +104,11 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(self.prices["2026-08"], 0.008)
         self.assertAlmostEqual(i[("2026-08-01", "priv-api", "Actions macOS 3-core", "included")]["quota_minutes"], 100)
         self.assertAlmostEqual(i[("2026-08-01", "priv-api", "Actions Windows", "included")]["quota_minutes"], 20)
-        # 区分に按分しても合計は元の換算値（100）に戻る
-        q = sum(r["quota_minutes"] for r in self.rows if r["day"] == "2026-09-01" and r["repo"] == "priv-api"
-                and r["sku"] == "Actions Linux")
-        self.assertAlmostEqual(q, 100)
+        # 含有枠を消費した分だけを換算する。paid 行は 0、included 行は割引分 0.5 / 0.008 = 62.5
+        rows9 = [r for r in self.rows if r["day"] == "2026-09-01" and r["repo"] == "priv-api"
+                 and r["sku"] == "Actions Linux"]
+        self.assertAlmostEqual(sum(r["quota_minutes"] for r in rows9), 62.5)
+        self.assertEqual([r["quota_minutes"] for r in rows9 if r["charge_class"] == "paid"], [0.0])
 
     def test_runner_type(self):
         expect = {
@@ -197,6 +198,21 @@ if os.environ.get("STUB_FAIL_MONTH") == ym:
 p = os.path.join(d, "usage-" + ym + ".json")
 sys.stdout.write(open(p).read() if os.path.exists(p) else '{"usageItems": []}')
 """
+
+
+class FloatEdgeTest(unittest.TestCase):
+    def build(self, qty, price, gross, net, repo="priv-api"):
+        payload = {"2026-10": {"usageItems": [item("2026-10-01", repo, "Actions Linux", qty, price, gross, net)]}}
+        rows, _ = fb.build_rows(payload, VISIBILITY, ORG)
+        return rows
+
+    def test_fully_paid_has_no_ghost_row_and_zero_quota(self):
+        # 0.8 / 0.008 と 0.344 / 0.008 は浮動小数点誤差で残余が正になる
+        for qty, gross in ((100, 0.8), (43, 0.344), (29, 0.232)):
+            rows = self.build(qty, 0.008, gross, gross)
+            self.assertEqual([r["charge_class"] for r in rows], ["paid"], qty)
+            self.assertEqual(rows[0]["quota_minutes"], 0.0, qty)
+            self.assertAlmostEqual(rows[0]["minutes"], qty)
 
 
 class CliStubTest(unittest.TestCase):

@@ -1,6 +1,6 @@
 # Agent Util Skills
 
-Claude Code 向けのユーティリティスキル集。`create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを、開発ワークフロースキル集 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から本リポジトリへ移設して独立管理する。加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）を本リポジトリで新規開発し、合わせて 5 スキルを上流ソースとして管理する。
+Claude Code 向けのユーティリティスキル集。`create-html-report`（自己完結 HTML レポート生成）と `setup-firebase-hosting`（Firebase Hosting 公開環境構築）の 2 スキルを、開発ワークフロースキル集 [Fandhe-AI/agent-cli-skills](https://github.com/Fandhe-AI/agent-cli-skills) から本リポジトリへ移設して独立管理する。加えて `create-pitch-deck`（企画提案スライド生成）、`create-design-doc`（UI/UX 設計資料生成）、`setup-github-pages`（GitHub Pages ドキュメントサイト構築・更新）、`actions-usage-dashboard`（org の GitHub Actions 利用分数データ取得）を本リポジトリで新規開発し、合わせて 6 スキルを上流ソースとして管理する。
 
 インストールには [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用する。
 
@@ -74,6 +74,15 @@ fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub
 - `Fandhe-AI/actions` の共通 reusable workflow で GitHub Pages へ自動デプロイ
 - 詳細は [skills/setup-github-pages/SKILL.md](skills/setup-github-pages/SKILL.md) を参照
 
+### actions-usage-dashboard
+
+org の GitHub Actions 利用分数を billing usage API から取得し、日 x リポジトリ x SKU x 料金区分（paid / included / public_free）の行データ（JSON）へ正規化する。「Actions の使用量を集計して」「課金分数を日次で出して」「billing usage を取得して」などで使用する。
+
+- GitHub ホストランナーのみが対象（セルフホストは対象外）。`gh api` 経由のみでトークンは扱わず、Python 標準ライブラリだけで動く
+- 有料分は公開範囲ではなく明細ごとの `netAmount / pricePerUnit` から判定し、`quota_minutes` は含有枠を消費した分だけを Linux 単価で換算する
+- 月の取得に失敗した場合は部分ファイルを書かず非 0 で終了する
+- 詳細は [skills/actions-usage-dashboard/SKILL.md](skills/actions-usage-dashboard/SKILL.md) を参照
+
 各スキルのネットワーク・sandbox 実行要件は [docs/skill-network-requirements.md](docs/skill-network-requirements.md) を参照。
 
 ## リポジトリ構成
@@ -86,7 +95,7 @@ fandhe-frontend 公式サイトと同じデザイン・同じ仕組みの GitHub
 
 - 本リポジトリ側で `.agents/skills/` を直接編集しない。修正は上流リポジトリへ行う
 - 上流の `source` を持つ vendored スキルへ手元で修正を加えた場合の PR 作成・upstream 反映は `contribute-skill` スキル（vendored 側に含まれる）を使う
-- 自前で管理する 5 スキル（`create-html-report` / `setup-firebase-hosting` / `create-pitch-deck` / `create-design-doc` / `setup-github-pages`）だけが `skills/` 配下の実ディレクトリであり、通常の編集フロー（`skill-author` への委譲 + `update-docs`）に従う
+- 自前で管理する 6 スキル（`create-html-report` / `setup-firebase-hosting` / `create-pitch-deck` / `create-design-doc` / `setup-github-pages` / `actions-usage-dashboard`）だけが `skills/` 配下の実ディレクトリであり、通常の編集フロー（`skill-author` への委譲 + `update-docs`）に従う
 
 ## 関連リポジトリ
 

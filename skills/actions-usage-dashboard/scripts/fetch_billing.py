@@ -192,33 +192,34 @@ def build_rows(month_payloads, visibility, org):
             public = vis == "public"
             minutes, gross, net = u["q"], u["g"], u["n"]
             paid, gpaid = u["paid"], u["gpaid"]
-            if public or gross == 0:
-                quota = 0.0
-            elif price is None:
-                raise FetchError("%s: Linux 単価を決められず quota を換算できない" % month)
-            else:
-                quota = gross / price
             rest_cls = "public_free" if public else "included"
             parts = []
             if paid > 0:
                 parts.append(("paid", paid))
-            rest = minutes - paid
+            # 浮動小数点誤差（net / 単価）で生じる微小な残余は、出力精度で丸めてから判定する
+            rest = _r(minutes - paid)
             if rest > 0 or minutes == 0:
                 parts.append((rest_cls, max(rest, 0.0)))
             for cls, m in parts:
-                share = (m / minutes) if minutes > 0 else 1.0
                 if cls == "paid":
-                    net_c, gross_c = net, gpaid
+                    net_c, gross_c = net, _r(gpaid)
                 else:
                     # 有料分が無い行（minutes == 0 を含む）は金額をそのまま持たせる
                     net_c = net if paid <= 0 else 0.0
-                    gross_c = gross if paid <= 0 else max(gross - gpaid, 0.0)
+                    gross_c = _r(gross if paid <= 0 else max(gross - gpaid, 0.0))
+                # quota は含有枠を消費した分だけ。paid 行と公開リポは 0
+                if cls == "paid" or public or gross_c <= 0:
+                    quota = 0.0
+                elif price is None:
+                    raise FetchError("%s: Linux 単価を決められず quota を換算できない" % month)
+                else:
+                    quota = gross_c / price
                 rows.append({
                     "day": day, "repo": repo, "visibility": vis, "sku": sku,
                     "runner_type": runner_type_for(sku), "charge_class": cls,
-                    "minutes": _r(m), "quota_minutes": _r(quota * share),
+                    "minutes": _r(m), "quota_minutes": _r(quota),
                     "billable_minutes": _r(m) if cls == "paid" else 0.0,
-                    "gross_usd": _r(gross_c), "discount_usd": _r(max(gross_c - net_c, 0.0)),
+                    "gross_usd": gross_c, "discount_usd": _r(max(gross_c - net_c, 0.0)),
                     "net_usd": _r(net_c),
                 })
     rows.sort(key=lambda r: (r["day"], r["repo"], r["sku"], CHARGE_ORDER[r["charge_class"]]))

@@ -14,8 +14,10 @@ org の Actions 利用分数を billing usage API から取得し、日次の行
 
 ## 使い方
 
+以下のコマンドの `<skill-root>` は、この SKILL.md が置かれたディレクトリ（導入先により `skills/` / `.agents/skills/` / `.claude/skills/` 配下の `actions-usage-dashboard`）の絶対パスに読み替える。cwd 直下の `skills/` を前提にしない。
+
 ```bash
-python3 skills/actions-usage-dashboard/scripts/fetch_billing.py \
+python3 <skill-root>/scripts/fetch_billing.py \
   --org <org> --since YYYY-MM [--until YYYY-MM] --out <出力 JSON>
 ```
 
@@ -37,13 +39,13 @@ org 名と期間を確認する。`--out` の親ディレクトリは存在し�
 標準出力の要約（行数・区分別分数・月別合計）を確認する。出力 JSON は `schema_version: 1` で、行は `day / repo / visibility / sku / runner_type / charge_class / minutes / quota_minutes / billable_minutes / gross_usd / discount_usd / net_usd` を持つ。
 
 - 有料分は公開範囲ではなく元明細ごとの `netAmount / pricePerUnit` から求める（単価の異なる明細を平均して割らない）
-- `quota_minutes` は Linux 単価（前月引き継ぎ）で換算した含有枠消費分
+- `quota_minutes` は Linux 単価（前月引き継ぎ）で換算した含有枠消費分。paid 行は 0、included 行は含有枠に対応する金額分のみを換算する
 - セルフホストランナーは対象外（jobs 側で扱う）
 
 ## 検証
 
 ```bash
-python3 -m pytest -q skills/actions-usage-dashboard/tests
+python3 -m pytest -q <skill-root>/tests
 ```
 
 全件パス・失敗 0 件であることを確認する。
