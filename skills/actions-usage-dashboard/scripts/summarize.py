@@ -40,6 +40,7 @@ CHARGE_CLASSES = {"paid", "included", "public_free", "unknown", "self_hosted"}
 GROUP_KEYS = ("charge_class", "repo", "runner_type", "visibility")
 DEFAULT_TOP = 5
 MAX_NAME_LEN = 60
+MAX_SRC_WARNINGS = 5
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
@@ -77,8 +78,11 @@ def safe(s):
 
 
 def load_rows(paths):
-    """rows ファイルを検証して (org, rows, sources) を返す。非信頼入力として fail-closed。"""
-    org, rows, sources = None, [], set()
+    """rows ファイルを検証して (org, rows, sources, warnings) を返す。非信頼入力として fail-closed。
+
+    warnings は取得元（fetch_*.py）が記録した欠損・取得時点の警告で、出力へ引き継ぐ。
+    """
+    org, rows, sources, warnings = None, [], set(), []
     for p in paths:
         try:
             with open(p, encoding="utf-8") as f:
@@ -101,6 +105,12 @@ def load_rows(paths):
         if org is not None and o != org:
             raise FetchError("rows ファイル間で org が一致しない")
         org = o
+        ws = data.get("warnings", [])
+        if not isinstance(ws, list) or not all(isinstance(w, str) for w in ws):
+            raise FetchError("rows の warnings が文字列の配列ではない: %s" % safe(p))
+        warnings.extend("取得元(%s): %s" % (src, safe(w)) for w in ws[:MAX_SRC_WARNINGS])
+        if len(ws) > MAX_SRC_WARNINGS:
+            warnings.append("取得元(%s): 警告が他 %d 件ある" % (src, len(ws) - MAX_SRC_WARNINGS))
         rs = data.get("rows")
         if not isinstance(rs, list):
             raise FetchError("rows が配列ではない: %s" % safe(p))
@@ -121,7 +131,7 @@ def load_rows(paths):
                 "minutes": _num(r, "minutes"), "quota_minutes": _num(r, "quota_minutes", False),
                 "net_usd": _num(r, "net_usd", False),
             })
-    return org, rows, sources
+    return org, rows, sources, warnings
 
 
 def included_for(plan):
@@ -144,7 +154,7 @@ def _r(x):
     return round(x, 6)
 
 
-def breakdown(rows, included_minutes, has_jobs):
+def breakdown(rows, included_minutes, has_jobs, has_billing=True):
     s = {c: {"minutes": 0.0, "net_usd": 0.0, "quota": 0.0} for c in CHARGE_CLASSES}
     for r in rows:
         a = s[r["charge_class"]]
@@ -158,6 +168,12 @@ def breakdown(rows, included_minutes, has_jobs):
         inc["remaining"] = _r(max(included_minutes - quota, 0.0))
         inc["over"] = _r(max(quota - included_minutes, 0.0))
         inc["ratio"] = _r(quota / included_minutes)
+    if not has_billing:
+        # billing 未入力では GitHub ホスト分の内訳と枠の残りを計算できない。0 と誤読させず不明にする。
+        return {
+            "paid": None, "included": None, "public_free": None, "unknown": None,
+            "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs},
+        }
     return {
         "paid": {"minutes": _r(s["paid"]["minutes"]), "net_usd": _r(s["paid"]["net_usd"])},
         "included": inc,
@@ -209,17 +225,22 @@ def candidates(month_rows, all_rows, top):
             "others": max(len(ordered) - top, 0)}
 
 
-def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top):
+def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=()):
     mrows = select_month(rows, month)
     inc_min = included_for(plan)
-    warnings = []
+    warnings = list(src_warnings)
+    has_billing = "billing" in sources
+    if not has_billing:
+        warnings.append("billing 未入力のため有料・含有枠・公開無料の内訳と残量は不明（fetch_billing.py の出力を --rows に渡す）")
     if plan_warning:
         warnings.append(plan_warning)
     elif inc_min is None:
         warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
-    bd = breakdown(mrows, inc_min, "jobs" in sources)
-    if bd["unknown"]["minutes"] > 0:
-        warnings.append("区分不明あり。含有枠の消費は過小。fetch_billing.py に --assume-current-visibility を付けると確定する")
+    bd = breakdown(mrows, inc_min, "jobs" in sources, has_billing)
+    if has_billing and bd["unknown"]["minutes"] > 0:
+        warnings.append("区分不明あり。含有枠の消費は過小。期間中に公開範囲が変わっていないと保証できる場合だけ、"
+                        "fetch_billing.py に --assume-current-visibility を付けると現在の公開範囲で分類できる"
+                        "（削除済み・権限不足のリポジトリは unknown のまま残る）")
     if not mrows:
         warnings.append("対象月の行なし")
     return {
@@ -231,11 +252,16 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top):
 
 
 def render_text(s):
-    bd, inc = s["breakdown"], s["breakdown"]["included"]
+    bd, inc = s["breakdown"], s["breakdown"]["included"] or {}
     pm = s["plan"]["included_minutes"]
     out = ["%s / %s（UTC）/ プラン %s（含有 %s）" % (
         safe(s["org"]), s["month"], safe(s["plan"]["name"] or "不明"),
         "%d 分" % pm if pm else "不明")]
+    if bd["paid"] is None:
+        out.append("有料: データなし（billing 未入力）")
+        out.append("含有枠: データなし（残量は不明）")
+        out.append("公開リポの無料: データなし")
+        return _render_tail(s, out)
     out.append("有料: %.1f 分 / %.2f USD" % (bd["paid"]["minutes"], bd["paid"]["net_usd"]))
     if inc["included_minutes"]:
         txt = "含有枠: 消費 %.1f 分（実 %.1f 分）/ %d 分 = %.1f%%、残り %.1f 分" % (
@@ -247,9 +273,14 @@ def render_text(s):
         txt = "含有枠: 消費 %.1f 分（実 %.1f 分）/ 含有分不明" % (inc["quota_minutes"], inc["minutes"])
     out.append(txt)
     out.append("公開リポの無料: %.1f 分" % bd["public_free"]["minutes"])
+    return _render_tail(s, out)
+
+
+def _render_tail(s, out):
+    bd = s["breakdown"]
     out.append("セルフホスト: %s" % ("%.1f 分" % bd["self_hosted"]["minutes"]
                                  if bd["self_hosted"]["available"] else "データなし"))
-    if bd["unknown"]["minutes"] > 0:
+    if bd["unknown"] is not None and bd["unknown"]["minutes"] > 0:
         out.append("区分不明: %.1f 分" % bd["unknown"]["minutes"])
     g = s["group_by"]
     out.append("%s 別 上位%s:" % (g["key"], "（他 %d 件）" % g["others"] if g["others"] else ""))
@@ -289,7 +320,7 @@ def main(argv=None):
             raise FetchError("--rows は最大 2 件")
         if a.month is not None and not MONTH_RE.match(a.month):
             raise FetchError("--month は YYYY-MM 形式で指定する")
-        org, rows, sources = load_rows(a.rows)
+        org, rows, sources, src_warnings = load_rows(a.rows)
         month = a.month or (max(r["day"][:7] for r in rows) if rows
                             else datetime.now(timezone.utc).strftime("%Y-%m"))
         plan, plan_warning = a.plan, None
@@ -298,7 +329,7 @@ def main(argv=None):
                 plan = fetch_plan(org)
             except FetchError as e:
                 plan, plan_warning = None, "プラン取得に失敗（含有分は不明）: %s" % e
-        summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top)
+        summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top, src_warnings)
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)
         return 1

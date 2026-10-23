@@ -85,7 +85,7 @@ class Base(unittest.TestCase):
 
 class SummaryTests(Base):
     def summary(self, plan="team", jobs=True, group_by="charge_class", top=5):
-        org, rows, src = sm.load_rows(
+        org, rows, src, _w = sm.load_rows(
             [self.write("b.json", doc("billing", BILLING))]
             + ([self.write("j.json", doc("jobs", JOBS))] if jobs else []))
         return sm.build_summary(org, rows, src, "2026-10", plan, None, group_by, top)
@@ -159,11 +159,50 @@ class SummaryTests(Base):
         self.assertEqual([e["repo"] for e in c["top"]], ["x", "y", "z"])
 
     def test_month_filter(self):
-        org, rows, src = sm.load_rows([self.write("b.json", doc("billing", BILLING))])
+        org, rows, src, _w = sm.load_rows([self.write("b.json", doc("billing", BILLING))])
         s = sm.build_summary(org, rows, src, "2026-09", "team", None, "repo", 5)
         self.assertEqual(s["breakdown"]["paid"]["minutes"], 99.0)
         s = sm.build_summary(org, rows, src, "2025-01", "team", None, "repo", 5)
         self.assertTrue(any("行なし" in w for w in s["warnings"]))
+
+
+class WarningAndMissingBillingTests(Base):
+    def test_source_warnings_carried_to_text_and_json(self):
+        d = doc("jobs", JOBS)
+        d["warnings"] = ["1,000 件上限で欠けた可能性: acme/x"]
+        a = ["--rows", self.write("b.json", doc("billing", BILLING)),
+             "--rows", self.write("j.json", d)]
+        r = subprocess.run([sys.executable, "-I", SCRIPT] + a + ["--plan", "team", "--month", "2026-10"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("1,000 件上限", r.stdout)
+        r = subprocess.run([sys.executable, "-I", SCRIPT] + a + ["--plan", "team", "--month", "2026-10", "--json"],
+                           capture_output=True, text=True)
+        self.assertTrue(any("1,000 件上限" in w for w in json.loads(r.stdout)["warnings"]))
+
+    def test_bad_warnings_rejected(self):
+        d = doc("billing", BILLING)
+        d["warnings"] = "x"
+        with self.assertRaises(sm.FetchError):
+            sm.load_rows([self.write("b.json", d)])
+
+    def test_unknown_guidance_states_precondition(self):
+        org, rows, src, w = sm.load_rows([self.write("b.json", doc("billing", BILLING))])
+        s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w)
+        msg = " ".join(s["warnings"])
+        self.assertIn("保証できる場合だけ", msg)
+        self.assertIn("unknown のまま", msg)
+
+    def test_jobs_only_shows_no_data(self):
+        org, rows, src, w = sm.load_rows([self.write("j.json", doc("jobs", JOBS))])
+        s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w)
+        self.assertIsNone(s["breakdown"]["paid"])
+        self.assertIsNone(s["breakdown"]["included"])
+        text = "\n".join(sm.render_text(s))
+        self.assertIn("データなし（billing 未入力）", text)
+        self.assertIn("残量は不明", text)
+        self.assertNotIn("残り", text)
+        self.assertTrue(any("billing 未入力" in x for x in s["warnings"]))
 
 
 class CliTests(Base):

@@ -54,6 +54,7 @@ python3 <skill-root>/scripts/summarize.py --rows <billing.json> [--rows <jobs.js
 - `--month` の既定は rows の最新月。`--group-by` の既定は `charge_class`、`--top` の既定は 5
 - プランの含有分（Free 2,000 / Team 3,000 / Enterprise 50,000 分）は `--plan` で指定する。未指定なら `gh api orgs/<org>` でプラン名を取る。取れない・不明なときは含有分を「不明」として警告し、続行する
 - `--json` は同じ内容を機械可読で出す
+- 入力 rows の `warnings`（1,000 件上限による欠損・再利用した一覧の取得時点など）は「注意」行と JSON の `warnings` に引き継ぐ。billing の rows を渡さないと有料・含有枠・公開無料の内訳と残量は「データなし」（JSON は `null`）になる
 
 ## フロー
 
