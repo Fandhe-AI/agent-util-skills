@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""fetch_billing.py / fetch_jobs.py の出力から、ターミナル用の利用状況要約を出す（check モード）。
+
+役割と境界:
+  actions-usage-dashboard の確認用入口。ダッシュボード（Artifact）を開かずに、当月の
+  無料・有料の内訳と、GitHub ホストランナーの有料分・含有枠を使っているリポジトリ
+  （セルフホスト移行の候補）を 20 行以内で示す。モデルはデータ本体ではこの要約だけを読む。
+  読み取り専用で、ファイルは書かない。集計の取得は行わない（取得は fetch_*.py の責務）。
+
+呼び出し元: SKILL.md の check モード。入力は fetch_billing.py（source: billing）と
+  fetch_jobs.py（source: jobs）が書く rows JSON（schema_version 1）。列名や区分を変える
+  ときは両 fetch スクリプトと揃える。
+
+プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
+  gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
+
+helper の複製: FetchError / gh_api / ORG_RE / MONTH_RE / _num は fetch_billing.py と同じ実装を
+  複製している。python3 -I 起動ではスクリプトの隣のモジュールを import できないため。
+  直すときは fetch_billing.py / fetch_jobs.py と揃える。
+
+アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
+"""
+import argparse
+import json
+import math
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+SCHEMA_VERSION = 1
+GH_TIMEOUT = 120
+ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# プランごとの月間含有分（Linux 換算の分）。別名は同じ定数ブロックで持つ。
+PLAN_INCLUDED_MINUTES = {"free": 2000, "team": 3000, "enterprise": 50000}
+PLAN_ALIASES = {"business": "enterprise"}
+CHARGE_CLASSES = {"paid", "included", "public_free", "unknown", "self_hosted"}
+GROUP_KEYS = ("charge_class", "repo", "runner_type", "visibility")
+DEFAULT_TOP = 5
+MAX_NAME_LEN = 60
+CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+class FetchError(Exception):
+    """入力・取得の失敗。main が日本語 1 行にして終了コード 1 で終える。"""
+
+
+def _num(item, key, required=True):
+    v = item.get(key)
+    if v is None and not required:
+        return 0.0
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+        raise FetchError("rows の数値フィールド %s が不正（有限の非負数ではない）" % key)
+    return float(v)
+
+
+def gh_api(args):
+    try:
+        r = subprocess.run(["gh", "api"] + args, capture_output=True, text=True,
+                           timeout=GH_TIMEOUT, shell=False)
+    except FileNotFoundError:
+        raise FetchError("gh コマンドが見つからない")
+    except subprocess.TimeoutExpired:
+        raise FetchError("gh api が %d 秒でタイムアウト" % GH_TIMEOUT)
+    if r.returncode != 0:
+        lines = (r.stderr or "").strip().splitlines()
+        raise FetchError("gh api 失敗: %s" % (lines[0][:200] if lines else "exit %d" % r.returncode))
+    return r.stdout
+
+
+def safe(s):
+    """端末への制御文字注入を防ぐため、制御文字を除去し長い名前を切り詰める。"""
+    s = CTRL_RE.sub("?", str(s))
+    return s if len(s) <= MAX_NAME_LEN else s[:MAX_NAME_LEN - 1] + "…"
+
+
+def load_rows(paths):
+    """rows ファイルを検証して (org, rows, sources) を返す。非信頼入力として fail-closed。"""
+    org, rows, sources = None, [], set()
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+        except OSError:
+            raise FetchError("rows ファイルを読めない: %s" % safe(p))
+        except ValueError:
+            raise FetchError("rows ファイルを JSON として解析できない: %s" % safe(p))
+        if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
+            raise FetchError("rows の schema_version が 1 ではない: %s" % safe(p))
+        src = data.get("source")
+        if src not in ("billing", "jobs"):
+            raise FetchError("rows の source が不正: %s" % safe(p))
+        if src in sources:
+            raise FetchError("同じ source（%s）の rows が重複している" % src)
+        sources.add(src)
+        o = data.get("org")
+        if not isinstance(o, str) or not ORG_RE.match(o):
+            raise FetchError("rows の org が不正: %s" % safe(p))
+        if org is not None and o != org:
+            raise FetchError("rows ファイル間で org が一致しない")
+        org = o
+        rs = data.get("rows")
+        if not isinstance(rs, list):
+            raise FetchError("rows が配列ではない: %s" % safe(p))
+        for r in rs:
+            if not isinstance(r, dict):
+                raise FetchError("rows の要素が不正")
+            day = r.get("day")
+            if not isinstance(day, str) or not DAY_RE.match(day):
+                raise FetchError("rows の day が不正")
+            if r.get("charge_class") not in CHARGE_CLASSES:
+                raise FetchError("rows の charge_class が不正")
+            for k in ("repo", "visibility", "runner_type"):
+                if not isinstance(r.get(k), str):
+                    raise FetchError("rows の %s が文字列ではない" % k)
+            rows.append({
+                "day": day, "repo": r["repo"], "visibility": r["visibility"],
+                "runner_type": r["runner_type"], "charge_class": r["charge_class"],
+                "minutes": _num(r, "minutes"), "quota_minutes": _num(r, "quota_minutes", False),
+                "net_usd": _num(r, "net_usd", False),
+            })
+    return org, rows, sources
+
+
+def included_for(plan):
+    """プラン名から含有分を引く。表にないときは None（不明）。"""
+    if not isinstance(plan, str):
+        return None
+    key = plan.strip().lower()
+    return PLAN_INCLUDED_MINUTES.get(PLAN_ALIASES.get(key, key))
+
+
+def fetch_plan(org):
+    return gh_api(["orgs/%s" % org, "--jq", ".plan.name"]).strip()
+
+
+def select_month(rows, month):
+    return [r for r in rows if r["day"][:7] == month]
+
+
+def _r(x):
+    return round(x, 6)
+
+
+def breakdown(rows, included_minutes, has_jobs):
+    s = {c: {"minutes": 0.0, "net_usd": 0.0, "quota": 0.0} for c in CHARGE_CLASSES}
+    for r in rows:
+        a = s[r["charge_class"]]
+        a["minutes"] += r["minutes"]
+        a["net_usd"] += r["net_usd"]
+        a["quota"] += r["quota_minutes"]
+    quota = s["included"]["quota"]
+    inc = {"minutes": _r(s["included"]["minutes"]), "quota_minutes": _r(quota),
+           "included_minutes": included_minutes, "remaining": None, "over": None, "ratio": None}
+    if included_minutes:
+        inc["remaining"] = _r(max(included_minutes - quota, 0.0))
+        inc["over"] = _r(max(quota - included_minutes, 0.0))
+        inc["ratio"] = _r(quota / included_minutes)
+    return {
+        "paid": {"minutes": _r(s["paid"]["minutes"]), "net_usd": _r(s["paid"]["net_usd"])},
+        "included": inc,
+        "public_free": {"minutes": _r(s["public_free"]["minutes"])},
+        "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs},
+        "unknown": {"minutes": _r(s["unknown"]["minutes"])},
+    }
+
+
+def group_top(rows, key, top):
+    acc = {}
+    for r in rows:
+        a = acc.setdefault(r[key], [0.0, 0.0])
+        a[0] += r["minutes"]
+        a[1] += r["net_usd"]
+    ordered = sorted(acc.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    return {"key": key,
+            "top": [{"key": k, "minutes": _r(v[0]), "net_usd": _r(v[1])} for k, v in ordered[:top]],
+            "others": max(len(ordered) - top, 0)}
+
+
+def candidates(month_rows, all_rows, top):
+    """GitHub ホストの有料分または含有枠を使うリポジトリを、有料優先で並べる。"""
+    acc = {}
+    for r in month_rows:
+        if r["charge_class"] not in ("paid", "included"):
+            continue
+        a = acc.setdefault(r["repo"], {"paid": 0.0, "usd": 0.0, "inc": 0.0, "quota": 0.0})
+        if r["charge_class"] == "paid":
+            a["paid"] += r["minutes"]
+            a["usd"] += r["net_usd"]
+        else:
+            a["inc"] += r["minutes"]
+        a["quota"] += r["quota_minutes"]
+    last = {}
+    for r in all_rows:
+        if r["charge_class"] != "self_hosted" and r["minutes"] > 0:
+            if r["day"] > last.get(r["repo"], ""):
+                last[r["repo"]] = r["day"]
+    live = [(repo, a) for repo, a in acc.items() if a["paid"] > 0 or a["inc"] > 0 or a["quota"] > 0]
+    paid = sorted([x for x in live if x[1]["paid"] > 0],
+                  key=lambda x: (-x[1]["usd"], -x[1]["paid"], x[0]))
+    rest = sorted([x for x in live if x[1]["paid"] <= 0],
+                  key=lambda x: (-x[1]["quota"], -x[1]["inc"], x[0]))
+    ordered = paid + rest
+    return {"top": [{"repo": repo, "paid_minutes": _r(a["paid"]), "net_usd": _r(a["usd"]),
+                     "included_minutes": _r(a["inc"]), "quota_minutes": _r(a["quota"]),
+                     "last_used": last.get(repo)} for repo, a in ordered[:top]],
+            "others": max(len(ordered) - top, 0)}
+
+
+def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top):
+    mrows = select_month(rows, month)
+    inc_min = included_for(plan)
+    warnings = []
+    if plan_warning:
+        warnings.append(plan_warning)
+    elif inc_min is None:
+        warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
+    bd = breakdown(mrows, inc_min, "jobs" in sources)
+    if bd["unknown"]["minutes"] > 0:
+        warnings.append("区分不明あり。含有枠の消費は過小。fetch_billing.py に --assume-current-visibility を付けると確定する")
+    if not mrows:
+        warnings.append("対象月の行なし")
+    return {
+        "schema_version": SCHEMA_VERSION, "org": org, "month": month,
+        "plan": {"name": plan, "included_minutes": inc_min},
+        "breakdown": bd, "group_by": group_top(mrows, group_by, top),
+        "candidates": candidates(mrows, rows, top), "warnings": warnings,
+    }
+
+
+def render_text(s):
+    bd, inc = s["breakdown"], s["breakdown"]["included"]
+    pm = s["plan"]["included_minutes"]
+    out = ["%s / %s（UTC）/ プラン %s（含有 %s）" % (
+        safe(s["org"]), s["month"], safe(s["plan"]["name"] or "不明"),
+        "%d 分" % pm if pm else "不明")]
+    out.append("有料: %.1f 分 / %.2f USD" % (bd["paid"]["minutes"], bd["paid"]["net_usd"]))
+    if inc["included_minutes"]:
+        txt = "含有枠: 消費 %.1f 分（実 %.1f 分）/ %d 分 = %.1f%%、残り %.1f 分" % (
+            inc["quota_minutes"], inc["minutes"], inc["included_minutes"],
+            inc["ratio"] * 100, inc["remaining"])
+        if inc["over"] > 0:
+            txt += "、超過 %.1f 分" % inc["over"]
+    else:
+        txt = "含有枠: 消費 %.1f 分（実 %.1f 分）/ 含有分不明" % (inc["quota_minutes"], inc["minutes"])
+    out.append(txt)
+    out.append("公開リポの無料: %.1f 分" % bd["public_free"]["minutes"])
+    out.append("セルフホスト: %s" % ("%.1f 分" % bd["self_hosted"]["minutes"]
+                                 if bd["self_hosted"]["available"] else "データなし"))
+    if bd["unknown"]["minutes"] > 0:
+        out.append("区分不明: %.1f 分" % bd["unknown"]["minutes"])
+    g = s["group_by"]
+    out.append("%s 別 上位%s:" % (g["key"], "（他 %d 件）" % g["others"] if g["others"] else ""))
+    for e in g["top"]:
+        out.append("  %s  %.1f 分 / %.2f USD" % (safe(e["key"]), e["minutes"], e["net_usd"]))
+    c = s["candidates"]
+    out.append("移行候補%s:" % ("（他 %d 件）" % c["others"] if c["others"] else ""))
+    for e in c["top"]:
+        out.append("  %s  有料 %.1f 分 / %.2f USD、含有枠 %.1f 分、最終利用 %s" % (
+            safe(e["repo"]), e["paid_minutes"], e["net_usd"], e["quota_minutes"], e["last_used"] or "-"))
+    if s["warnings"]:
+        out.append("注意: " + " / ".join(s["warnings"]))
+    return out
+
+
+def _top(v):
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--top は 1 以上の整数")
+    if n < 1:
+        raise argparse.ArgumentTypeError("--top は 1 以上の整数")
+    return n
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Actions 利用状況の要約（check モード・読み取り専用）")
+    ap.add_argument("--rows", action="append", required=True, help="fetch_*.py の出力（最大 2 件）")
+    ap.add_argument("--month", help="YYYY-MM（既定は rows の最新月）")
+    ap.add_argument("--group-by", choices=GROUP_KEYS, default="charge_class")
+    ap.add_argument("--top", type=_top, default=DEFAULT_TOP)
+    ap.add_argument("--plan", help="プラン名（未指定時は gh api orgs/<org> で取得）")
+    ap.add_argument("--json", action="store_true", dest="as_json")
+    a = ap.parse_args(argv)
+    try:
+        if len(a.rows) > 2:
+            raise FetchError("--rows は最大 2 件")
+        if a.month is not None and not MONTH_RE.match(a.month):
+            raise FetchError("--month は YYYY-MM 形式で指定する")
+        org, rows, sources = load_rows(a.rows)
+        month = a.month or (max(r["day"][:7] for r in rows) if rows
+                            else datetime.now(timezone.utc).strftime("%Y-%m"))
+        plan, plan_warning = a.plan, None
+        if plan is None:
+            try:
+                plan = fetch_plan(org)
+            except FetchError as e:
+                plan, plan_warning = None, "プラン取得に失敗（含有分は不明）: %s" % e
+        summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top)
+    except FetchError as e:
+        print("エラー: %s" % e, file=sys.stderr)
+        return 1
+    if a.as_json:
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    else:
+        print("\n".join(render_text(summary)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

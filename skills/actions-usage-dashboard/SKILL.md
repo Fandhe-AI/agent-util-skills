@@ -5,7 +5,8 @@ description: >
   「課金分数を日次で出して」「billing usage を取得して」で使用。billing usage API から
   GitHub ホストランナーの日 x リポジトリ x SKU x 料金区分（paid / included / public_free / unknown）の行を
   JSON へ書く。「セルフホストの実行時間を集計して」で jobs API から日 x リポジトリ x ランナーグループの行も作る。
-  fetch_billing.py と fetch_jobs.py を提供。ダッシュボード HTML 化は create-html-report も参照。
+  「無料枠の残りを確認して」「Actions の利用状況を確認して」でターミナルに 20 行以内の要約と
+  セルフホスト移行候補を出す。fetch_billing.py・fetch_jobs.py・summarize.py を提供。ダッシュボード HTML 化は create-html-report も参照。
 user-invocable: true
 ---
 
@@ -40,6 +41,18 @@ python3 <skill-root>/scripts/fetch_jobs.py \
 - 独自グループに置いた GitHub ホストの larger runner は `self-hosted` ラベルを持たないためセルフホストに数えない（billing との二重計上を避ける）
 - run 一覧はリポジトリ単位でキャッシュに保存し、レート制限で中断しても同じ UTC 日の同じ `--since` なら続きから取る（未完了 run を含むリポジトリは一覧を取り直す。再利用した一覧の取得時点は `warnings` に出る）。削除や 1,000 件上限で一覧から消えた run も、キャッシュ済みなら集計に残す
 
+取得済みの rows JSON から、ターミナルで利用状況を確認する（check モード。読み取り専用）。
+
+```bash
+python3 <skill-root>/scripts/summarize.py --rows <billing.json> [--rows <jobs.json>] \
+  [--month YYYY-MM] [--group-by charge_class|repo|runner_type|visibility] [--top N] [--plan <name>] [--json]
+```
+
+- 出力は 20 行以内（既定）。先頭に無料・有料の内訳（有料の分数と請求額、含有枠の消費量とプラン含有分に対する割合・残り、公開リポの無料分、セルフホスト分）、続けて group-by 別の上位 N 件、最後に移行候補（有料のリポを先に、最終利用日付き）を出す
+- `--month` の既定は rows の最新月。`--group-by` の既定は `charge_class`、`--top` の既定は 5
+- プランの含有分（Free 2,000 / Team 3,000 / Enterprise 50,000 分）は `--plan` で指定する。未指定なら `gh api orgs/<org>` でプラン名を取る。取れない・不明なときは含有分を「不明」として警告し、続行する
+- `--json` は同じ内容を機械可読で出す
+
 ## フロー
 
 ### Step 1: 引数の確認
@@ -64,6 +77,7 @@ org 名と期間を確認する。`--out` の親ディレクトリは存在し�
 ```bash
 python3 -I -B <skill-root>/tests/test_fetch_billing.py
 python3 -I -B <skill-root>/tests/test_fetch_jobs.py
+python3 -I -B <skill-root>/tests/test_summarize.py
 ```
 
 全件パス・失敗 0 件であることを確認する。
