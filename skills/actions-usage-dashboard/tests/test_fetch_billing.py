@@ -295,12 +295,16 @@ class CliStubTest(unittest.TestCase):
 
     def calls(self):
         p = os.path.join(self.stub_dir, "calls.log")
-        return open(p).read().splitlines() if os.path.exists(p) else []
+        if not os.path.exists(p):
+            return []
+        with open(p) as f:
+            return f.read().splitlines()
 
     def test_success(self):
         r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-09", "--out", self.out)
         self.assertEqual(r.returncode, 0, r.stderr)
-        data = json.load(open(self.out))
+        with open(self.out) as f:
+            data = json.load(f)
         self.assertEqual(data["schema_version"], 1)
         self.assertEqual(data["source"], "billing")
         rows, _ = fb.build_rows(PAYLOADS, VISIBILITY, ORG)
@@ -323,7 +327,8 @@ class CliStubTest(unittest.TestCase):
         r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-09", "--out", self.out,
                          fail_month="2026-09")
         self.assertNotEqual(r.returncode, 0)
-        self.assertEqual(open(self.out, "rb").read(), b"previous\n")
+        with open(self.out, "rb") as f:
+            self.assertEqual(f.read(), b"previous\n")
         self.assertEqual(os.listdir(self.work), ["billing.json"])
 
     def test_long_range_stdout_within_10_lines(self):
