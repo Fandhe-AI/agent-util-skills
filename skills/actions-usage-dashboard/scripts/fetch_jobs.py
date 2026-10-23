@@ -81,6 +81,8 @@ from _common import ORG_RE, FetchError, atomic_write_json, gh_api  # noqa: E402
 SCHEMA_VERSION = 1
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+# キャッシュの listing.listed_at の検証用（build_dashboard.py の ISO_RE と同じ形）。
+ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
 RUNS_SEARCH_CAP = 1000
@@ -431,6 +433,10 @@ def load_cache(path, org):
                 k.isdigit() and isinstance(v, dict) and _pos_int(v.get("attempt")) and isinstance(v.get("msg"), str)
                 for k, v in sk.items()):
             raise bad
+        # 形式に合わない再開時刻は破棄して「不明」に倒す（端末へ制御文字を出さない）
+        la = ls.get("listed_at")
+        if not (isinstance(la, str) and ISO_RE.match(la)):
+            ls.pop("listed_at", None)
         for repo, items in ls["repos"].items():
             if not REPO_RE.match(repo) or not isinstance(items, list):
                 raise bad
@@ -603,7 +609,8 @@ def main(argv=None):
                 del ls["repos"][repo]
                 ls["truncated"] = [t for t in ls["truncated"] if not t.startswith("%s/%s " % (a.org, repo))]
             if ls["repos"]:
-                resumed_at = ls.get("listed_at") if isinstance(ls.get("listed_at"), str) else "不明"
+                la = ls.get("listed_at")
+                resumed_at = la if isinstance(la, str) and ISO_RE.match(la) else "不明"
         # 不正な job を含む run は、同じ周回（listing が生きている間）の再開では再取得しない。
         # 記録しないと時間上限で中断→再実行のたびに同じ run を先頭で取り直して進めなくなる。
         # listing を捨てる次の周回では空に戻るため、スキップ分も再試行される

@@ -373,6 +373,40 @@ class Cli(unittest.TestCase):
         with open(os.path.join(self.cache, "jobs-cache-%s.json" % ORG)) as f:
             self.assertNotIn("listing", json.load(f))
 
+    def _resume_with_listed_at(self, value):
+        self.cfg["low_after"] = 3
+        self.write_cfg()
+        self.assertEqual(self.run_cli(["--rate-check-every", "1"]).returncode, 3)
+        cp = os.path.join(self.cache, "jobs-cache-%s.json" % ORG)
+        with open(cp) as f:
+            saved = json.load(f)
+        saved["listing"]["listed_at"] = value
+        with open(cp, "w") as f:
+            json.dump(saved, f)
+        self.cfg["low_after"] = None
+        self.write_cfg()
+        r = self.run_cli(["--rate-check-every", "1"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.out) as f:
+            warnings = json.load(f).get("warnings", [])
+        return r, warnings
+
+    def test_listed_at_with_control_chars_becomes_unknown(self):
+        r, warnings = self._resume_with_listed_at("\x1b]0;x\x07\x1b[2J\x9b")
+        text = r.stdout + r.stderr + "".join(warnings)
+        for ch in ("\x1b", "\x07", "\x9b"):
+            self.assertNotIn(ch, text)
+        self.assertIn("中断前（不明）", r.stdout + r.stderr)
+        self.assertTrue(any("不明 時点の取得を再利用" in w for w in warnings), warnings)
+
+    def test_listed_at_non_string_becomes_unknown(self):
+        r, warnings = self._resume_with_listed_at(12345)
+        self.assertTrue(any("不明 時点の取得を再利用" in w for w in warnings), warnings)
+
+    def test_listed_at_valid_is_kept(self):
+        r, warnings = self._resume_with_listed_at("2026-10-23T00:00:00Z")
+        self.assertTrue(any("2026-10-23T00:00:00Z 時点" in w for w in warnings), warnings)
+
     def test_paging(self):
         self.cfg["runs"] = {"pub-site": [run(i) for i in range(1, 121)]}
         self.cfg["repos"] = self.cfg["repos"][:1]

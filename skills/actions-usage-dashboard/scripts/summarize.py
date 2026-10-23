@@ -48,6 +48,8 @@ DEFAULT_TOP = 5
 MAX_NAME_LEN = 60
 MAX_WARNING_LEN = 500
 MAX_SRC_WARNINGS = 5
+# rows 入力の上限。build_dashboard.py の MAX_ROWS_BYTES と同値（変えるときは両方を揃える）。
+MAX_ROWS_BYTES = 8 * 1024 * 1024
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
@@ -124,6 +126,8 @@ def load_rows(paths):
     org, rows, sources, warnings = None, [], {}, []
     for p in paths:
         try:
+            if os.path.getsize(p) > MAX_ROWS_BYTES:
+                raise FetchError("rows が 8 MB を超える: %s" % safe(p))
             with open(p, encoding="utf-8") as f:
                 data = json.load(f)
         except OSError:
@@ -398,7 +402,7 @@ def main(argv=None):
             try:
                 plan = fetch_plan(org)
             except FetchError as e:
-                plan, plan_warning = None, "プラン取得に失敗（含有分は不明）: %s" % e
+                plan, plan_warning = None, "プラン取得に失敗（含有分は不明）: %s" % safe(e, MAX_WARNING_LEN)
         summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top, src_warnings)
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)

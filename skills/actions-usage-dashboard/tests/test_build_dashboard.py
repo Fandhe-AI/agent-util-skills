@@ -73,7 +73,8 @@ class CreateTests(unittest.TestCase):
             self.assertTrue(ID_RE.match(w["collection"]) and ID_RE.match(w["doc_id"]))
             self.assertTrue(os.path.isabs(w["file_path"]))
             self.assertTrue(w["file_path"].startswith(os.path.realpath(self.out)))
-            self.assertIsInstance(json.load(open(w["file_path"], encoding="utf-8")), dict)
+            with open(w["file_path"], encoding="utf-8") as f:
+                self.assertIsInstance(json.load(f), dict)
 
     def test_t2_billing_only(self):
         rc, _, err = self.stage2(rows=(BILLING,))
@@ -103,15 +104,28 @@ class CreateTests(unittest.TestCase):
         self.assertEqual(load(self.out, "dash-params.json")["plan_included_minutes"], 3000)
 
     def test_t6_oversize_template(self):
+        import contextlib
+        import io
+        from unittest import mock
         big = os.path.join(self.out, "big.html")
         with open(big, "w", encoding="utf-8") as f:
             f.write("a" * (256 * 1024 + 1))
         out = os.path.join(self.out, "o")
-        rc, _, err = run(base(out) + ["--template", big])
+        buf = io.StringIO()
+        with mock.patch.object(bd, "TEMPLATE_PATH", big), contextlib.redirect_stderr(buf):
+            rc = bd.main(base(out))
         self.assertEqual(rc, 1)
-        self.assertIn("256 KB", err)
+        self.assertIn("256 KB", buf.getvalue())
         self.assertFalse(os.path.exists(os.path.join(out, "index.json")))
         self.assertFalse(os.path.exists(os.path.join(out, "batch.json")))
+
+    def test_template_arg_removed(self):
+        out = os.path.join(self.out, "o")
+        rc, _, err = run(base(out) + ["--template", TEMPLATE])
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(out))
+        with open(SCRIPT, encoding="utf-8") as f:
+            self.assertIsNone(re.search(r'add_argument\(\s*"--template"', f.read()))
 
     def test_t7_boundary(self):
         overhead = bd.doc_bytes({"text": ""})
@@ -276,7 +290,8 @@ class ValidationTests(unittest.TestCase):
         self.fails(base(self.out, (big,)))
 
     def test_t13_no_network_imports(self):
-        src = open(SCRIPT, encoding="utf-8").read()
+        with open(SCRIPT, encoding="utf-8") as f:
+            src = f.read()
         for m in ("subprocess", "urllib", "socket", "http"):
             self.assertIsNone(re.search(r"^\s*(import|from)\s+%s\b" % m, src, re.M), m)
 
@@ -298,7 +313,8 @@ class CommonParityTest(unittest.TestCase):
                          inspect.getsource(cm.atomic_write_json))
 
     def test_does_not_import_common(self):
-        src = open(SCRIPT, encoding="utf-8").read()
+        with open(SCRIPT, encoding="utf-8") as f:
+            src = f.read()
         self.assertIsNone(re.search(r"^\s*(import|from)\s+_common\b", src, re.M))
 
 

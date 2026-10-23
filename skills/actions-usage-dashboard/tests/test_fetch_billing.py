@@ -9,6 +9,7 @@ fixture はすべて合成データ（org は acme-synth）。本リポは PUBLI
 非公開リポ名や金額を入れない。
 """
 import json
+from datetime import datetime, timezone
 import os
 import subprocess
 import sys
@@ -295,12 +296,16 @@ class CliStubTest(unittest.TestCase):
 
     def calls(self):
         p = os.path.join(self.stub_dir, "calls.log")
-        return open(p).read().splitlines() if os.path.exists(p) else []
+        if not os.path.exists(p):
+            return []
+        with open(p) as f:
+            return f.read().splitlines()
 
     def test_success(self):
         r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-09", "--out", self.out)
         self.assertEqual(r.returncode, 0, r.stderr)
-        data = json.load(open(self.out))
+        with open(self.out) as f:
+            data = json.load(f)
         self.assertEqual(data["schema_version"], 1)
         self.assertEqual(data["source"], "billing")
         rows, _ = fb.build_rows(PAYLOADS, VISIBILITY, ORG)
@@ -323,7 +328,8 @@ class CliStubTest(unittest.TestCase):
         r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-09", "--out", self.out,
                          fail_month="2026-09")
         self.assertNotEqual(r.returncode, 0)
-        self.assertEqual(open(self.out, "rb").read(), b"previous\n")
+        with open(self.out, "rb") as f:
+            self.assertEqual(f.read(), b"previous\n")
         self.assertEqual(os.listdir(self.work), ["billing.json"])
 
     def test_long_range_stdout_within_10_lines(self):
@@ -347,6 +353,28 @@ class CliStubTest(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0, args)
         self.assertEqual(self.calls(), [])
         self.assertEqual(os.listdir(self.work), [])
+
+
+class PeriodLimitTests(CliStubTest):
+    def test_over_max_months_never_calls_gh(self):
+        r = self.run_cli("--org", ORG, "--since", "0001-01", "--out", self.out)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("24", r.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(os.listdir(self.work), [])
+
+    def test_boundary_24_and_25_months(self):
+        now = datetime.now(timezone.utc)
+        idx = now.year * 12 + now.month - 1
+
+        def ym(back):
+            i = idx - back
+            return "%04d-%02d" % (i // 12, i % 12 + 1)
+        r = self.run_cli("--org", ORG, "--since", ym(25), "--out", self.out)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.calls(), [])
+        r = self.run_cli("--org", ORG, "--since", ym(23), "--out", self.out)
+        self.assertNotIn("最大 24", r.stderr)
 
 
 class SharedCommonTest(unittest.TestCase):

@@ -406,6 +406,33 @@ class CliTests(Base):
         self.assertNotIn("\x1b", r.stdout)
 
 
+class Hardening145Tests(Base):
+    def test_plan_warning_is_sanitized(self):
+        bindir = os.path.join(self.td.name, "bin")
+        os.makedirs(bindir)
+        p = os.path.join(bindir, "gh")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\nprintf '\\033]0;x\\007\\033[2J\\302\\233evil\\n' >&2\nexit 1\n")
+        os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
+        for extra in ([], ["--json"]):
+            r = self.run_cli(self.files() + extra, bindir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("プラン取得に失敗", r.stdout)
+            for ch in ("\x1b", "\x07", "\x9b"):
+                self.assertNotIn(ch, r.stdout)
+
+    def test_rows_over_8mb_rejected(self):
+        p = os.path.join(self.td.name, "big.json")
+        with open(p, "w") as f:
+            f.write(json.dumps(doc("billing", [])))
+            f.write(" " * (8 * 1024 * 1024))
+        bindir, log = self.fake_gh()
+        r = self.run_cli(["--rows", p], bindir)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("8 MB", r.stderr)
+        self.assertFalse(os.path.exists(log))
+
+
 class SharedCommonTest(unittest.TestCase):
     """helper の定義が scripts/_common.py の 1 か所であることを固定する（Issue #141）。"""
 
