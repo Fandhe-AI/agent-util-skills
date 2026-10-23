@@ -197,3 +197,32 @@ test('ページ側の配線: unknown で残量不明・ゼロ補完・jobs 未�
   assert.match(HTML, /cov\.jobsConnected/)
   assert.match(HTML, /取得済み期間に該当行がないとき/)
 })
+
+test('P1 利用ゼロの月も取得期間から選択でき、latest は取得済みの最新月に解決される', () => {
+  const src = { since: '2026-09', until: '2026-11', rows: [] }
+  assert.deepEqual(plain(U.months(facts, [src])), ['2026-09', '2026-10', '2026-11'])
+  assert.equal(U.resolvePeriod('latest', facts, [src]), '2026-11')
+  assert.equal(U.resolvePeriod('latest', facts), '2026-10')
+  assert.equal(U.coverage(src, '2026-11', '2026-11-05'), 'full')
+})
+
+test('P1 区分不明を含む群は枠消費が下限値として扱われる', () => {
+  const unk = axisRows.filter((r) => r.axis === 'charge_class' && r.group === 'unknown' && r.period === '*' && r.repo === '*' && r.runner_type === '*')
+  assert.equal(unk.length, 1)
+  near(unk[0].unknown_minutes, 55)
+  const m = plain(U.daily(facts, { period: '*', group_by: 'charge_class', include_free: false }))
+  assert.equal(m.lowerBound, true)
+  assert.equal(m.groups.find((g) => g.id === 'unknown').lower, true)
+  assert.equal(plain(U.daily(facts, { period: '*', group_by: 'charge_class', include_free: true })).lowerBound, false)
+})
+
+test('全期間の照合は当日で上限を切る（月末まで広がった billing と今日までの jobs）', () => {
+  const b = { since: '2026-10', until: '2026-10', rows: [] }
+  const j = { since: '2026-10-01', until: '2026-10-20', rows: [] }
+  assert.equal(U.coverage(j, '*', '2026-10-20', b), 'full')
+  assert.equal(U.coverage(b, '*', '2026-10-20', j), 'full')
+})
+
+test('paintTotals のゼロ補完は準備完了時だけ行う', () => {
+  assert.match(HTML, /if \(ready && !row && cov\.billing/)
+})
