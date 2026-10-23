@@ -284,4 +284,4 @@ PUT し直す。PUT は `GET` した ruleset JSON の `required_status_checks` �
 - `./verification.md` — ruleset 変更後の確認（実測して証拠を示す）
 - `./security.md` — bypass 経路・認証境界の観点
 - `.agents/skills/implement-issue-tree/references/automerge-design.md` — G0 の全判定と設計根拠
-- `setup-repo-guards`（upstream の Fandhe-AI/agent-cli-skills のスキル。このリポジトリには未導入）— ruleset の初期構築手順
+- `.agents/skills/setup-repo-guards/SKILL.md`（vendored スキル。Fandhe-AI/agent-cli-skills 由来）— ruleset の初期構築手順

@@ -133,6 +133,12 @@
       "skillPath": "skills/project-view-status/SKILL.md",
       "computedHash": "19eb635a2b4efb52374c1eeeaef56c91d26ee2ea8ef90063fce4de6844d2e3d2"
     },
+    "setup-repo-guards": {
+      "source": "Fandhe-AI/agent-cli-skills",
+      "sourceType": "github",
+      "skillPath": "skills/setup-repo-guards/SKILL.md",
+      "computedHash": "2c6133e96db0e01328554ca2f1450ef29161eacc8272cc1c0b5e083d1a554f82"
+    },
     "sync-skills-lock": {
       "source": "Fandhe-AI/agent-cli-skills",
       "sourceType": "github",
