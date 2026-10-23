@@ -185,6 +185,14 @@ class WarningAndMissingBillingTests(Base):
                            capture_output=True, text=True)
         self.assertTrue(any("1,000 件上限" in w for w in json.loads(r.stdout)["warnings"]))
 
+    def test_long_source_warning_keeps_trailing_identifiers(self):
+        d = doc("jobs", JOBS)
+        tail = "acme-synth/some-repo 2026-10-20"
+        d["warnings"] = ["取得上限で欠けた可能性: " + "x" * 100 + " " + tail + "\x1b[31m"]
+        _, _, _, ws = sm.load_rows([self.write("j.json", d)])
+        self.assertIn(tail, ws[0])
+        self.assertNotIn("\x1b", ws[0])
+
     def test_bad_warnings_rejected(self):
         d = doc("billing", BILLING)
         d["warnings"] = "x"
@@ -244,10 +252,21 @@ class CoverageTests(Base):
                                   ("jobs", "2026-10", "2026-10-20"), ("jobs", "2026-10-20", "2026-10-01")):
             with self.assertRaises(sm.FetchError):
                 sm.load_rows([self.write("x.json", doc(src, [], since=since, until=until))])
+        for since, until in (("2026-99-01", "2026-10-31"), ("2026-02-31", "2026-10-31"),
+                             ("2026-09-01", "2026-10-32")):
+            with self.assertRaises(sm.FetchError):
+                sm.load_rows([self.write("z.json", doc("jobs", [], since=since, until=until))])
         d = doc("billing", [])
         del d["since"]
         with self.assertRaises(sm.FetchError):
             sm.load_rows([self.write("y.json", d)])
+
+
+class DayValidationTests(Base):
+    def test_impossible_row_day_rejected(self):
+        for day in ("2026-99-01", "2026-02-31"):
+            with self.assertRaises(sm.FetchError):
+                sm.load_rows([self.write("d.json", doc("billing", [row(day, "r", "paid", 1.0)]))])
 
 
 class CliTests(Base):

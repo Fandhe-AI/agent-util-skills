@@ -28,7 +28,7 @@ import math
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 SCHEMA_VERSION = 1
 GH_TIMEOUT = 120
@@ -42,6 +42,7 @@ CHARGE_CLASSES = {"paid", "included", "public_free", "unknown", "self_hosted"}
 GROUP_KEYS = ("charge_class", "repo", "runner_type", "visibility")
 DEFAULT_TOP = 5
 MAX_NAME_LEN = 60
+MAX_WARNING_LEN = 500
 MAX_SRC_WARNINGS = 5
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
@@ -73,10 +74,25 @@ def gh_api(args):
     return r.stdout
 
 
-def safe(s):
-    """端末への制御文字注入を防ぐため、制御文字を除去し長い名前を切り詰める。"""
+def safe(s, limit=MAX_NAME_LEN):
+    """端末への制御文字注入を防ぐため、制御文字を除去し長い文字列を切り詰める。
+
+    名前用の既定 60 文字は取得元の警告には短く、末尾の識別情報（org・repo・日付）が欠けるため、
+    警告は limit に MAX_WARNING_LEN を渡して呼ぶ。
+    """
     s = CTRL_RE.sub("?", str(s))
-    return s if len(s) <= MAX_NAME_LEN else s[:MAX_NAME_LEN - 1] + "…"
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def valid_day(v):
+    """YYYY-MM-DD 形式かつ暦上存在する日付か（2026-02-31 や 2026-99-01 は偽）。"""
+    if not isinstance(v, str) or not DAY_RE.match(v):
+        return False
+    try:
+        date.fromisoformat(v)
+    except ValueError:
+        return False
+    return True
 
 
 def _coverage(src, data, p):
@@ -92,7 +108,7 @@ def _coverage(src, data, p):
         first = since + "-01"
         last = "%s-%02d" % (until, calendar.monthrange(int(mu.group(1)), int(mu.group(2)))[1])
     else:
-        if not all(isinstance(v, str) and DAY_RE.match(v) for v in (since, until)):
+        if not all(valid_day(v) for v in (since, until)):
             raise FetchError("rows の since / until が YYYY-MM-DD 形式ではない: %s" % safe(p))
         first, last = since, until
     if first > last:
@@ -140,7 +156,7 @@ def load_rows(paths):
         ws = data.get("warnings", [])
         if not isinstance(ws, list) or not all(isinstance(w, str) for w in ws):
             raise FetchError("rows の warnings が文字列の配列ではない: %s" % safe(p))
-        warnings.extend("取得元(%s): %s" % (src, safe(w)) for w in ws[:MAX_SRC_WARNINGS])
+        warnings.extend("取得元(%s): %s" % (src, safe(w, MAX_WARNING_LEN)) for w in ws[:MAX_SRC_WARNINGS])
         if len(ws) > MAX_SRC_WARNINGS:
             warnings.append("取得元(%s): 警告が他 %d 件ある" % (src, len(ws) - MAX_SRC_WARNINGS))
         rs = data.get("rows")
@@ -150,7 +166,7 @@ def load_rows(paths):
             if not isinstance(r, dict):
                 raise FetchError("rows の要素が不正")
             day = r.get("day")
-            if not isinstance(day, str) or not DAY_RE.match(day):
+            if not valid_day(day):
                 raise FetchError("rows の day が不正")
             if r.get("charge_class") not in CHARGE_CLASSES:
                 raise FetchError("rows の charge_class が不正")
