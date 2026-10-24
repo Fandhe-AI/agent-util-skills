@@ -15,6 +15,7 @@
 プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
   gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
   プラン名は API 由来の非信頼文字列のため、出力前に safe() で無害化する（テキスト・JSON 共通）。
+  group_by.top[].key と candidates.top[].repo は JSON では制御文字の置換だけを行い切り詰めない（一意性を保つため、#170）。
 
 helper の共有: FetchError / gh_api / ORG_RE / MONTH_RE は _common.py から import する（定義は 1 か所）。
   safe / CTRL_RE は本スクリプトが正典で、build_dashboard.py が複製している（一致は tests/test_build_dashboard.py が検査）。
@@ -70,6 +71,17 @@ def safe(s, limit=MAX_NAME_LEN):
     """
     s = CTRL_RE.sub("?", str(s))
     return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def strip_ctrl(s):
+    """JSON の集計キー用に、制御文字（C0・DEL・C1）だけを ? へ置換する。切り詰めない（Issue #170）。
+
+    json.dumps は DEL・C1 を生で出すため、端末へ出す経路で制御シーケンス注入になる。safe() と同じ
+    CTRL_RE・置換文字を使う。切り詰めると先頭が同じ別リポジトリが同一文字列になり JSON を読む側が
+    特定できなくなるため、長さの制限は入力側（MAX_ROWS_BYTES）とテキスト表示時の safe() に任せる。
+    呼び出しは出力 dict を組み立てる箇所に限る（集計は生キーで行う）。
+    """
+    return CTRL_RE.sub("?", str(s))
 
 
 def valid_day(v):
@@ -240,7 +252,9 @@ def group_top(rows, key, top):
         a[1] += r["net_usd"]
     ordered = sorted(acc.items(), key=lambda kv: (-kv[1][0], kv[0]))
     return {"key": key,
-            "top": [{"key": k, "minutes": _r(v[0]), "net_usd": _r(v[1])} for k, v in ordered[:top]],
+            # 無害化は出力時だけ。集計・並び順は生キーのため、制御文字の位置だけが違う 2 キーは
+            # 合算されず、同じ表示文字列のエントリが別々に出得る（#170）。
+            "top": [{"key": strip_ctrl(k), "minutes": _r(v[0]), "net_usd": _r(v[1])} for k, v in ordered[:top]],
             "others": max(len(ordered) - top, 0)}
 
 
@@ -268,7 +282,8 @@ def candidates(month_rows, all_rows, top):
     rest = sorted([x for x in live if x[1]["paid"] <= 0],
                   key=lambda x: (-x[1]["quota"], -x[1]["inc"], x[0]))
     ordered = paid + rest
-    return {"top": [{"repo": repo, "paid_minutes": _r(a["paid"]), "net_usd": _r(a["usd"]),
+    # repo は出力時だけ無害化する。last の引き当ては生キーのまま（#170）。
+    return {"top": [{"repo": strip_ctrl(repo), "paid_minutes": _r(a["paid"]), "net_usd": _r(a["usd"]),
                      "included_minutes": _r(a["inc"]), "quota_minutes": _r(a["quota"]),
                      "last_used": last.get(repo)} for repo, a in ordered[:top]],
             "others": max(len(ordered) - top, 0)}
