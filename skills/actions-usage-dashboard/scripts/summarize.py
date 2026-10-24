@@ -15,10 +15,11 @@
 プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
   gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
   プラン名は API 由来の非信頼文字列のため、出力前に safe() で無害化する（テキスト・JSON 共通）。
+  group_by.top[].key と candidates.top[].repo は JSON では制御文字の置換だけを行い切り詰めない（一意性を保つため、#170）。
 
-helper の共有: FetchError / gh_api / ORG_RE / MONTH_RE は _common.py から import する（定義は 1 か所）。
+helper の共有: FetchError / gh_api / nonneg_num / ORG_RE / MONTH_RE / DAY_RE / MAX_ROWS_BYTES は _common.py から import する（定義は 1 か所）。
   safe / CTRL_RE は本スクリプトが正典で、build_dashboard.py が複製している（一致は tests/test_build_dashboard.py が検査）。
-  _num は判定を同じにし、例外メッセージだけ入力の違いに合わせて変えている（API ではなく rows）。DAY_RE は本スクリプト固有。
+  nonneg_num は origin="rows" を渡し、例外メッセージの入力元表記だけを API から変えている。
   検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
@@ -26,7 +27,6 @@ helper の共有: FetchError / gh_api / ORG_RE / MONTH_RE は _common.py から 
 import argparse
 import calendar
 import json
-import math
 import os
 import re
 import sys
@@ -35,10 +35,11 @@ from datetime import date, datetime, timezone
 # `-I`（隔離モード）では起動スクリプトのディレクトリが sys.path に入らないため、自分で足す。
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from _common import MONTH_RE, ORG_RE, FetchError, gh_api  # noqa: E402
+from _common import (  # noqa: E402
+    DAY_RE, MAX_ROWS_BYTES, MONTH_RE, ORG_RE, FetchError, gh_api, nonneg_num,
+)
 
 SCHEMA_VERSION = 1
-DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 # プランごとの月間含有分（Linux 換算の分）。別名は同じ定数ブロックで持つ。
 PLAN_INCLUDED_MINUTES = {"free": 2000, "team": 3000, "enterprise": 50000}
 PLAN_ALIASES = {"business": "enterprise"}
@@ -48,18 +49,7 @@ DEFAULT_TOP = 5
 MAX_NAME_LEN = 60
 MAX_WARNING_LEN = 500
 MAX_SRC_WARNINGS = 5
-# rows 入力の上限。build_dashboard.py の MAX_ROWS_BYTES と同値（変えるときは両方を揃える）。
-MAX_ROWS_BYTES = 8 * 1024 * 1024
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
-def _num(item, key, required=True):
-    v = item.get(key)
-    if v is None and not required:
-        return 0.0
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
-        raise FetchError("rows の数値フィールド %s が不正（有限の非負数ではない）" % key)
-    return float(v)
 
 
 def safe(s, limit=MAX_NAME_LEN):
@@ -70,6 +60,17 @@ def safe(s, limit=MAX_NAME_LEN):
     """
     s = CTRL_RE.sub("?", str(s))
     return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def strip_ctrl(s):
+    """JSON の集計キー用に、制御文字（C0・DEL・C1）だけを ? へ置換する。切り詰めない（Issue #170）。
+
+    json.dumps は DEL・C1 を生で出すため、端末へ出す経路で制御シーケンス注入になる。safe() と同じ
+    CTRL_RE・置換文字を使う。切り詰めると先頭が同じ別リポジトリが同一文字列になり JSON を読む側が
+    特定できなくなるため、長さの制限は入力側（MAX_ROWS_BYTES）とテキスト表示時の safe() に任せる。
+    呼び出しは出力 dict を組み立てる箇所に限る（集計は生キーで行う）。
+    """
+    return CTRL_RE.sub("?", str(s))
 
 
 def valid_day(v):
@@ -171,8 +172,9 @@ def load_rows(paths):
             rows.append({
                 "day": day, "repo": r["repo"], "visibility": r["visibility"],
                 "runner_type": r["runner_type"], "charge_class": r["charge_class"],
-                "minutes": _num(r, "minutes"), "quota_minutes": _num(r, "quota_minutes", False),
-                "net_usd": _num(r, "net_usd", False),
+                "minutes": nonneg_num(r, "minutes", origin="rows"),
+                "quota_minutes": nonneg_num(r, "quota_minutes", False, origin="rows"),
+                "net_usd": nonneg_num(r, "net_usd", False, origin="rows"),
             })
     return org, rows, sources, warnings
 
@@ -240,7 +242,9 @@ def group_top(rows, key, top):
         a[1] += r["net_usd"]
     ordered = sorted(acc.items(), key=lambda kv: (-kv[1][0], kv[0]))
     return {"key": key,
-            "top": [{"key": k, "minutes": _r(v[0]), "net_usd": _r(v[1])} for k, v in ordered[:top]],
+            # 無害化は出力時だけ。集計・並び順は生キーのため、制御文字の位置だけが違う 2 キーは
+            # 合算されず、同じ表示文字列のエントリが別々に出得る（#170）。
+            "top": [{"key": strip_ctrl(k), "minutes": _r(v[0]), "net_usd": _r(v[1])} for k, v in ordered[:top]],
             "others": max(len(ordered) - top, 0)}
 
 
@@ -268,7 +272,8 @@ def candidates(month_rows, all_rows, top):
     rest = sorted([x for x in live if x[1]["paid"] <= 0],
                   key=lambda x: (-x[1]["quota"], -x[1]["inc"], x[0]))
     ordered = paid + rest
-    return {"top": [{"repo": repo, "paid_minutes": _r(a["paid"]), "net_usd": _r(a["usd"]),
+    # repo は出力時だけ無害化する。last の引き当ては生キーのまま（#170）。
+    return {"top": [{"repo": strip_ctrl(repo), "paid_minutes": _r(a["paid"]), "net_usd": _r(a["usd"]),
                      "included_minutes": _r(a["inc"]), "quota_minutes": _r(a["quota"]),
                      "last_used": last.get(repo)} for repo, a in ordered[:top]],
             "others": max(len(ordered) - top, 0)}

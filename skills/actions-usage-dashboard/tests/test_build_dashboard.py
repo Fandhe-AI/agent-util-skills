@@ -357,7 +357,7 @@ class ValidationTests(unittest.TestCase):
 
 class CommonParityTest(unittest.TestCase):
     """build_dashboard.py は _common.py を import せず複製する（ネットワーク非依存の保証を守るため）。
-    複製が正典の _common.py と乖離しないことをここで固定する（Issue #141）。"""
+    複製が正典の _common.py と乖離しないことをここで固定する（Issue #141・#171）。"""
 
     def test_copies_match_common(self):
         import importlib.util
@@ -368,6 +368,9 @@ class CommonParityTest(unittest.TestCase):
         spec.loader.exec_module(cm)
         self.assertEqual(bd.ORG_RE.pattern, cm.ORG_RE.pattern)
         self.assertEqual(bd.ORG_RE.flags, cm.ORG_RE.flags)
+        self.assertEqual(bd.ISO_RE.pattern, cm.ISO_RE.pattern)
+        self.assertEqual(bd.ISO_RE.flags, cm.ISO_RE.flags)
+        self.assertEqual(bd.MAX_ROWS_BYTES, cm.MAX_ROWS_BYTES)
         self.assertEqual(inspect.getsource(bd.atomic_write_json),
                          inspect.getsource(cm.atomic_write_json))
 
