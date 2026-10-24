@@ -484,6 +484,67 @@ class PlanNameSanitizeTests(Base):
         return bindir
 
 
+class RowsStringSanitizeTests(Base):
+    """Issue #170: group_by.top[].key / candidates.top[].repo を JSON でも無害化する。"""
+
+    DIRTY = "ev\x1b[2Jil\u009bx\x7fy\u0085z"
+    CLEAN = "ev?[2Jil?x?y?z"
+    BAD = ("\x1b", "\x7f", "\x9b", "\x85")
+
+    def run_both(self, rows, group_by):
+        args = self.files(rows, None) + ["--plan", "team", "--month", "2026-10",
+                                         "--group-by", group_by]
+        outs = []
+        for extra in ([], ["--json"]):
+            r = self.run_cli(args + extra)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for ch in self.BAD:
+                self.assertNotIn(ch, r.stdout)
+            outs.append(r.stdout)
+        return outs[0], json.loads(outs[1])
+
+    def test_repo_group_and_candidates_sanitized_text_and_json(self):
+        rows = [row("2026-10-01", self.DIRTY, "paid", 5, usd=1),
+                row("2026-10-02", "clean-repo", "paid", 3, usd=0.5)]
+        _text, d = self.run_both(rows, "repo")
+        keys = [e["key"] for e in d["group_by"]["top"]]
+        repos = [e["repo"] for e in d["candidates"]["top"]]
+        for v in keys + repos:
+            self.assertIsNone(sm.CTRL_RE.search(v))
+        self.assertIn(self.CLEAN, keys)
+        self.assertIn(self.CLEAN, repos)
+
+    def test_runner_type_and_visibility_keys_sanitized(self):
+        rows = [row("2026-10-01", "r1", "paid", 5, usd=1, rt=self.DIRTY),
+                row("2026-10-02", "r2", "paid", 4, usd=1, vis=self.DIRTY)]
+        for gb, want in (("runner_type", self.CLEAN), ("visibility", self.CLEAN)):
+            _text, d = self.run_both(rows, gb)
+            keys = [e["key"] for e in d["group_by"]["top"]]
+            self.assertIn(want, keys)
+            for k in keys:
+                self.assertIsNone(sm.CTRL_RE.search(k))
+
+    def test_aggregation_uses_raw_keys(self):
+        rows = [row("2026-10-01", "dup\x01", "paid", 5, usd=1),
+                row("2026-10-03", "dup\x02", "paid", 7, usd=2),
+                row("2026-10-04", self.DIRTY, "paid", 1, usd=0.1)]
+        _text, d = self.run_both(rows, "repo")
+        self.assertEqual(sorted(e["minutes"] for e in d["group_by"]["top"]
+                                if e["key"] == "dup?"), [5.0, 7.0])
+        self.assertEqual(len([e for e in d["candidates"]["top"] if e["repo"] == "dup?"]), 2)
+        dirty = [e for e in d["candidates"]["top"] if e["repo"] == self.CLEAN]
+        self.assertEqual(dirty[0]["last_used"], "2026-10-04")
+
+    def test_long_repo_not_truncated_in_json(self):
+        name = "a" * 100
+        rows = [row("2026-10-01", name, "paid", 5, usd=1)]
+        text, d = self.run_both(rows, "repo")
+        self.assertEqual(d["candidates"]["top"][0]["repo"], name)
+        self.assertEqual(d["group_by"]["top"][0]["key"], name)
+        self.assertNotIn(name, text)
+        self.assertIn("…", text)
+
+
 class SharedCommonTest(unittest.TestCase):
     """helper の定義が scripts/_common.py の 1 か所であることを固定する（Issue #141）。"""
 
