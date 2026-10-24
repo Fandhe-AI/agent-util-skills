@@ -26,7 +26,7 @@ tools:
 
 | 区分 | パス・コマンド |
 |------|---------------|
-| 実行対象（Node） | `skills/*/tests/*.test.mjs`（`node --test`） |
+| 実行対象（Node） | `skills/*/tests/**/*.test.mjs`（tests 直下とその下の全サブディレクトリ。CI の `skill-tests` と同じ集合。`node --test` にクォートして渡し node に展開させる） |
 | 実行対象（Python） | `skills/*/tests/test_*.py`（`python3 -I -B -m unittest discover`。tests ディレクトリごとに実行） |
 | 読み取りのみ | `skills/**`（テストの所在確認・失敗箇所の読解） |
 | 変更禁止 | 全ファイル（Edit / Write は tools に含めない。Bash でのファイル変更も禁止） |
@@ -38,7 +38,7 @@ Bash はテスト実行と所在確認・ログ読取の診断目的のみに使
 | 用途 | 許可コマンド |
 |------|-------------|
 | テスト実行 | `node --test`、`python3 -I -B -m unittest` |
-| 所在確認・状態確認 | `ls`、`find`、`git status`、`git log` |
+| 所在確認・状態確認 | `ls`、`find`、`sort`（`find` の出力を整列するパイプ用途のみ）、`git status`、`git log` |
 | ログ用ディレクトリの作成 | `mktemp`（`mktemp -d` のみ） |
 | ログ読取 | `grep`、`tail`、`cat` |
 | 終了コード・ログ所在の表示 | `echo`（シェル組み込み。`echo "<ラベル> exit=$?"` 形と `echo "LOGDIR=${LOGDIR}"` のみ） |
@@ -71,9 +71,13 @@ Bash はテスト実行と所在確認・ログ読取の診断目的のみに使
 存在しないテストを列挙・実行しない。実行前に Glob で実在を確認する。
 
 ```bash
-ls skills/*/tests/*.test.mjs
+find skills/*/tests -type f -name '*.test.mjs' -not -path '*/.*' | sort
 ls skills/*/tests/test_*.py
 ```
+
+Node 側の `find` は CI の `shopt -s globstar` による展開と同じ集合になる（`-not -path '*/.*'` でドット始まりのファイル・ディレクトリを除く）。
+Node テストが 0 件のときは Step 2 に進まず、「実行対象なし」として中断し報告する
+（`node --test` は 1 件もマッチしなくても終了コード 0 になるため。CI の `failglob` の代わりに fail-closed を保つ）。
 
 実在するファイルは上の `ls` の出力をそのまま報告に列挙する（本文に固定の在庫一覧を書かない）。
 Python テストを実行する tests ディレクトリの集合も、この出力から決める。
@@ -90,7 +94,7 @@ Bash 呼び出しごとにシェル変数は引き継がれないため、ディ
 
 ```bash
 LOGDIR="$(mktemp -d)"
-node --test skills/*/tests/*.test.mjs > "${LOGDIR}/node-test.log" 2>&1
+node --test 'skills/*/tests/**/*.test.mjs' > "${LOGDIR}/node-test.log" 2>&1
 echo "node exit=$?"
 python3 -I -B -m unittest discover -s skills/setup-github-pages/tests -p 'test_*.py' > "${LOGDIR}/py-setup-github-pages.log" 2>&1
 echo "py setup-github-pages exit=$?"
@@ -113,12 +117,14 @@ Step 1 の出力に上記以外のディレクトリが現れた場合は、同�
 - Node 側のブリッジテスト（`setup-github-pages` の `rebrand.test.mjs`、`actions-usage-dashboard` の
   `build-dashboard` / `fetch-billing` / `fetch-jobs` / `summarize`）は、対応する Python テストを内部で実行するため、
   Node と Python の結果は一部重複する。
+- Node の glob はシングルクォートで node に渡す。シェル（zsh・bash 3.2・globstar 無効の bash）に展開させると、
+  集合が CI とずれるか、エラーで止まる。node 側の glob 展開は Node 21 以上が前提。
 - 一部だけの実行を依頼された場合は、該当ファイルのみ `node --test <path>` で実行してよい。
 
 ### Step 3: 出力全体を読む
 
 ログの末尾（`ℹ tests / pass / fail`、`Ran N tests` / `OK` / `FAILED`）、警告、失敗テスト名を確認する。
-一部だけ読んで判断しない。Python のログはディレクトリごとに `Ran N tests` / `OK` / `FAILED` を確認する。
+一部だけ読んで判断しない。`ℹ tests 0` は「全件パス」ではなく、実行対象が見つからなかった失敗として報告する。Python のログはディレクトリごとに `Ran N tests` / `OK` / `FAILED` を確認する。
 
 Step 2 の最後に表示した `LOGDIR` の絶対パスを指定して読む。
 
@@ -148,6 +154,7 @@ git status --short
 
 - [ ] 信頼済みの作業ツリー（自分のブランチまたは `main`）であることを確認した
 - [ ] 許可コマンド以外（`git commit`・`gh`・`rm`・`curl` 等）とネットワーク接続を使っていない
+- [ ] Node の実行対象が CI と同じ集合（`skills/*/tests/**/*.test.mjs`）で、Step 1 で 1 件以上あることを確認した
 - [ ] 実行対象の実在を Step 1 で確認し、Python テストを含む全ディレクトリを実行した
 - [ ] 各コマンドを新規実行し、終了コードを取得した
 - [ ] 出力全体（件数・失敗・警告）を読んだ
@@ -163,7 +170,7 @@ git status --short
 ### 実行結果
 | 対象 | コマンド | 終了コード | 件数 | 失敗 |
 |------|---------|-----------|------|------|
-| Node | node --test skills/*/tests/*.test.mjs | <exit> | tests <N> / pass <N> | <fail> |
+| Node | node --test 'skills/*/tests/**/*.test.mjs' | <exit> | tests <N> / pass <N> | <fail> |
 | Python (<skill>) | python3 -I -B -m unittest discover -s skills/<skill>/tests -p 'test_*.py' | <exit> | Ran <N> tests | <fail> |
 
 ### 証拠（出力の引用）
