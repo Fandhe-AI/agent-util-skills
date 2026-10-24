@@ -25,11 +25,10 @@
   変わっていないと利用者が保証できる場合だけ --assume-current-visibility で現在値を採る。
 
 アクセス: gh api 経由のみ。トークンは扱わない。標準ライブラリだけで動く。
-helper の共有: FetchError / gh_api / atomic_write_json / ORG_RE / MONTH_RE / parse_concatenated_json は _common.py から import する。
+helper の共有: FetchError / nonneg_num / gh_api / atomic_write_json / ORG_RE / MONTH_RE / parse_concatenated_json は _common.py から import する。
 """
 import argparse
 import json
-import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -38,7 +37,8 @@ from datetime import datetime, timezone
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
-    MONTH_RE, ORG_RE, FetchError, atomic_write_json, gh_api, parse_concatenated_json,
+    MONTH_RE, ORG_RE, FetchError, atomic_write_json, gh_api, nonneg_num,
+    parse_concatenated_json,
 )
 
 SCHEMA_VERSION = 1
@@ -96,15 +96,6 @@ def normalize_repo(name, org):
     return name or UNATTRIBUTED
 
 
-def _num(item, key, required=True):
-    v = item.get(key)
-    if v is None and not required:
-        return 0.0
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
-        raise FetchError("API の数値フィールド %s が不正（有限の非負数ではない）" % key)
-    return float(v)
-
-
 def _day_of(date_str):
     if not isinstance(date_str, str):
         raise FetchError("API の date が文字列ではない")
@@ -134,9 +125,9 @@ def select_items(payload, month, org):
         sku = it.get("sku")
         if not isinstance(sku, str) or not sku:
             raise FetchError("%s: sku が不正" % month)
-        q, g = _num(it, "quantity"), _num(it, "grossAmount")
-        d, n = _num(it, "discountAmount", False), _num(it, "netAmount")
-        p = _num(it, "pricePerUnit")
+        q, g = nonneg_num(it, "quantity"), nonneg_num(it, "grossAmount")
+        d, n = nonneg_num(it, "discountAmount", False), nonneg_num(it, "netAmount")
+        p = nonneg_num(it, "pricePerUnit")
         key = (day.isoformat(), normalize_repo(it.get("repositoryName"), org), sku)
         u = units.setdefault(key, {"q": 0.0, "g": 0.0, "d": 0.0, "n": 0.0, "price": 0.0,
                                    "paid": 0.0, "gpaid": 0.0})

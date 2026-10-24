@@ -491,8 +491,14 @@ class SharedCommonTest(unittest.TestCase):
         import _common
         expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
         self.assertEqual(os.path.realpath(_common.__file__), expected)
-        for name in ('FetchError', 'ORG_RE', 'MONTH_RE', 'gh_api'):
+        for name in ('FetchError', 'ORG_RE', 'MONTH_RE', 'gh_api', 'DAY_RE',
+                     'MAX_ROWS_BYTES', 'nonneg_num'):
             self.assertIs(getattr(sm, name), getattr(_common, name), name)
+
+    def test_nonneg_num_rows_message(self):
+        with self.assertRaises(sm.FetchError) as cm:
+            sm.nonneg_num({"k": float("nan")}, "k", origin="rows")
+        self.assertIn("rows の数値フィールド k が不正（有限の非負数ではない）", str(cm.exception))
 
 
 if __name__ == "__main__":

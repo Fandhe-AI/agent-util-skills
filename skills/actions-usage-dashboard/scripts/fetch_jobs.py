@@ -59,7 +59,7 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
   キャッシュ済み履歴は集計に残す。
 
 helper の共有: gh_api / atomic_write_json / ORG_RE / FetchError は _common.py から import する
-  （定義は 1 か所）。parse_concatenated_json も _common.py から import する。REPO_RE / DATE_RE は本スクリプト固有。
+  （定義は 1 か所）。parse_concatenated_json も _common.py から import する。DAY_RE / ISO_RE も _common.py から import する。REPO_RE は本スクリプト固有。
   検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api 経由のみ（読み取り専用）。トークンは扱わない。標準ライブラリだけで動く。
@@ -77,14 +77,11 @@ from datetime import date, datetime, timedelta, timezone
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
-    ORG_RE, FetchError, atomic_write_json, gh_api, parse_concatenated_json,
+    DAY_RE, ISO_RE, ORG_RE, FetchError, atomic_write_json, gh_api, parse_concatenated_json,
 )
 
 SCHEMA_VERSION = 1
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
-# キャッシュの listing.listed_at の検証用（build_dashboard.py の ISO_RE と同じ形）。
-ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
 RUNS_SEARCH_CAP = 1000
@@ -147,7 +144,7 @@ def next_cursor_entry(items, settled, truncated_days, since, today):
             continue
         d = it.get("created_at", "")[:10]
         try:
-            if not DATE_RE.match(d):
+            if not DAY_RE.match(d):
                 raise ValueError
             cands.append(date.fromisoformat(d))
         except ValueError:
@@ -442,7 +439,7 @@ def load_cache(path, org):
                 raise bad
             for k in ("since", "from"):
                 v = ent.get(k)
-                if not isinstance(v, str) or not DATE_RE.match(v):
+                if not isinstance(v, str) or not DAY_RE.match(v):
                     raise bad
                 try:
                     date.fromisoformat(v)
@@ -456,7 +453,7 @@ def load_cache(path, org):
         for a in e["agg"]:
             m = a.get("minutes") if isinstance(a, dict) else None
             if not isinstance(a, dict) or not isinstance(a.get("runner_group"), str) \
-                    or not isinstance(a.get("day"), str) or not DATE_RE.match(a["day"]) \
+                    or not isinstance(a.get("day"), str) or not DAY_RE.match(a["day"]) \
                     or isinstance(m, bool) or not isinstance(m, (int, float)) \
                     or not math.isfinite(m) or m < 0:
                 raise bad
@@ -470,7 +467,7 @@ def load_cache(path, org):
 # ---- main ----
 
 def parse_since(s, today):
-    if not DATE_RE.match(s):
+    if not DAY_RE.match(s):
         raise FetchError("--since は YYYY-MM-DD 形式で指定する")
     try:
         d = date.fromisoformat(s)

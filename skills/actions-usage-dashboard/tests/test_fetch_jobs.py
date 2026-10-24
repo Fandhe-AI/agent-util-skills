@@ -124,7 +124,7 @@ class TrailingNewlineTest(unittest.TestCase):
     """Python の `$` は末尾の改行の手前にも一致する。検証用の正規表現は `\\Z` で終端する。"""
 
     def test_org_repo_date_reject_trailing_newline(self):
-        for name, ok in (("ORG_RE", "acme-synth"), ("REPO_RE", "repo.name_1"), ("DATE_RE", "2026-09-01")):
+        for name, ok in (("ORG_RE", "acme-synth"), ("REPO_RE", "repo.name_1"), ("DAY_RE", "2026-09-01")):
             rx = getattr(fj, name)
             self.assertIsNotNone(rx.match(ok), name)
             self.assertIsNone(rx.match(ok + "\n"), name)
@@ -688,8 +688,8 @@ class SharedCommonTest(unittest.TestCase):
         import _common
         expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
         self.assertEqual(os.path.realpath(_common.__file__), expected)
-        for name in ('FetchError', 'ORG_RE', 'gh_api', 'atomic_write_json',
-                     'parse_concatenated_json'):
+        for name in ('FetchError', 'ORG_RE', 'DAY_RE', 'ISO_RE', 'gh_api',
+                     'atomic_write_json', 'parse_concatenated_json'):
             self.assertIs(getattr(fj, name), getattr(_common, name), name)
 
     def test_parse_concatenated_json(self):

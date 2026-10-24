@@ -387,8 +387,14 @@ class SharedCommonTest(unittest.TestCase):
         expected = os.path.realpath(os.path.join(HERE, "..", "scripts", "_common.py"))
         self.assertEqual(os.path.realpath(_common.__file__), expected)
         for name in ('FetchError', 'ORG_RE', 'MONTH_RE', 'gh_api', 'atomic_write_json',
-                     'parse_concatenated_json'):
+                     'parse_concatenated_json', 'nonneg_num'):
             self.assertIs(getattr(fb, name), getattr(_common, name), name)
+
+    def test_nonneg_num_message_and_default(self):
+        with self.assertRaises(fb.FetchError) as cm:
+            fb.nonneg_num({"k": -1}, "k")
+        self.assertIn("API の数値フィールド k が不正（有限の非負数ではない）", str(cm.exception))
+        self.assertEqual(fb.nonneg_num({}, "k", False), 0.0)
 
 
 if __name__ == "__main__":
