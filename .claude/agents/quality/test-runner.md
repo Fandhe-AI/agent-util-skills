@@ -38,7 +38,7 @@ Bash はテスト実行と所在確認・ログ読取の診断目的のみに使
 | 用途 | 許可コマンド |
 |------|-------------|
 | テスト実行 | `node --test`、`python3 -I -B -m unittest` |
-| 所在確認・状態確認 | `ls`、`find`、`git status`、`git log` |
+| 所在確認・状態確認 | `ls`、`find`、`sort`（`find` の出力を整列するパイプ用途のみ）、`git status`、`git log` |
 | ログ用ディレクトリの作成 | `mktemp`（`mktemp -d` のみ） |
 | ログ読取 | `grep`、`tail`、`cat` |
 | 終了コード・ログ所在の表示 | `echo`（シェル組み込み。`echo "<ラベル> exit=$?"` 形と `echo "LOGDIR=${LOGDIR}"` のみ） |
