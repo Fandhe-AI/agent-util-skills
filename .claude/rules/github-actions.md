@@ -21,8 +21,8 @@ paths:
 
 - 現在 GitHub Actions のキャッシュは使っていない（0 件・0 B）。追加する場合はこの節に従う。
 - `ci.yml` の `structure` / `skill-tests` は GitHub ホステッドの `ubuntu-latest` で動く。
-  `skill-tests` は runner 同梱の Node で `node --test` を実行するだけで、依存のインストールも
-  ルートの lockfile も無い。
+  `skill-tests` は runner 同梱の Node で `node --test` を、同梱の Python 3 で
+  `unittest discover` を実行するだけで、依存のインストールもルートの lockfile も無い。
 - 呼び出している `Fandhe-AI/actions` の reusable workflow（`lint-docs.yml` / `ai-review.yml` /
   `update-external.yml`）も、確認時点（`Fandhe-AI/actions@3a41f93`）ではキャッシュを使っていない。
   `@latest` 参照のため変わり得る。
