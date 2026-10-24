@@ -51,8 +51,6 @@ MAX_SRC_WARNINGS = 5
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
-
-
 def safe(s, limit=MAX_NAME_LEN):
     """端末への制御文字注入を防ぐため、制御文字を除去し長い文字列を切り詰める。
 
