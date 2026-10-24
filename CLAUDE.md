@@ -31,12 +31,12 @@ skills/                               -- 本リポジトリが上流ソースと
     references/                       -- data-sources.md（API 項目と出力列の対応・有料分と含有枠の換算式・セルフホスト判定・権限・レート制限・終了コード）
     templates/                        -- dashboard/index.html（数値を持たない Dashboard 型ページ雛形。集計・グルーピング切替はページ内で行う）
     scripts/                          -- _common.py（fetch_billing / fetch_jobs / summarize 共通の gh_api・atomic_write_json・FetchError・nonneg_num・ORG_RE・MONTH_RE・DAY_RE・ISO_RE・MAX_ROWS_BYTES・parse_concatenated_json。build_dashboard は import せず ORG_RE・ISO_RE・MAX_ROWS_BYTES・atomic_write_json を複製し、safe・CTRL_RE は summarize が正典で複製、いずれもテストで一致検査）、fetch_billing.py（billing usage API → GitHub ホストランナーの日次行）、fetch_jobs.py（jobs API → セルフホストの日次行・増分キャッシュ）、summarize.py（ターミナル向け 20 行以内の要約・セルフホスト移行候補）、build_dashboard.py（Artifact 書き込み用 JSON・batch の一括生成）
-    tests/                            -- test_fetch_billing.py・test_fetch_jobs.py・test_summarize.py・test_build_dashboard.py（回帰テスト）、*.test.mjs（node:test。Python テストのブリッジと dashboard-template.test.mjs による雛形検証）、fixtures/dashboard/（合成データ）
+    tests/                            -- test_fetch_billing.py・test_fetch_jobs.py・test_summarize.py・test_build_dashboard.py（回帰テスト）、dashboard-template.test.mjs（node:test による雛形検証。Python テストは CI の skill-tests ジョブで直接実行）、fixtures/dashboard/（合成データ）
   setup-github-pages/
     references/                       -- site-format.md（nav.toml スキーマ・予約アセット名・Markdown 対応範囲）、scaffold-reference.md（scaffold 分類・競合・利用者区間）、maintenance.md（FF_REV 更新・上流改修追跡）、update-recovery.md（更新失敗時の復旧手順）
     templates/                        -- FF_REV・pages.yml・nav.toml・index.md・rust-toolchain.toml 雛形
     scripts/                          -- build-local.sh（固定 rev の匿名 cargo install → 生成 → 帰属表記の存在確認）、check_repo.sh（owner/repo 検証）、update-snapshot.sh（更新の記録・復旧）、check_site.py（検証）、scaffold.py（モード判定・配置・更新・競合差分）、_common.py（検証・無害化）
-    tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、rebrand.test.mjs（Node.js ブリッジ。名前は旧構成の名残）、test_rebrand.py（check_site・scaffold・verify_attribution・update-snapshot の回帰テスト。名前は旧構成の名残）、fixtures/
+    tests/                            -- rev-pin.test.mjs（FF_REV 固定・テンプレート整合検証）、test_rebrand.py（check_site・scaffold・verify_attribution・update-snapshot の回帰テスト。名前は旧構成の名残）、fixtures/
 .agents/skills/                       -- vendored スキル（消費専用。npx skills update で同期・直接編集しない）
   comment-code/ contribute-skill/ create-commit/ create-issue/ create-issue-tree/ create-plan/ create-pr/
   implement-issue/ implement-issue-tree/ implement-review/ implement-review-pr/ init-claude/
@@ -95,7 +95,7 @@ skills-lock.json                      -- vendored スキルの source・skillPat
   settings.json                       -- SessionStart hook（リマインダー）・PostToolUse hook（.sh 編集時 shellcheck）
 .github/
   workflows/
-    ci.yml                            -- スキル構造検証（structure）+ lint-docs
+    ci.yml                            -- スキル構造検証（structure）+ skill-tests（node:test と Python unittest）+ lint-docs
     ai-review.yml                     -- ai-review（provider: codex）による PR レビュー（Fandhe-AI/actions を @latest で呼び出す wrapper）
     update-external.yml               -- vendored スキルの日次同期（Fandhe-AI/actions の update-external.yml wrapper）
   scripts/

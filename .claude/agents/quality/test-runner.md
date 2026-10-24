@@ -114,11 +114,7 @@ Step 1 の出力に上記以外のディレクトリが現れた場合は、同�
   `ModuleNotFoundError` になる。必ず `discover -s <dir>` 形を使う。
 - `-I -B` で隔離・pycache 非生成にする（`-B` を外さない）。
 - 対象が増えると所要時間が延びるため、Bash の timeout は 600000ms を指定する。
-- Node 側のブリッジテスト（`setup-github-pages` の `rebrand.test.mjs`、`actions-usage-dashboard` の
-  `build-dashboard` / `fetch-billing` / `fetch-jobs` / `summarize`）は、対応する Python テストを内部で実行するため、
-  Node と Python の結果は一部重複する。
-- Node の glob はシングルクォートで node に渡す。シェル（zsh・bash 3.2・globstar 無効の bash）に展開させると、
-  集合が CI とずれるか、エラーで止まる。node 側の glob 展開は Node 21 以上が前提。
+- Python テストは Node のブリッジを持たない。必ず tests ディレクトリごとに discover で実行する。
 - 一部だけの実行を依頼された場合は、該当ファイルのみ `node --test <path>` で実行してよい。
 
 ### Step 3: 出力全体を読む

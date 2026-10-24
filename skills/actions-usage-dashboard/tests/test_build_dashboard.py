@@ -3,7 +3,7 @@
 
 役割: batch.json の形（ArtifactData batch の writes）、index.json の 256 KB 検査、
 --update が dataset の source と updated だけを変えること（jobs だけの更新を含む）、--add-dataset による新 dataset の set、入力検証の fail-closed を固定する。
-build-dashboard.test.mjs から `node --test` 経由で実行される。
+CI（ci.yml の skill-tests ジョブ）で `python3 -I -B -m unittest discover` により直接実行される。
 
 fixture は既存の合成データ（org は example-org）。本リポは PUBLIC のため実在の値を入れない。
 """

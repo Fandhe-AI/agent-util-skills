@@ -3,7 +3,7 @@
 
 役割: 内訳・group-by・移行候補・プラン解決・入力検証・20 行制約を固定する。
 CLI 経由のテストは偽 gh を PATH に置き、実ネットワークへ出ないことを保証する。
-summarize.test.mjs から `node --test` 経由で実行される。
+CI（ci.yml の skill-tests ジョブ）で `python3 -I -B -m unittest discover` により直接実行される。
 
 fixture はすべて合成データ（org は acme-synth）。本リポは PUBLIC のため、実在の
 非公開リポ名や金額を入れない。

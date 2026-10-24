@@ -3,7 +3,7 @@
 
 役割: 区分展開（paid / included / public_free）・quota 換算・runner_type の対応と、
 gh をスタブにした CLI 全体の挙動（月の取得失敗時に出力が作られないこと、標準出力が
-10 行以内であること）を固定する。fetch-billing.test.mjs から `node --test` 経由で実行される。
+10 行以内であること）を固定する。CI（ci.yml の skill-tests ジョブ）で `python3 -I -B -m unittest discover` により直接実行される。
 
 fixture はすべて合成データ（org は acme-synth）。本リポは PUBLIC のため、実在の
 非公開リポ名や金額を入れない。

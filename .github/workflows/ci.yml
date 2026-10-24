@@ -36,19 +36,23 @@ jobs:
         run: bash .github/scripts/check-skill-structure.sh
 
   # --------------------------------------------------
-  # skill-tests（各スキルの node:test 回帰テスト）
+  # skill-tests（各スキルの node:test 回帰テストと Python unittest）
   # --------------------------------------------------
-  # skills/*/tests/*.test.mjs を実行する。ubuntu-latest には Node.js が
+  # skills/*/tests/*.test.mjs を node:test で、skills/*/tests/test_*.py を
+  # unittest discover で実行する。ubuntu-latest には Node.js が
   # 同梱されるため setup-node の追加（新規 action の SHA 固定管理）は不要。
   # 対象: skills/setup-firebase-hosting/tests/version-pin.test.mjs（Issue
   # #393）・key-deletion-authority.test.mjs（Issue #3）等。手動実行前提
   # だったこれらのテストを CI で恒久実行する。
   skill-tests:
+    # 表示名は ruleset の required context に束縛されているため据え置く
+    # （変えると required が Expected のまま残り全 PR がマージ不能になる）。
+    # 名前は node:test だが Python の unittest もこのジョブで実行する。
     name: Skill tests (node:test)
     runs-on: ubuntu-latest
-    # 静的ファイル検査と、フェイク gcloud / gh / curl の shim で外部通信を
-    # 遮断した挙動テスト（key-deletion-authority）のみのため軽量。structure
-    # job と同じ 5 分打ち切りを踏襲する。
+    # node:test は静的ファイル検査と shim による挙動テストで軽量。Python の
+    # unittest（setup-github-pages が約 110 秒）を含め 5 分打ち切りで足りるかは
+    # PR の CI で実測し、3 分を超えたら引き上げる。
     timeout-minutes: 5
     permissions:
       contents: read
@@ -71,6 +75,48 @@ jobs:
         run: |
           shopt -s globstar failglob
           node --test skills/*/tests/**/*.test.mjs
+
+      - name: Run Python unittest
+        # node:test が失敗しても Python を実行する（ジョブ全体は失敗のまま）。
+        # ブリッジ（.test.mjs）経由をやめ discover で直接実行するため、失敗した
+        # テストケース名が CI ログにそのまま出て、test_*.py の登録漏れも起きない。
+        # ResourceWarning はファイルの閉じ忘れの回帰ガード（Issue #144）。
+        # 1 件もマッチしない場合・tests 直下以外の test_*.py（discover されない）
+        # はいずれも失敗にする（fail-closed）。setup-python は使わず runner 同梱の
+        # python3 を使う。
+        if: ${{ !cancelled() }}
+        run: |
+          set -u
+          shopt -s failglob
+          files=(skills/*/tests/test_*.py)
+          shopt -u failglob
+          shopt -s globstar nullglob
+          nested=(skills/*/tests/*/**/test_*.py)
+          if [ "${#nested[@]}" -gt 0 ]; then
+            printf '::error::tests 直下以外の test_*.py は discover されない: %s\n' "${nested[@]}"
+            exit 1
+          fi
+          python3 --version
+          mapfile -t dirs < <(printf '%s\n' "${files[@]%/*}" | sort -u)
+          failed=()
+          for d in "${dirs[@]}"; do
+            echo "::group::${d}"
+            err="$(mktemp "${RUNNER_TEMP}/unittest-stderr.XXXXXX")"
+            rc=0
+            python3 -I -B -m unittest discover -s "${d}" -t "${d}" -p 'test_*.py' -v 2> "${err}" || rc=$?
+            cat "${err}" >&2
+            if grep -q 'ResourceWarning' "${err}"; then
+              echo "::error::${d}: ResourceWarning を検出（ファイルを with で閉じる。Issue #144）"
+              rc=1
+            fi
+            rm -f -- "${err}"
+            echo "::endgroup::"
+            [ "${rc}" -eq 0 ] || failed+=("${d} (exit ${rc})")
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            printf '::error::Python unittest 失敗: %s\n' "${failed[@]}"
+            exit 1
+          fi
 
   # --------------------------------------------------
   # lint-docs（ドキュメント／設定ファイル系 lint）
