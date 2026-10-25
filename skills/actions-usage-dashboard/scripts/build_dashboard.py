@@ -29,8 +29,7 @@ batch.json にはローカルの絶対パスが入る。このファイル自体
 
 helper の複製: ORG_RE / ISO_RE / MAX_ROWS_BYTES / atomic_write_json / safe / CTRL_RE は複製である。「ネットワークに出ない」保証
   （subprocess を import しない）を守るため、_common.py も summarize.py も import しない。
-  ORG_RE / ISO_RE / MAX_ROWS_BYTES / atomic_write_json の正典は _common.py。safe / CTRL_RE の正典は summarize.py で、
-  既定長だけが意図した差（端末向けの名前は 60 字、ここはパスとエラー文を載せるため 300 字）。
+  6 つすべての正典は _common.py。safe の既定長だけが意図した差（端末向けの名前は 60 字、ここはパスとエラー文を載せるため 300 字）。
   一致と差は tests/test_build_dashboard.py が検査する。
   標準ライブラリだけで動く。
 """

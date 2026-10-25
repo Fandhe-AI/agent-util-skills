@@ -17,8 +17,8 @@
   プラン名は API 由来の非信頼文字列のため、出力前に safe() で無害化する（テキスト・JSON 共通）。
   group_by.top[].key と candidates.top[].repo は JSON では制御文字の置換だけを行い切り詰めない（一意性を保つため、#170）。
 
-helper の共有: FetchError / gh_api / nonneg_num / ORG_RE / MONTH_RE / DAY_RE / MAX_ROWS_BYTES は _common.py から import する（定義は 1 か所）。
-  safe / CTRL_RE は本スクリプトが正典で、build_dashboard.py が複製している（一致は tests/test_build_dashboard.py が検査）。
+helper の共有: FetchError / gh_api / nonneg_num / safe / CTRL_RE / MAX_NAME_LEN / ORG_RE / MONTH_RE / DAY_RE / MAX_ROWS_BYTES は
+  _common.py から import する（定義は 1 か所。build_dashboard.py の複製との一致は tests/test_build_dashboard.py が検査）。
   nonneg_num は origin="rows" を渡し、例外メッセージの入力元表記だけを API から変えている。
   検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
@@ -28,7 +28,6 @@ import argparse
 import calendar
 import json
 import os
-import re
 import sys
 from datetime import date, datetime, timezone
 
@@ -36,7 +35,7 @@ from datetime import date, datetime, timezone
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
-    DAY_RE, MAX_ROWS_BYTES, MONTH_RE, ORG_RE, FetchError, gh_api, nonneg_num,
+    CTRL_RE, DAY_RE, MAX_NAME_LEN, MAX_ROWS_BYTES, MONTH_RE, ORG_RE, FetchError, gh_api, nonneg_num, safe,
 )
 
 SCHEMA_VERSION = 1
@@ -46,20 +45,8 @@ PLAN_ALIASES = {"business": "enterprise"}
 CHARGE_CLASSES = {"paid", "included", "public_free", "unknown", "self_hosted"}
 GROUP_KEYS = ("charge_class", "repo", "runner_type", "visibility")
 DEFAULT_TOP = 5
-MAX_NAME_LEN = 60
 MAX_WARNING_LEN = 500
 MAX_SRC_WARNINGS = 5
-CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
-def safe(s, limit=MAX_NAME_LEN):
-    """端末への制御文字注入を防ぐため、制御文字を除去し長い文字列を切り詰める。
-
-    名前用の既定 60 文字は取得元の警告には短く、末尾の識別情報（org・repo・日付）が欠けるため、
-    警告は limit に MAX_WARNING_LEN を渡して呼ぶ。
-    """
-    s = CTRL_RE.sub("?", str(s))
-    return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
 def strip_ctrl(s):
