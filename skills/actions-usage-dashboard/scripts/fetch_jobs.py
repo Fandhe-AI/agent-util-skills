@@ -59,7 +59,9 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
   キャッシュ済み履歴は集計に残す。
 
 helper の共有: gh_api / atomic_write_json / ORG_RE / FetchError は _common.py から import する
-  （定義は 1 か所）。parse_concatenated_json も _common.py から import する。DAY_RE / ISO_RE も _common.py から import する。REPO_RE は本スクリプト固有。
+  （定義は 1 か所）。parse_concatenated_json・nonneg_num も _common.py から import する。
+  load_cache の agg[].minutes 検証は nonneg_num を使い、FetchError を「キャッシュが壊れている」へ包み直す
+  （受理・拒否する値と利用者向けエラー文は従来どおり。Issue #182）。DAY_RE / ISO_RE も _common.py から import する。REPO_RE は本スクリプト固有。
   検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
 アクセス: gh api 経由のみ（読み取り専用）。トークンは扱わない。標準ライブラリだけで動く。
@@ -77,7 +79,7 @@ from datetime import date, datetime, timedelta, timezone
 # append にして、同じディレクトリに標準モジュール名のファイルがあっても標準ライブラリを先に解決させる。
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
-    DAY_RE, ISO_RE, ORG_RE, FetchError, atomic_write_json, gh_api, parse_concatenated_json,
+    DAY_RE, ISO_RE, ORG_RE, FetchError, atomic_write_json, gh_api, nonneg_num, parse_concatenated_json,
 )
 
 SCHEMA_VERSION = 1
@@ -451,11 +453,13 @@ def load_cache(path, org):
                 or not isinstance(e.get("created_at"), str) or not isinstance(e.get("agg"), list):
             raise bad
         for a in e["agg"]:
-            m = a.get("minutes") if isinstance(a, dict) else None
             if not isinstance(a, dict) or not isinstance(a.get("runner_group"), str) \
-                    or not isinstance(a.get("day"), str) or not DAY_RE.match(a["day"]) \
-                    or isinstance(m, bool) or not isinstance(m, (int, float)) \
-                    or not math.isfinite(m) or m < 0:
+                    or not isinstance(a.get("day"), str) or not DAY_RE.match(a["day"]):
+                raise bad
+            # 数値の判定は nonneg_num に一本化し、利用者に見えるエラー文は「キャッシュが壊れている」に保つ
+            try:
+                nonneg_num(a, "minutes")
+            except FetchError:
                 raise bad
             try:
                 date.fromisoformat(a["day"])

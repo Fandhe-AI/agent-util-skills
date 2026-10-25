@@ -2,8 +2,8 @@
 
 役割と境界:
   fetch_billing.py / fetch_jobs.py / summarize.py が共有する GH_TIMEOUT / ORG_RE / MONTH_RE /
-  DAY_RE / ISO_RE / MAX_ROWS_BYTES / nonneg_num / FetchError / gh_api / atomic_write_json /
-  parse_concatenated_json をここに集約する。以前は各スクリプトが同じ
+  DAY_RE / ISO_RE / MAX_ROWS_BYTES / MAX_NAME_LEN / CTRL_RE / safe / nonneg_num / FetchError / gh_api /
+  atomic_write_json / parse_concatenated_json をここに集約する。以前は各スクリプトが同じ
   実装を複製しており、片方だけ直して乖離する恐れがあった。標準ライブラリだけで動く。
 
 読み込み方:
@@ -14,9 +14,9 @@
 
 import しない利用者:
   build_dashboard.py は「ネットワークに出ない」保証（subprocess 等を import しない）を
-  守るため本モジュールを import せず、ORG_RE / ISO_RE / MAX_ROWS_BYTES / atomic_write_json を複製している。
-  safe / CTRL_RE は summarize.py が正典で、build_dashboard.py が複製している（既定長だけが
-  意図した差）。いずれの一致も tests/test_build_dashboard.py が検査する。
+  守るため本モジュールを import せず、ORG_RE / ISO_RE / MAX_ROWS_BYTES / atomic_write_json / safe / CTRL_RE
+  を複製している。正典はすべて本モジュールで、safe の既定長だけが意図した差（端末向けの名前は 60 字、
+  build_dashboard.py はパスとエラー文を載せるため 300 字）。一致は tests/test_build_dashboard.py が検査する。
 
 検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 """
@@ -34,10 +34,23 @@ DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 # rows 入力の上限。build_dashboard.py が同値を複製している（一致はテストが検査）。
 MAX_ROWS_BYTES = 8 * 1024 * 1024
+MAX_NAME_LEN = 60
+# 端末へ出す前に除去・置換する制御文字（C0・DEL・C1）。build_dashboard.py が同値を複製している（一致はテストが検査）。
+CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class FetchError(Exception):
     """取得・入力・検証の失敗。各スクリプトの main が日本語 1 行にして終了コード 1 で終える。"""
+
+
+def safe(s, limit=MAX_NAME_LEN):
+    """端末への制御文字注入を防ぐため、制御文字を除去し長い文字列を切り詰める。
+
+    名前用の既定 60 文字は取得元の警告には短く、末尾の識別情報（org・repo・日付）が欠けるため、
+    警告は limit に MAX_WARNING_LEN を渡して呼ぶ。
+    """
+    s = CTRL_RE.sub("?", str(s))
+    return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
 def nonneg_num(item, key, required=True, origin="API"):

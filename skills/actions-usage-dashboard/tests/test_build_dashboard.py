@@ -357,7 +357,7 @@ class ValidationTests(unittest.TestCase):
 
 class CommonParityTest(unittest.TestCase):
     """build_dashboard.py は _common.py を import せず複製する（ネットワーク非依存の保証を守るため）。
-    複製が正典の _common.py と乖離しないことをここで固定する（Issue #141・#171）。"""
+    複製が正典の _common.py と乖離しないことをここで固定する（Issue #141・#171・#182）。"""
 
     def test_copies_match_common(self):
         import importlib.util
@@ -374,20 +374,19 @@ class CommonParityTest(unittest.TestCase):
         self.assertEqual(inspect.getsource(bd.atomic_write_json),
                          inspect.getsource(cm.atomic_write_json))
 
-    def test_safe_matches_summarize(self):
-        """safe / CTRL_RE の正典は summarize.py（Issue #158）。既定長だけが意図した差。"""
+    def test_safe_matches_common(self):
+        """safe / CTRL_RE / MAX_NAME_LEN の正典は _common.py（Issue #182）。既定長だけが意図した差。"""
         import importlib.util
         import inspect
-        scripts = os.path.join(HERE, "..", "scripts")
-        sys.path.append(scripts)
-        spec = importlib.util.spec_from_file_location("_summarize_parity", os.path.join(scripts, "summarize.py"))
-        sm = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(sm)
-        self.assertEqual(bd.CTRL_RE.pattern, sm.CTRL_RE.pattern)
-        self.assertEqual(bd.CTRL_RE.flags, sm.CTRL_RE.flags)
+        path = os.path.join(HERE, "..", "scripts", "_common.py")
+        spec = importlib.util.spec_from_file_location("_common_parity_safe", path)
+        cm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cm)
+        self.assertEqual(bd.CTRL_RE.pattern, cm.CTRL_RE.pattern)
+        self.assertEqual(bd.CTRL_RE.flags, cm.CTRL_RE.flags)
         self.assertEqual(inspect.signature(bd.safe).parameters["limit"].default, 300)
-        self.assertEqual(inspect.signature(sm.safe).parameters["limit"].default, sm.MAX_NAME_LEN)
-        self.assertEqual(sm.MAX_NAME_LEN, 60)
+        self.assertEqual(inspect.signature(cm.safe).parameters["limit"].default, cm.MAX_NAME_LEN)
+        self.assertEqual(cm.MAX_NAME_LEN, 60)
         ctrl = "\x00\x1b\x7f\x85\x9f"
         for limit in (1, 5, 60, 300):
             samples = ["", ctrl, "a" + ctrl + "b", ValueError("e\x1bx"), 12345]
@@ -395,9 +394,15 @@ class CommonParityTest(unittest.TestCase):
             samples.append(ctrl + "y" * (limit + 5))
             for s in samples:
                 got = bd.safe(s, limit)
-                self.assertEqual(got, sm.safe(s, limit), (limit, s))
+                self.assertEqual(got, cm.safe(s, limit), (limit, s))
                 self.assertLessEqual(len(got), limit)
                 self.assertIsNone(bd.CTRL_RE.search(got))
+
+    def test_summarize_does_not_redefine_safe(self):
+        """summarize.py は safe / CTRL_RE を _common から import し、再定義しない（Issue #182）。"""
+        with open(os.path.join(HERE, "..", "scripts", "summarize.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIsNone(re.search(r"^(def safe\b|CTRL_RE\s*=|MAX_NAME_LEN\s*=)", src, re.M))
 
     def test_does_not_import_common(self):
         with open(SCRIPT, encoding="utf-8") as f:

@@ -450,6 +450,19 @@ class Cli(unittest.TestCase):
         self.assertFalse(os.path.exists(self.out))
         self.assertIn("gh api 失敗", r.stderr)
 
+    def bad_minutes_bodies(self):
+        """agg[].minutes の不正値（bool・文字列・欠損・None・NaN・inf）。受理集合は nonneg_num と同一（Issue #182）。"""
+        def body(agg_item):
+            return json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": {
+                "repo": "pub-site", "attempt": 1, "created_at": "",
+                "agg": [agg_item]}}})
+        base = {"day": D0, "runner_group": "g"}
+        bodies = [body(dict(base, minutes=v)) for v in (True, "1", None, float("nan"))]
+        bodies.append(body(base))
+        # 1e400 は json.dumps で作れないため生の JSON を使う（読み込むと inf になる）
+        bodies.append(body(dict(base, minutes=0)).replace('"minutes": 0', '"minutes": 1e400'))
+        return tuple(bodies)
+
     def test_bad_cache_stops(self):
         os.makedirs(self.cache)
         p = os.path.join(self.cache, "jobs-cache-%s.json" % ORG)
@@ -459,7 +472,8 @@ class Cli(unittest.TestCase):
                          "agg": [{"day": D0, "runner_group": "g", "minutes": -1}]}}}),
                      ) + tuple(json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": dict(
                          {"repo": "pub-site", "attempt": 1, "agg": []}, **extra)}})
-                         for extra in ({}, {"created_at": None}, {"created_at": 20261010})):
+                         for extra in ({}, {"created_at": None}, {"created_at": 20261010})
+                     ) + self.bad_minutes_bodies():
             with open(p, "w") as f:
                 f.write(body)
             r = self.run_cli()
