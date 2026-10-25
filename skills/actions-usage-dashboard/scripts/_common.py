@@ -47,7 +47,7 @@ def safe(s, limit=MAX_NAME_LEN):
     """端末への制御文字注入を防ぐため、制御文字を除去し長い文字列を切り詰める。
 
     名前用の既定 60 文字は取得元の警告には短く、末尾の識別情報（org・repo・日付）が欠けるため、
-    警告は limit に MAX_WARNING_LEN を渡して呼ぶ。
+    警告は呼び出し側が定める上限（summarize の MAX_WARNING_LEN 等）を limit に渡して呼ぶ。
     """
     s = CTRL_RE.sub("?", str(s))
     return s if len(s) <= limit else s[:limit - 1] + "…"
