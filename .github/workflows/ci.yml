@@ -38,7 +38,7 @@ jobs:
   # --------------------------------------------------
   # skill-tests（各スキルの node:test 回帰テストと Python unittest）
   # --------------------------------------------------
-  # skills/*/tests/*.test.mjs を node:test で、skills/*/tests/test_*.py を
+  # skills/*/tests/**/*.test.mjs を node:test で、skills/*/tests/test_*.py を
   # unittest discover で実行する。ubuntu-latest には Node.js が
   # 同梱されるため setup-node の追加（新規 action の SHA 固定管理）は不要。
   # 対象: skills/setup-firebase-hosting/tests/version-pin.test.mjs（Issue
@@ -64,7 +64,7 @@ jobs:
           persist-credentials: false
 
       - name: Run node:test
-        # `shopt -s failglob` で skills/*/tests/*.test.mjs が1件もマッチしない場合に
+        # `shopt -s failglob` で skills/*/tests/**/*.test.mjs が1件もマッチしない場合に
         # シェルを即座にエラー終了させる。failglob なしだとグロブがマッチしない場合
         # 展開されずリテラル文字列のまま node --test に渡り、node は該当ファイルを
         # 発見できず 0 tests / 0 pass / 0 fail・終了コード0 で「成功」してしまう
