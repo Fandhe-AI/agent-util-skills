@@ -45,10 +45,10 @@ jobs:
   # #393）・key-deletion-authority.test.mjs（Issue #3）等。手動実行前提
   # だったこれらのテストを CI で恒久実行する。
   skill-tests:
-    # 表示名は ruleset の required context に束縛されているため据え置く
-    # （変えると required が Expected のまま残り全 PR がマージ不能になる）。
-    # 名前は node:test だが Python の unittest もこのジョブで実行する。
-    name: Skill tests (node:test)
+    # 表示名は ruleset main-protection の required context に束縛されている。
+    # 変えるときは ruleset の required_status_checks も同じ名前へ置き換える
+    # （片方だけだと required が Expected のまま残り全 PR がマージ不能になる）。
+    name: Skill tests
     runs-on: ubuntu-latest
     # node:test は静的ファイル検査と shim による挙動テストで軽量。Python の
     # unittest（setup-github-pages が約 110 秒）を含め 5 分打ち切りで足りるかは
