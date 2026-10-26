@@ -561,6 +561,13 @@ class SharedCommonTest(unittest.TestCase):
             sm.nonneg_num({"k": float("nan")}, "k", origin="rows")
         self.assertIn("rows の数値フィールド k が不正（有限の非負数ではない）", str(cm.exception))
 
+    def test_nonneg_num_huge_int(self):
+        # float の範囲を超える巨大な整数は OverflowError ではなく FetchError にする（Issue #189）
+        for v in (10**400, -10**400):
+            with self.assertRaises(sm.FetchError) as cm:
+                sm.nonneg_num({"k": v}, "k", origin="rows")
+            self.assertIn("rows の数値フィールド k が不正（有限の非負数ではない）", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

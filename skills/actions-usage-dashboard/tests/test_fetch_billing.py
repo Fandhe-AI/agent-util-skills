@@ -396,6 +396,13 @@ class SharedCommonTest(unittest.TestCase):
         self.assertIn("API の数値フィールド k が不正（有限の非負数ではない）", str(cm.exception))
         self.assertEqual(fb.nonneg_num({}, "k", False), 0.0)
 
+    def test_nonneg_num_huge_int(self):
+        # float の範囲を超える巨大な整数は OverflowError ではなく FetchError にする（Issue #189）
+        for v in (10**400, -10**400):
+            with self.assertRaises(fb.FetchError) as cm:
+                fb.nonneg_num({"k": v}, "k", origin="API")
+            self.assertIn("API の数値フィールド k が不正（有限の非負数ではない）", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

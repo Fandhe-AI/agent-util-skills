@@ -57,13 +57,22 @@ def nonneg_num(item, key, required=True, origin="API"):
     """item[key] を有限の非負数（float）として返す。bool・非数値・非有限・負数は FetchError。
 
     required=False で欠損（None）なら 0.0。origin は例外メッセージの入力元表記（API / rows）。
+    float の範囲を超える巨大な整数（例: 10**400、正負とも）は float 変換で OverflowError になるため、
+    各 CLI の except FetchError で止まるよう同じ FetchError に統一する。
     """
     v = item.get(key)
     if v is None and not required:
         return 0.0
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
-        raise FetchError("%s の数値フィールド %s が不正（有限の非負数ではない）" % (origin, key))
-    return float(v)
+    bad = FetchError("%s の数値フィールド %s が不正（有限の非負数ではない）" % (origin, key))
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise bad
+    try:
+        f = float(v)
+    except OverflowError:
+        raise bad from None
+    if not math.isfinite(f) or f < 0:
+        raise bad
+    return f
 
 
 def gh_api(args):
