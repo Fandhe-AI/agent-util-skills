@@ -451,7 +451,7 @@ class Cli(unittest.TestCase):
         self.assertIn("gh api 失敗", r.stderr)
 
     def bad_minutes_bodies(self):
-        """agg[].minutes の不正値（bool・文字列・欠損・None・NaN・inf）。受理集合は nonneg_num と同一（Issue #182）。"""
+        """agg[].minutes の不正値（bool・文字列・欠損・None・NaN・inf・巨大な整数）。受理集合は nonneg_num と同一（Issue #182）。"""
         def body(agg_item):
             return json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": {
                 "repo": "pub-site", "attempt": 1, "created_at": "",
@@ -461,6 +461,8 @@ class Cli(unittest.TestCase):
         bodies.append(body(base))
         # 1e400 は json.dumps で作れないため生の JSON を使う（読み込むと inf になる）
         bodies.append(body(dict(base, minutes=0)).replace('"minutes": 0', '"minutes": 1e400'))
+        # 10**400 は 4300 桁未満なので JSON 解析を通って int になり、nonneg_num の float 変換で失敗する
+        bodies.append(body(dict(base, minutes=10**400)))
         return tuple(bodies)
 
     def test_bad_cache_stops(self):
@@ -479,6 +481,7 @@ class Cli(unittest.TestCase):
             r = self.run_cli()
             self.assertEqual(r.returncode, 1, body)
             self.assertIn("キャッシュが壊れている", r.stderr)
+            self.assertNotIn("Traceback", r.stderr, body)
             with open(p) as f:
                 self.assertEqual(f.read(), body)
             self.assertFalse(os.path.exists(self.out))
