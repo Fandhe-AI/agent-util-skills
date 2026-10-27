@@ -348,6 +348,20 @@ class ValidationTests(unittest.TestCase):
             f.write('{"pad": "' + "a" * (8 * 1024 * 1024) + '"}')
         self.fails(base(self.out, (big,)))
 
+    def test_estimate_block_in_jobs_doc_is_accepted(self):
+        """fetch_jobs の推定モード出力（トップレベルの estimate 付き）をそのまま受け付ける（Issue #197）。"""
+        with open(JOBS, encoding="utf-8") as f:
+            j = json.load(f)
+        j["estimate"] = {"method": "sample_mean_per_workflow", "sample_runs": 3, "sampled_runs": 6,
+                         "estimated_runs": 40, "groups": 2, "unestimated_runs": 0}
+        j["warnings"] = ["推定値を含む: テスト"]
+        jp = os.path.join(self.d, "jobs-est.json")
+        with open(jp, "w") as f:
+            json.dump(j, f)
+        rc, _, err = run(base(self.out, (BILLING, jp)) + ["--asset-url", "/_blob/u0", "--asset-url", "/_blob/u1"])
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.exists(os.path.join(self.out, "batch.json")))
+
     def test_t13_no_network_imports(self):
         with open(SCRIPT, encoding="utf-8") as f:
             src = f.read()

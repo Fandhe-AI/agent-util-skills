@@ -34,7 +34,7 @@ org の Actions 利用分数を、ダッシュボードを「作る」・ター�
 python3 <skill-root>/scripts/fetch_billing.py --org "<org>" --since YYYY-MM [--until YYYY-MM] --out "<billing.json>"
 # セルフホスト分（jobs。--cache で増分取得）
 python3 <skill-root>/scripts/fetch_jobs.py --org "<org>" --since YYYY-MM-DD --out "<jobs.json>" --cache "<cache dir>" \
-  [--max-seconds N] [--progress-interval S]
+  [--max-seconds N] [--progress-interval S] [--estimate [--sample-runs K]]
 # ターミナルでの要約（読み取り専用）
 python3 <skill-root>/scripts/summarize.py --rows "<billing.json>" [--rows "<jobs.json>"] \
   [--month YYYY-MM] [--group-by charge_class|repo|runner_type|visibility] [--top N] [--plan "<name>"] [--json]
@@ -62,6 +62,7 @@ fetch_jobs.py（セルフホスト分）の所要時間の目安。実測では�
 - バックグラウンドで実行するときは、Bash を `run_in_background` で起動して完了通知を待つ。途中経過は stderr の `進捗:` 行（リポジトリ名を含まない数値だけ）で確かめ、rows JSON とキャッシュは開かない
 - 進捗を出すたびにキャッシュを保存するので、外部から kill されても同じコマンドで続きから取れる（同じ UTC 日・同じ `--since` なら一覧も再開する）
 - 終了コード 3（レート制限）は reset まで待ってから、終了コード 4（時間上限）は待たずに再実行する
+- 速さを優先して全体の傾向だけ見たいときは `--estimate`（抜き取り推定モード）を付ける。(repo, workflow) ごとに最大 K run（`--sample-runs`、既定 3）の jobs だけ取り、平均で残りを推定する。run が非常に多い org でも 1〜1.5 時間程度の見込み（未計測の見積もり）。推定値を含むため正確な値は `--estimate` なしの全件取得で取る。詳細は data-sources.md の「推定モード」節
 
 ## フロー
 
