@@ -14,7 +14,9 @@
   列名や区分を変えるときは fetch_billing.py と後続スクリプトを同時に更新する。
 
 出力スキーマ（schema_version 1）:
-  {schema_version, source: "jobs", org, since, until, generated_at, warnings, rows}
+  {schema_version, source: "jobs", org, since, until, generated_at, warnings, rows[, estimate]}
+  estimate は --estimate のときだけ付く（全件取得の出力には無い）:
+  {method: "sample_mean_per_workflow", sample_runs, sampled_runs, estimated_runs, groups, unestimated_runs}
   row = day / repo / visibility / sku / runner_type / charge_class / runner_group /
         minutes / quota_minutes / billable_minutes / gross_usd / discount_usd / net_usd
   金額系と quota_minutes は 0。day は job の started_at の UTC 日。
@@ -58,6 +60,23 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
   続きのリポジトリから取る。ただし未完了 run を含むリポジトリは再取得する（待機中に完了し得るため）。
   再利用した場合は listed_at（取得時点）を warnings に出す。待機中に作られた run は次回実行で反映される。
   全処理が成功したら listing を捨てる。
+抜き取り推定モード（--estimate [--sample-runs K]）: 正確さより速さを優先して傾向を見るためのモード。
+  セルフホストかどうかは jobs のラベルにしか無く、全件取得は run ごとに jobs API を呼ぶため、run の多い org では
+  初回に十数時間かかる。推定モードは runs 一覧は全ページ取り、jobs は (repo, workflow_id) の組ごとに最大 K run
+  だけ取る。抜き取った run のセルフホスト分数（runner_group ごとの run 当たり平均）を、抜き取らなかった完了 run
+  へ割り当てる。推定した分は各 run の作成日（UTC）に載せ、抜き取った run は実測値を使う。
+  API 呼び出し数は「リポジトリ一覧 + runs 一覧のページ数 + K x 組数（jobs が 1 ページのとき）」に収まる。
+  抜き取りは (created_at, id) 順に並べた列から等間隔に選ぶ決定的な方式で、期間の前・中・後に散らす。
+  最新の K 件だけを取らないのは、期間の途中でセルフホストへ移した workflow の値を期間全体へ広げないため。
+  乱数を使わないのは、中断後の再開でも同じ run を選び直して取得済みの分をキャッシュに当て、前進を単調にするため。
+  経過時間（updated_at - run_started_at）で割り戻す方式は採らない（並列 job・キュー待ち・再実行でずれるため）。
+  推定値は cache["runs"] に入れない。入れると needs_fetch / settled が取得済みと誤認し、実測へ置き換わらず
+  cursor も縮んでしまう。抜き取った run の実測値は従来どおり cache["runs"] に入れる。推定区分の run は
+  settled が偽のため cursor の from がその作成日まで戻る。これは次回の実行が一覧し直して実測へ置き換えるための
+  正しい挙動であり、不具合ではない（直さないこと）。
+  sample 外で cache["runs"] に旧 attempt だけある run（再実行で完了した run）は推定せず旧 attempt の値を残す
+  （全件取得の再実行中と同じ扱い。過少になり得る）。
+
 出力対象: 今回の一覧に無い run（GitHub 側で削除・1,000 件上限で欠落）でも、対象リポジトリの
   キャッシュ済み履歴は集計に残す。
 
@@ -97,6 +116,10 @@ DEFAULT_RATE_CHECK_EVERY = 25
 EXIT_RATE_LIMITED = 3
 EXIT_TIME_BUDGET = 4
 DEFAULT_PROGRESS_INTERVAL = 30
+DEFAULT_SAMPLE_RUNS = 3
+# 抜き取り数 K の上限。K x 組数が API 呼び出し数の上限になるため、処理量を抑える
+MAX_SAMPLE_RUNS = 20
+ESTIMATE_METHOD = "sample_mean_per_workflow"
 # 5xx の再試行。長い取得が数十分かかる org で、1〜1.5 時間に 1 回返る一時的な 502 のたびに最初からやり直さない
 # ための有界な再試行。上限は暴走防止（回数 10・1 回 60 秒）で、_common._MAX_RETRY_WAIT と揃える
 DEFAULT_RETRIES = 3
@@ -249,6 +272,80 @@ def build_rows(entries, visibility, since):
         row.update({c: 0.0 for c in ZERO_COLS})
         rows.append(row)
     return rows
+
+
+def spread_sample(items, k):
+    """(created_at, id) 順の列から最大 k 件を等間隔に選ぶ。決定的（乱数を使わない）。
+
+    items は (created_at, id) の組の列。先頭と末尾を含めて期間全体へ散らす。n <= k は全件、k == 1 は中央。
+    """
+    ordered = sorted(items)
+    n = len(ordered)
+    if n <= k:
+        return ordered
+    if k == 1:
+        return [ordered[n // 2]]
+    return [ordered[round(i * (n - 1) / (k - 1))] for i in range(k)]
+
+
+def plan_samples(listed, k):
+    """完了 run を (repo, workflow_id) ごとにまとめ、抜き取る run を決める。
+
+    listed は (rid, att, repo, run) の列。返り値は {(repo, workflow_id): {"pool": [...], "sample": set(rid)}}。
+    母集団はキャッシュ・skipped の状態を見ず、その組の完了 run 全部にする（選ぶ run を決定的に保つため）。
+    workflow_id が無い run は None としてリポジトリごとに 1 組にまとめる。未完了の run は含めない。
+    """
+    groups = {}
+    for rid, att, repo, run in listed:
+        if run.get("status") != "completed":
+            continue
+        wf = run.get("workflow_id")
+        key = (repo, wf if _pos_int(wf) else None)
+        groups.setdefault(key, {"pool": [], "sample": set()})["pool"].append((rid, att, repo, run))
+    for g in groups.values():
+        picked = spread_sample([((r[3].get("created_at") or ""), r[0]) for r in g["pool"]], k)
+        g["sample"] = {rid for _c, rid in picked}
+    return groups
+
+
+def estimate_entries(groups, cache_runs, skipped):
+    """抜き取りの平均から、抜き取らなかった完了 run の合成エントリを作る。cache_runs は変更しない。
+
+    cache_runs は {rid 文字列: {attempt, agg, ...}}、skipped は {rid 文字列: {attempt, ...}}。
+    返り値は (entries, counts)。entries は build_rows に渡せる {repo, agg}、
+    counts は {sampled, estimated, unestimated}。
+    """
+    entries, counts = [], {"sampled": 0, "estimated": 0, "unestimated": 0}
+    for (repo, _wf), g in groups.items():
+        eff = []
+        for rid, att, _r, _run in g["pool"]:
+            ent = cache_runs.get(str(rid))
+            if rid in g["sample"] and ent is not None and ent["attempt"] >= att:
+                eff.append(ent)
+        counts["sampled"] += len(eff)
+        totals = {}
+        for ent in eff:
+            for a in ent["agg"]:
+                totals[a["runner_group"]] = totals.get(a["runner_group"], 0.0) + a["minutes"]
+        for rid, att, _r, run in g["pool"]:
+            if rid in g["sample"] or str(rid) in cache_runs:
+                continue
+            sk = skipped.get(str(rid))
+            if sk is not None and att <= sk["attempt"]:
+                continue
+            day = (run.get("created_at") or "")[:10]
+            try:
+                if not eff or not DAY_RE.match(day):
+                    raise ValueError
+                date.fromisoformat(day)
+            except ValueError:
+                counts["unestimated"] += 1
+                continue
+            counts["estimated"] += 1
+            agg = [{"day": day, "runner_group": gr, "minutes": m / len(eff)}
+                   for gr, m in sorted(totals.items()) if m > 0]
+            entries.append({"repo": repo, "agg": agg})
+    return entries, counts
 
 
 # ---- 進捗・時間上限 ----
@@ -453,6 +550,9 @@ def load_cache(path, org):
                     _run_key(it)
                 except FetchError:
                     raise bad
+                # キーが無いのは旧版が残した listing。壊れ扱いにせず、推定モードで取り直す
+                if "workflow_id" in it and it["workflow_id"] is not None and not _pos_int(it["workflow_id"]):
+                    raise bad
     cur = c.get("cursor")
     if cur is not None:
         if not isinstance(cur, dict):
@@ -521,6 +621,10 @@ def main(argv=None):
                     help="5xx の再試行の初回待ち秒（指数バックオフ。0〜%d）" % MAX_RETRY_WAIT)
     ap.add_argument("--progress-interval", type=float, default=DEFAULT_PROGRESS_INTERVAL,
                     help="進捗の stderr 出力とキャッシュ保存の間隔（秒。0 で境目ごと）")
+    ap.add_argument("--estimate", action="store_true",
+                    help="抜き取り推定モード。(repo, workflow) ごとに最大 K run の jobs だけ取り、平均で残りを推定する")
+    ap.add_argument("--sample-runs", default=None,
+                    help="推定モードの抜き取り数 K（1..%d、既定 %d）。--estimate と併用する" % (MAX_SAMPLE_RUNS, DEFAULT_SAMPLE_RUNS))
     a = ap.parse_args(argv)
     now = datetime.now(timezone.utc)
     today = now.date()
@@ -528,6 +632,7 @@ def main(argv=None):
              "archived": 0, "badname": 0}
     truncated, skipped, cache, cache_path, client = [], [], None, None, None
     resumed_at = None
+    est = {}
     relist = {"full": 0, "partial": 0, "oldest": None}
     until_s = today.isoformat()
 
@@ -544,6 +649,9 @@ def main(argv=None):
         if rows is not None:
             out.append("行数: %d・セルフホスト合計 %.1f 分（除外: GitHub ホスト job %d / 未完了 job %d）" % (
                 len(rows), sum(r["minutes"] for r in rows), stats["hosted"], stats["unfinished"]))
+        if est:
+            out.append("推定: %d 組・抜き取り %d run・推定 %d run・推定不能 %d run（K=%d）" % (
+                est["groups"], est["sampled_runs"], est["estimated_runs"], est["unestimated_runs"], est["sample_runs"]))
         if relist["full"] or relist["partial"]:
             out.append("runs 一覧: 全期間 %d リポ / 前回位置から %d リポ%s" % (
                 relist["full"], relist["partial"],
@@ -567,6 +675,16 @@ def main(argv=None):
         if not (math.isfinite(a.max_seconds) and a.max_seconds >= 0
                 and math.isfinite(a.progress_interval) and a.progress_interval >= 0):
             raise FetchError("--max-seconds と --progress-interval は 0 以上の数で指定する")
+        sample_k = None
+        if a.sample_runs is not None and not a.estimate:
+            raise FetchError("--sample-runs は --estimate と併用する")
+        if a.estimate:
+            if a.sample_runs is None:
+                sample_k = DEFAULT_SAMPLE_RUNS
+            else:
+                if not re.match(r"^[0-9]{1,9}\Z", a.sample_runs) or not 1 <= int(a.sample_runs) <= MAX_SAMPLE_RUNS:
+                    raise FetchError("--sample-runs は 1 以上 %d 以下の整数で指定する" % MAX_SAMPLE_RUNS)
+                sample_k = int(a.sample_runs)
         if not (0 <= a.retries <= MAX_RETRIES and math.isfinite(a.retry_wait)
                 and 0 <= a.retry_wait <= MAX_RETRY_WAIT):
             raise FetchError("--retries は 0〜%d の整数、--retry-wait は 0〜%d の数で指定する" % (MAX_RETRIES, MAX_RETRY_WAIT))
@@ -620,6 +738,10 @@ def main(argv=None):
                 stale = []
             else:
                 stale = [r for r, its in ls["repos"].items() if any(i["status"] != "completed" for i in its)]
+            if sample_k is not None:
+                # 推定モードは workflow_id を使う。旧版の listing（キー無し）のリポジトリは取り直す
+                stale.extend(r for r, its in ls["repos"].items()
+                             if r not in stale and any("workflow_id" not in i for i in its))
             for repo in stale:
                 del ls["repos"][repo]
                 ls["truncated"] = [t for t in ls["truncated"] if not t.startswith("%s/%s " % (a.org, repo))]
@@ -649,7 +771,8 @@ def main(argv=None):
                     if relist["oldest"] is None or floor.isoformat() < relist["oldest"]:
                         relist["oldest"] = floor.isoformat()
                 items = [{"id": r["id"], "run_attempt": _run_key(r)[1], "status": r.get("status") or "",
-                          "created_at": r.get("created_at") if isinstance(r.get("created_at"), str) else ""}
+                          "created_at": r.get("created_at") if isinstance(r.get("created_at"), str) else "",
+                          "workflow_id": r["workflow_id"] if _pos_int(r.get("workflow_id")) else None}
                          for r in client.list_runs(repo, a.org, floor, today, tr)]
                 ls["repos"][repo] = items
                 ls["truncated"].extend(tr)
@@ -662,7 +785,12 @@ def main(argv=None):
         stats["listed"] = len(listed)
         listed.sort(key=lambda t: t[0])
 
+        groups = plan_samples(listed, sample_k) if sample_k is not None else None
+        sample_ids = set().union(*(g["sample"] for g in groups.values())) if groups else set()
+
         def needs_fetch(rid, att, run):
+            if groups is not None and rid not in sample_ids:
+                return False
             ent = cache["runs"].get(str(rid))
             sk = ls_skipped.get(str(rid))
             if sk is not None and att <= sk["attempt"]:
@@ -685,6 +813,8 @@ def main(argv=None):
                 # 再実行中でも、キャッシュ済みの旧 attempt の分は実際に消費された時間なので集計に残す
                 stats["pending"] += 1
                 continue
+            if groups is not None and rid not in sample_ids:
+                continue  # 推定モードで抜き取り外。後段の estimate_entries が扱う
             pacer.check_budget("jobs")
             client.check_rate()
             jobs = client.list_jobs(repo, a.org, rid)
@@ -712,6 +842,11 @@ def main(argv=None):
                   if e["created_at"][:10] and e["created_at"][:10] < a.since
                   and not any(x["day"] >= a.since for x in e["agg"])]:
             del cache["runs"][k]
+        if groups is not None:
+            est_entries, ec = estimate_entries(groups, cache["runs"], ls_skipped)
+            entries = entries + [e for e in est_entries if e["repo"] in visibility]
+            est.update({"sample_runs": sample_k, "sampled_runs": ec["sampled"], "estimated_runs": ec["estimated"],
+                        "groups": len(groups), "unestimated_runs": ec["unestimated"]})
         rows = build_rows(entries, visibility, a.since)
         # 次回の一覧の下限を作り直す。今回の対象外（アーカイブ・削除・改名前の名前）の cursor は捨てる
         by_repo = {}
@@ -735,7 +870,7 @@ def main(argv=None):
             cache["cursor"][repo] = next_cursor_entry(by_repo.get(repo, []), settled, tdays, since, today)
         cache.pop("listing", None)
         atomic_write_json(cache_path, cache)
-        atomic_write_json(a.out, {
+        out_doc = {
             "schema_version": SCHEMA_VERSION, "source": "jobs", "org": a.org,
             "since": a.since, "until": until_s,
             "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -744,7 +879,17 @@ def main(argv=None):
                          + (["run 一覧は %s 時点の取得を再利用（以後に作られた run は含まない）" % resumed_at]
                             if resumed_at else [])),
             "rows": rows,
-        })
+        }
+        if est:
+            out_doc["warnings"].append(
+                "推定値を含む: (repo, workflow) %d 組で抜き取った %d run の平均から %d run を推定した（K=%d）。"
+                "正確な値は --estimate なしで取得する" % (
+                    est["groups"], est["sampled_runs"], est["estimated_runs"], est["sample_runs"]))
+            if est["unestimated_runs"]:
+                out_doc["warnings"].append(
+                    "推定できず 0 分として数えた run: %d（抜き取りが全て不正 job、または作成日が不正）" % est["unestimated_runs"])
+            out_doc["estimate"] = dict(est, method=ESTIMATE_METHOD)
+        atomic_write_json(a.out, out_doc)
     except RateLimited as e:
         _save_quietly(cache_path, cache)
         print("\n".join(lines(note="中断: レート制限の残量不足（キャッシュ保存済み）")))

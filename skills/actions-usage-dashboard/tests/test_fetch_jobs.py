@@ -106,8 +106,9 @@ def job(jid, labels, group, start, minutes, status="completed"):
             "started_at": start, "completed_at": c}
 
 
-def run(rid, created=D0 + "T00:00:00Z", status="completed", attempt=1):
-    return {"id": rid, "status": status, "run_attempt": attempt, "created_at": created}
+def run(rid, created=D0 + "T00:00:00Z", status="completed", attempt=1, workflow_id=1):
+    return {"id": rid, "status": status, "run_attempt": attempt, "created_at": created,
+            "workflow_id": workflow_id}
 
 
 def base_cfg():
@@ -200,6 +201,72 @@ class Pure(unittest.TestCase):
                 fj._run_key({"id": 1, "run_attempt": bad})
         with self.assertRaises(fj.FetchError):
             fj._run_key({"id": True})
+
+
+class EstimatePure(unittest.TestCase):
+    """抜き取り推定モードの純粋関数（Issue #197）。"""
+
+    def test_spread_sample(self):
+        items = [("2026-01-%02dT00:00:00Z" % d, d) for d in range(1, 11)]
+        self.assertEqual(fj.spread_sample(items, 20), sorted(items))
+        self.assertEqual(fj.spread_sample(items, 1), [sorted(items)[5]])
+        three = fj.spread_sample(items, 3)
+        self.assertEqual([i for _c, i in three], [1, 5, 10])  # round(4.5) は偶数丸めで index 4
+        for k in range(2, 10):
+            ids = [i for _c, i in fj.spread_sample(items, k)]
+            self.assertEqual(len(set(ids)), k)
+            self.assertEqual((ids[0], ids[-1]), (1, 10))
+        # 入力の順序に依存しない
+        self.assertEqual(fj.spread_sample(list(reversed(items)), 3), three)
+
+    def test_plan_samples_groups_and_skips_pending(self):
+        listed = [(1, 1, "r", run(1, workflow_id=5)), (2, 1, "r", run(2, workflow_id=5)),
+                  (3, 1, "r", run(3, status="in_progress", workflow_id=5)),
+                  (4, 1, "r", run(4, workflow_id=None)), (5, 1, "r", run(5, workflow_id=-3)),
+                  (6, 1, "q", run(6, workflow_id=5))]
+        g = fj.plan_samples(listed, 1)
+        self.assertEqual(set(g), {("r", 5), ("r", None), ("q", 5)})
+        self.assertEqual([r[0] for r in g[("r", 5)]["pool"]], [1, 2])
+        self.assertEqual({r[0] for r in g[("r", None)]["pool"]}, {4, 5})
+
+    def test_estimate_entries(self):
+        def agg(m):
+            return [{"day": D0, "runner_group": "g", "minutes": m}]
+        listed = [(i, 1, "r", run(i, created=D0 + "T00:00:0%dZ" % i, workflow_id=5)) for i in range(1, 6)]
+        listed.append((6, 2, "r", run(6, created=D0 + "T00:00:06Z", attempt=2, workflow_id=5)))
+        g = fj.plan_samples(listed, 2)
+        self.assertEqual(g[("r", 5)]["sample"], {1, 6})
+        cache = {"1": {"repo": "r", "attempt": 1, "created_at": "", "agg": agg(10.0)},
+                 "6": {"repo": "r", "attempt": 2, "created_at": "", "agg": agg(30.0)},
+                 "3": {"repo": "r", "attempt": 1, "created_at": "", "agg": []}}
+        ent, c = fj.estimate_entries(g, cache, {"4": {"attempt": 1}})
+        # 2 と 5 は推定、3 はキャッシュ済み、4 は skipped
+        self.assertEqual(c, {"sampled": 2, "estimated": 2, "unestimated": 0})
+        self.assertEqual(ent, [{"repo": "r", "agg": agg(20.0)}] * 2)
+        self.assertEqual(set(cache), {"1", "6", "3"})
+        # 旧 attempt のキャッシュしか無い抜き取りは有効な抜き取りに数えない
+        cache["6"]["attempt"] = 1
+        ent, c = fj.estimate_entries(g, cache, {})
+        self.assertEqual(c["sampled"], 1)
+        # 抜き取りが全て無効なら推定不能
+        ent, c = fj.estimate_entries(g, {}, {})
+        self.assertEqual(c, {"sampled": 0, "estimated": 0, "unestimated": 4})
+        self.assertEqual(ent, [])
+
+    def test_estimate_entries_old_attempt_left_and_bad_created(self):
+        listed = [(1, 1, "r", run(1, created=D0 + "T00:00:00Z")),
+                  (2, 2, "r", run(2, created=D0 + "T00:00:01Z", attempt=2)),
+                  (3, 1, "r", run(3, created="garbage")),
+                  (4, 1, "r", run(4, created=D0 + "T00:00:03Z"))]
+        g = fj.plan_samples(listed, 1)
+        # k=1 は並べた列の中央（index 2）。created_at 昇順で "garbage" が最後なので (D0..03, 4) が選ばれる
+        self.assertEqual(g[("r", 1)]["sample"], {4})
+        cache = {"4": {"repo": "r", "attempt": 1, "created_at": "", "agg": [{"day": D0, "runner_group": "g", "minutes": 8.0}]},
+                 "2": {"repo": "r", "attempt": 1, "created_at": "", "agg": []}}
+        ent, c = fj.estimate_entries(g, cache, {})
+        # run 1 は推定、run 2 は旧 attempt 残しで推定しない、run 3 は作成日が不正で推定不能
+        self.assertEqual(c, {"sampled": 1, "estimated": 1, "unestimated": 1})
+        self.assertEqual(len(ent), 1)
 
 
 class Cli(unittest.TestCase):
@@ -538,6 +605,9 @@ class Cli(unittest.TestCase):
                      ) + tuple(json.dumps({"schema_version": 1, "org": ORG, "runs": {"1": dict(
                          {"repo": "pub-site", "attempt": 1, "agg": []}, **extra)}})
                          for extra in ({}, {"created_at": None}, {"created_at": 20261010})
+                     ) + tuple(json.dumps({"schema_version": 1, "org": ORG, "listing": {
+                         "since": SINCE, "day": D0, "repos": {"pub-site": [dict(run(1), workflow_id=wf)]},
+                         "truncated": []}, "runs": {}}) for wf in ("x", True, 0, -1)
                      ) + self.bad_minutes_bodies():
             with open(p, "w") as f:
                 f.write(body)
@@ -754,6 +824,9 @@ class Cli(unittest.TestCase):
             dict(extra=["--retry-wait", "nan"]), dict(extra=["--retry-wait", "inf"]),
             dict(org="bad_org!"), dict(since="2026-10-1"), dict(since="2026-13-01"), dict(since=future),
             dict(out=self.work), dict(out=os.path.join(self.work, "nodir", "x.json")), dict(cache=a_file),
+            dict(extra=["--estimate", "--sample-runs", "0"]), dict(extra=["--estimate", "--sample-runs", "-1"]),
+            dict(extra=["--estimate", "--sample-runs", "21"]), dict(extra=["--estimate", "--sample-runs", "x"]),
+            dict(extra=["--sample-runs", "3"]),
         ]
         for kw in cases:
             r = self.run_cli(**kw)
@@ -762,6 +835,178 @@ class Cli(unittest.TestCase):
         self.assertEqual(os.listdir(self.work), ["afile"])
         self.assertFalse(os.path.exists(self.cache))
         self.assertFalse(os.path.exists(self.out))
+
+
+class EstimateCli(unittest.TestCase):
+    """推定モードの E2E（Issue #197）。Cli の setUp と helper だけを借り、Cli のテストは再実行しない。"""
+
+    setUp = Cli.setUp
+    tearDown = Cli.tearDown
+    write_cfg = Cli.write_cfg
+    calls = Cli.calls
+    reset_calls = Cli.reset_calls
+    run_cli = Cli.run_cli
+    rows = Cli.rows
+
+    def make_cfg(self):
+        # 2 リポ x 2 workflow、各組 9 完了 run + 未完了 1 run。wf 1 は途中で GitHub ホストへ移行、wf 2 は一定 10 分
+        cfg = {"repos": [{"name": "pub-site", "visibility": "public", "archived": False},
+                         {"name": "priv-api", "visibility": "private", "archived": False}],
+               "runs": {}, "jobs": {}}
+        self.groups = {}
+        for ri, repo in enumerate(("pub-site", "priv-api")):
+            cfg["runs"][repo] = []
+            for wf in (1, 2):
+                ids = []
+                for n in range(9):
+                    rid = (ri * 2 + wf) * 1000 + n
+                    day = (TODAY - timedelta(days=18 - n)).isoformat()
+                    cfg["runs"][repo].append(run(rid, created=day + "T00:00:00Z", workflow_id=wf))
+                    if wf == 1 and n >= 5:
+                        cfg["jobs"][str(rid)] = [job(rid * 10, ["ubuntu-latest"], "GitHub Actions", day + "T01:00:00+00:00", 5)]
+                    else:
+                        cfg["jobs"][str(rid)] = [job(rid * 10, ["self-hosted"], "g", day + "T01:00:00+00:00",
+                                                     20 if wf == 1 else 10)]
+                    ids.append(rid)
+                self.groups[(repo, wf)] = ids
+                cfg["runs"][repo].append(run((ri * 2 + wf) * 1000 + 99, status="in_progress", workflow_id=wf,
+                                             created=(TODAY - timedelta(days=5)).isoformat() + "T00:00:00Z"))
+        return cfg
+
+    def prepare(self):
+        self.cfg = self.make_cfg()
+        self.write_cfg()
+
+    def load_out(self):
+        with open(self.out) as f:
+            return json.load(f)
+
+    def load_cache_file(self):
+        with open(os.path.join(self.cache, "jobs-cache-%s.json" % ORG)) as f:
+            return json.load(f)
+
+    def test_call_count_cache_and_rows(self):
+        # 受入基準 3 / 4 / 6
+        self.prepare()
+        r = self.run_cli(["--estimate", "--sample-runs", "3"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = [c for c in self.calls() if not c.startswith("api rate_limit")]
+        jobs_calls = [c for c in calls if "/jobs" in c]
+        repo_calls = [c for c in calls if "orgs/" in c]
+        runs_calls = [c for c in calls if "/actions/runs " in c]
+        self.assertEqual(len(calls), len(repo_calls) + len(runs_calls) + len(jobs_calls))
+        self.assertEqual(len(repo_calls), 1)
+        self.assertEqual(len(runs_calls), 2)
+        self.assertLessEqual(len(jobs_calls), 3 * len(self.groups))
+        # 抜き取りは各組の先頭・中央・末尾
+        expected = set()
+        for ids in self.groups.values():
+            expected.update({ids[0], ids[4], ids[8]})
+        cache = self.load_cache_file()
+        self.assertEqual({int(k) for k in cache["runs"]}, expected)
+        for rid in expected:
+            self.assertEqual(cache["runs"][str(rid)]["agg"], fj.aggregate_jobs(self.cfg["jobs"][str(rid)])[0])
+        # wf 1 の抜き取りは {20, 20, 0}（移行後を含む）。平均 40/3 を 9 run 分、wf 2 は 10 x 9
+        total = {}
+        for x in self.rows():
+            total[x["repo"]] = total.get(x["repo"], 0.0) + x["minutes"]
+        for repo in ("pub-site", "priv-api"):
+            self.assertAlmostEqual(total[repo], 40 / 3 * 9 + 90, places=3)
+
+    def test_estimate_block_warning_and_stdout(self):
+        # 受入基準 5
+        self.prepare()
+        r = self.run_cli(["--estimate", "--sample-runs", "3"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = self.load_out()
+        self.assertEqual(doc["estimate"], {"method": "sample_mean_per_workflow", "sample_runs": 3,
+                                           "sampled_runs": 12, "estimated_runs": 24, "groups": 4,
+                                           "unestimated_runs": 0})
+        self.assertTrue(any(w.startswith("推定値を含む") for w in doc["warnings"]))
+        self.assertLessEqual(len(r.stdout.splitlines()), 11)
+        self.assertIn("推定:", r.stdout)
+        for name in ("pub-site", "priv-api"):
+            self.assertNotIn(name, r.stdout)
+            self.assertFalse(any(name in w for w in doc["warnings"]))
+
+    def test_full_mode_has_no_estimate_and_default_k(self):
+        self.prepare()
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertNotIn("estimate", self.load_out())
+        self.assertEqual(self.run_cli(["--estimate"], out=os.path.join(self.root, "e.json"),
+                                      cache=os.path.join(self.root, "ec")).returncode, 0)
+        with open(os.path.join(self.root, "e.json")) as f:
+            self.assertEqual(json.load(f)["estimate"]["sample_runs"], fj.DEFAULT_SAMPLE_RUNS)
+
+    def test_max_seconds_resume_matches_uninterrupted(self):
+        self.prepare()
+        ref_out = os.path.join(self.root, "ref.json")
+        self.assertEqual(self.run_cli(["--estimate"], out=ref_out, cache=os.path.join(self.root, "refcache")).returncode, 0)
+        codes = []
+        for _ in range(80):
+            r = self.run_cli(["--estimate", "--max-seconds", "0.001"])
+            codes.append(r.returncode)
+            if r.returncode == 0:
+                break
+            self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertEqual(codes[-1], 0, codes)
+        self.assertIn(4, codes)
+        with open(ref_out) as f:
+            ref = json.load(f)
+        got = self.load_out()
+        self.assertEqual(got["rows"], ref["rows"])
+        self.assertEqual(got["estimate"], ref["estimate"])
+
+    def test_full_run_after_estimate_replaces_estimates(self):
+        # 推定区分の run は cache に無く cursor が作成日まで戻るため、次の全件取得で実測に置き換わる
+        self.prepare()
+        self.assertEqual(self.run_cli(["--estimate"]).returncode, 0)
+        self.assertEqual(self.run_cli().returncode, 0)
+        ref_out = os.path.join(self.root, "ref.json")
+        self.assertEqual(self.run_cli(out=ref_out, cache=os.path.join(self.root, "refcache")).returncode, 0)
+        self.assertEqual(self.rows(), self.rows(ref_out))
+
+    def test_all_sampled_jobs_invalid_degrades(self):
+        self.prepare()
+        for ids in self.groups.values():
+            for rid in ids:
+                self.cfg["jobs"][str(rid)] = [{"id": "bad", "labels": []}]
+        self.write_cfg()
+        r = self.run_cli(["--estimate"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = self.load_out()
+        est = doc["estimate"]
+        self.assertEqual((est["sampled_runs"], est["estimated_runs"]), (0, 0))
+        self.assertEqual(est["unestimated_runs"], 24 - 0)
+        self.assertTrue(any(w.startswith("推定できず") for w in doc["warnings"]))
+        self.assertEqual(doc["rows"], [])
+
+    def test_old_listing_without_workflow_id_is_relisted(self):
+        self.prepare()
+        os.makedirs(self.cache)
+        legacy = {"since": SINCE, "day": TODAY.isoformat(), "truncated": [], "repos": {"pub-site": [
+            {"id": 1, "run_attempt": 1, "status": "completed", "created_at": D0 + "T00:00:00Z"}]}}
+        with open(os.path.join(self.cache, "jobs-cache-%s.json" % ORG), "w") as f:
+            json.dump({"schema_version": 1, "org": ORG, "runs": {}, "listing": legacy}, f)
+        r = self.run_cli(["--estimate"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.load_out()["estimate"]["groups"], 4)
+
+    def test_build_dashboard_accepts_estimate_output(self):
+        # 受入基準 7
+        self.prepare()
+        self.assertEqual(self.run_cli(["--estimate"]).returncode, 0)
+        billing = os.path.join(self.work, "billing.json")
+        with open(billing, "w") as f:
+            json.dump({"schema_version": 1, "source": "billing", "org": ORG, "since": SINCE[:7],
+                       "until": TODAY.isoformat()[:7], "rows": []}, f)
+        outdir = os.path.join(self.work, "dash")
+        os.makedirs(outdir)
+        bd = os.path.join(HERE, "..", "scripts", "build_dashboard.py")
+        r = subprocess.run([sys.executable, "-I", "-B", bd, "--org", ORG, "--rows", billing,
+                            "--rows", self.out, "--out-dir", outdir],
+                           capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class GhApiRetryTest(unittest.TestCase):
