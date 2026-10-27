@@ -320,3 +320,26 @@ test('drawChart は tooLong を参照して警告を出す', () => {
   assert.match(body.slice(0, 600), /model\.tooLong/)
   assert.match(html, /グラフの上限/)
 })
+
+test('isEstimate は estimate がオブジェクトの jobs 文書だけを真にする', () => {
+  const est = { method: 'sample_mean_per_workflow', sample_runs: 3 }
+  assert.equal(U.isEstimate({ ...jobsDoc, estimate: est }), true)
+  assert.equal(U.isEstimate(jobsDoc), false)
+  for (const bad of [[], null, 'x', 3, true]) {
+    assert.equal(U.isEstimate({ ...jobsDoc, estimate: bad }), false, JSON.stringify(bad))
+  }
+  assert.equal(U.isEstimate(null), false)
+  assert.equal(U.isEstimate(undefined), false)
+  assert.equal(U.isEstimate(jobs), false)
+})
+
+test('ページ側の配線: 推定のときだけセルフホスト表示に「（推定）」を出す', () => {
+  assert.match(HTML, /U\.isEstimate\(jobsD\.data\)/)
+  const marks = [...HTML.matchAll(/<span class="aud-est"([^>]*)>（推定）<\/span>/g)]
+  assert.equal(marks.length, 2, 'リード文とタイルの 2 か所')
+  for (const m of marks) assert.match(m[1], /\bhidden\b/)
+  for (const id of ['aud-estimate', 'aud-sh-note', 'aud-total-note']) {
+    assert.match(HTML, new RegExp(`id="${id}"`))
+  }
+  assert.match(HTML, /<span id="aud-estimate" hidden>/)
+})

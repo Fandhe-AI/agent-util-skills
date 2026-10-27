@@ -104,7 +104,7 @@ class SummaryTests(Base):
         self.assertIsNone(bd["included"]["remaining"])  # unknown ありは確定値にしない
         self.assertIsNone(bd["included"]["ratio"])
         self.assertEqual(bd["public_free"]["minutes"], 700.0)
-        self.assertEqual(bd["self_hosted"], {"minutes": 40.0, "available": True})
+        self.assertEqual(bd["self_hosted"], {"minutes": 40.0, "available": True, "estimated": False})
         self.assertEqual(bd["unknown"]["minutes"], 50.0)
         self.assertTrue(any("下限" in w for w in s["warnings"]))
 
@@ -254,7 +254,7 @@ class CoverageTests(Base):
         bd = s["breakdown"]
         self.assertIsNone(bd["paid"])
         self.assertIsNone(bd["included"])
-        self.assertEqual(bd["self_hosted"], {"minutes": 40.0, "available": True})
+        self.assertEqual(bd["self_hosted"], {"minutes": 40.0, "available": True, "estimated": False})
         text = "\n".join(sm.render_text(s))
         self.assertNotIn("残り", text)
         self.assertTrue(any("取得期間" in w and "billing" in w for w in s["warnings"]))
@@ -543,6 +543,83 @@ class RowsStringSanitizeTests(Base):
         self.assertEqual(d["group_by"]["top"][0]["key"], name)
         self.assertNotIn(name, text)
         self.assertIn("…", text)
+
+
+NONE = object()  # estimate キーを付けない指定（None は JSON の null として付く）
+EST = {"method": "sample_mean_per_workflow", "sample_runs": 3}
+
+
+class EstimateTests(Base):
+    """jobs 文書の estimate を、セルフホスト行と JSON の estimated に写す（Issue #198）。"""
+
+    def est_files(self, estimate=EST, billing=BILLING, jobs=JOBS, billing_estimate=None,
+                  jobs_since=None, jobs_until=None):
+        jd = doc("jobs", jobs, since=jobs_since, until=jobs_until)
+        if estimate is not NONE:
+            jd["estimate"] = estimate
+        bd = doc("billing", billing)
+        if billing_estimate is not None:
+            bd["estimate"] = billing_estimate
+        a = []
+        if billing is not None:
+            a += ["--rows", self.write("b.json", bd)]
+        return a + ["--rows", self.write("j.json", jd)]
+
+    def run_ok(self, args, extra=()):
+        r = self.run_cli(args + ["--plan", "team", "--month", "2026-10"] + list(extra))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def test_estimate_marks_text_and_json(self):
+        args = self.est_files()
+        self.assertIn("セルフホスト: 40.0 分（推定）", self.run_ok(args))
+        bd = json.loads(self.run_ok(args, ["--json"]))["breakdown"]
+        self.assertIs(bd["self_hosted"]["estimated"], True)
+
+    def test_no_estimate_is_not_marked(self):
+        args = self.est_files(estimate=NONE)
+        out = self.run_ok(args)
+        self.assertIn("セルフホスト: 40.0 分", out)
+        self.assertNotIn("推定", out)
+        self.assertIs(json.loads(self.run_ok(args, ["--json"]))["breakdown"]["self_hosted"]["estimated"], False)
+
+    def test_outside_jobs_period_is_not_marked(self):
+        args = self.est_files(jobs_since="2026-11-01", jobs_until="2026-11-30")
+        out = self.run_ok(args)
+        self.assertIn("セルフホスト: データなし", out)
+        self.assertNotIn("（推定）", out)
+        self.assertIs(json.loads(self.run_ok(args, ["--json"]))["breakdown"]["self_hosted"]["estimated"], False)
+
+    def test_jobs_only_branch_is_marked(self):
+        args = self.est_files(billing=None)
+        self.assertIn("セルフホスト: 40.0 分（推定）", self.run_ok(args))
+        bd = json.loads(self.run_ok(args, ["--json"]))["breakdown"]
+        self.assertIs(bd["self_hosted"]["estimated"], True)
+
+    def test_invalid_estimate_exits_1(self):
+        for bad in ([], "x", 3, None, True):
+            r = self.run_cli(self.est_files(estimate=bad) + ["--plan", "team"])
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertIn("estimate", r.stderr)
+
+    def test_billing_estimate_is_ignored(self):
+        args = self.est_files(estimate=NONE, billing_estimate=EST)
+        self.assertNotIn("推定", self.run_ok(args))
+        self.assertIs(json.loads(self.run_ok(args, ["--json"]))["breakdown"]["self_hosted"]["estimated"], False)
+
+    def test_estimate_values_not_echoed(self):
+        out = self.run_ok(self.est_files(estimate={"method": "SECRET_METHOD_X"}))
+        self.assertNotIn("SECRET_METHOD_X", out)
+
+    def test_text_within_20_lines_with_estimate(self):
+        rows = []
+        for i in range(12):
+            rows.append(row("2026-10-%02d" % (i + 1), "repo-%02d" % i, "paid", 10 + i, usd=1 + i))
+            rows.append(row("2026-10-%02d" % (i + 1), "inc-%02d" % i, "included", 5 + i, quota=5 + i))
+        rows.append(row("2026-10-20", "u", "unknown", 3))
+        out = self.run_ok(self.est_files(billing=rows), ["--group-by", "repo"])
+        self.assertLessEqual(len(out.splitlines()), 20, out)
+        self.assertIn("（推定）", out)
 
 
 class SharedCommonTest(unittest.TestCase):

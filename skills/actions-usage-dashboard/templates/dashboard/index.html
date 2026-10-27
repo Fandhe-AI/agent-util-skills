@@ -5,7 +5,8 @@
   （必須）と datasets/jobs（任意。どちらも fetch 出力の JSON 全体 {since, until, rows}。取得期間の照合に使う）、dash/params の既定値を添える。ページは数値を持たず、
   集計は usage-agg ブロックの自己完結関数（dash.calc に直接渡す）が行う。
   契約: dataset id = billing / jobs。params = group_by / include_free / period /
-  runner_type / repo / plan_included_minutes。詳細は references/data-sources.md と
+  runner_type / repo / plan_included_minutes。jobs 文書の estimate（fetch_jobs.py --estimate が付ける）は
+  あるかないかだけを読み、中身は表示しない。詳細は references/data-sources.md と
   tests/dashboard-template.test.mjs（集計関数の回帰テスト）を参照。
 -->
 <style>
@@ -58,10 +59,10 @@
       含有枠の消費は <b data-source="totals" data-field="quota_minutes" data-where="key=*%7C*%7C*">—</b> 分
       （残り <span id="aud-remaining">—</span>）、
       公開リポの無料分は <b data-source="totals" data-field="public_free_minutes" data-where="key=*%7C*%7C*">—</b> 分、
-      セルフホストは <b data-source="totals" data-field="self_hosted_minutes" data-where="key=*%7C*%7C*">—</b> 分。
+      セルフホストは <b data-source="totals" data-field="self_hosted_minutes" data-where="key=*%7C*%7C*">—</b><span class="aud-est" hidden>（推定）</span> 分。
     </p>
     <p class="aud-note">日付はすべて UTC。<span id="aud-partial">最新日は集計途中の可能性がある。</span></p>
-    <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
+    <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-estimate" hidden>セルフホストは抜き取り推定の値で、実測ではない。正確な値は fetch_jobs.py を --estimate なしで実行して取り直す。</span><span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
     <p class="aud-note aud-alert" id="aud-coverage" hidden></p>
     <p class="aud-note aud-alert" id="aud-lower" hidden>区分不明の利用があるため、グラフの枠消費は下限値（「以上」）になる。</p>
     <p class="aud-note" id="aud-invalid" hidden></p>
@@ -105,14 +106,14 @@
       <div class="aud-tile-note">公開リポジトリの無料分</div>
     </div>
     <div class="aud-tile">
-      <div class="aud-tile-label">セルフホスト（分）</div>
+      <div class="aud-tile-label">セルフホスト（分）<span class="aud-est" hidden>（推定）</span></div>
       <div class="aud-tile-value" data-source="totals" data-field="self_hosted_minutes" data-where="key=*%7C*%7C*">—</div>
-      <div class="aud-tile-note">請求対象外</div>
+      <div class="aud-tile-note" id="aud-sh-note">請求対象外</div>
     </div>
     <div class="aud-tile">
       <div class="aud-tile-label">総分数</div>
       <div class="aud-tile-value" data-source="totals" data-field="total_minutes" data-where="key=*%7C*%7C*">—</div>
-      <div class="aud-tile-note">全区分の合計</div>
+      <div class="aud-tile-note" id="aud-total-note">全区分の合計</div>
     </div>
     <div class="aud-tile">
       <div class="aud-tile-label">定価換算（gross）</div>
@@ -439,6 +440,13 @@ window.UsageAgg = (function () {
     return { period: period, metric: metric, axis: axis, days: range || [], tooLong: tooLong, groups: groups, values: values, lowerBound: lowerIds.size > 0 };
   }
 
+  // jobs 文書が抜き取り推定を含むか。estimate がオブジェクトのときだけ真にし、中身は読まない。
+  // rows 配列だけの入力は文書ではないため偽。dash.calc には渡さず render() から直接呼ぶ。
+  function isEstimate(doc) {
+    return doc !== null && typeof doc === 'object' && !Array.isArray(doc) &&
+      doc.estimate !== null && typeof doc.estimate === 'object' && !Array.isArray(doc.estimate);
+  }
+
   return {
     CLASS_ORDER: CLASS_ORDER,
     CLASS_META: CLASS_META,
@@ -454,6 +462,7 @@ window.UsageAgg = (function () {
     resolvePeriod: resolvePeriod,
     months: months_,
     span: span,
+    isEstimate: isEstimate,
     coverage: coverage,
     matches: matches,
     topGroups: topGroups,
@@ -784,6 +793,12 @@ function render() {
   };
   paintTotals(ready ? t.data : [], sel, period, cov, ready);
   $('#aud-nojobs').hidden = jobsD.status === 'ok';
+  // 推定は jobs 文書全体の属性。選択期間に jobs がない（不明表示）ときは推定と書かない。
+  const est = jobsD.status === 'ok' && U.isEstimate(jobsD.data) && cov.jobs !== 'none';
+  page.querySelectorAll('.aud-est').forEach((el) => { el.hidden = !est; });
+  $('#aud-estimate').hidden = !est;
+  $('#aud-sh-note').textContent = est ? '請求対象外・推定値' : '請求対象外';
+  $('#aud-total-note').textContent = est ? '全区分の合計（セルフホストは推定）' : '全区分の合計';
   const notes = [];
   [['billing', 'billing（GitHub ホスト分）'], ['jobs', 'jobs（セルフホスト分）']].forEach((p) => {
     if (cov[p[0]] === 'none' && !(p[0] === 'jobs' && jobsD.status !== 'ok')) notes.push(p[1] + 'は選択期間を取得していないため不明（0 ではない）。');
