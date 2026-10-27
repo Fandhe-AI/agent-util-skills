@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 
 GH_TIMEOUT = 120
 ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
@@ -75,18 +76,54 @@ def nonneg_num(item, key, required=True, origin="API"):
     return f
 
 
-def gh_api(args):
-    try:
-        r = subprocess.run(["gh", "api"] + args, capture_output=True, text=True,
-                           timeout=GH_TIMEOUT, shell=False)
-    except FileNotFoundError:
-        raise FetchError("gh コマンドが見つからない")
-    except subprocess.TimeoutExpired:
-        raise FetchError("gh api が %d 秒でタイムアウト" % GH_TIMEOUT)
-    if r.returncode != 0:
+_HTTP_STATUS_RE = re.compile(r"HTTP (\d{3})\b")
+# 再試行 1 回あたりの待ち時間の上限（秒）。呼び出し元が大きな retry_wait を渡しても、無制限に待たせない。
+_MAX_RETRY_WAIT = 60
+
+
+def _http_status(stderr):
+    """gh の stderr（`gh: HTTP 502` / `gh: <message> (HTTP 502)`）から最後の HTTP 状態番号を取る。無ければ None。"""
+    found = _HTTP_STATUS_RE.findall(stderr or "")
+    return int(found[-1]) if found else None
+
+
+def gh_api(args, retries=0, retry_wait=0.0, on_retry=None, _sleep=time.sleep):
+    """`gh api` を読み取りとして呼ぶ。
+
+    retries=0（既定）は再試行しない。fetch_billing.py / summarize.py はこの既定のまま使う。
+    fetch_jobs.py だけが retries を渡し、一時的な 5xx（HTTP 500〜599）を有界に再試行する。
+    再試行するのは 5xx だけで、4xx（権限不足・secondary rate limit・429 を含む）、状態番号を
+    取れない失敗、gh 不在、タイムアウト（120 秒を回数分重ねないため）は再試行しない。
+    待ち時間は retry_wait * 2**k 秒（k は 0 始まりの再試行回数）で、1 回あたり _MAX_RETRY_WAIT 秒に頭打ちする。
+    呼び出しはすべて GET で冪等なため、再試行しても副作用はない。
+    再試行する直前に on_retry() を呼ぶ（呼び出し数の計数用）。上限まで 5xx が続いたら
+    「gh api 失敗（HTTP <番号>・5xx を N 回再試行しても回復しない）」の FetchError にする。
+    """
+    attempt = 0
+    while True:
+        try:
+            r = subprocess.run(["gh", "api"] + args, capture_output=True, text=True,
+                               timeout=GH_TIMEOUT, shell=False)
+        except FileNotFoundError:
+            raise FetchError("gh コマンドが見つからない")
+        except subprocess.TimeoutExpired:
+            raise FetchError("gh api が %d 秒でタイムアウト" % GH_TIMEOUT)
+        if r.returncode == 0:
+            return r.stdout
         lines = (r.stderr or "").strip().splitlines()
-        raise FetchError("gh api 失敗: %s" % (lines[0][:200] if lines else "exit %d" % r.returncode))
-    return r.stdout
+        first = lines[0][:200] if lines else "exit %d" % r.returncode
+        status = _http_status(r.stderr)
+        if status is None or not 500 <= status <= 599:
+            raise FetchError("gh api 失敗: %s" % first)
+        if attempt >= retries:
+            if retries > 0:
+                raise FetchError("gh api 失敗（HTTP %d・5xx を %d 回再試行しても回復しない）: %s"
+                                 % (status, retries, first))
+            raise FetchError("gh api 失敗: %s" % first)
+        if on_retry is not None:
+            on_retry()
+        _sleep(min(retry_wait * 2 ** attempt, _MAX_RETRY_WAIT))
+        attempt += 1
 
 
 def atomic_write_json(path, obj):

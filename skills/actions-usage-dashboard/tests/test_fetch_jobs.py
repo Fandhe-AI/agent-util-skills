@@ -57,12 +57,21 @@ while i < len(a):
     else:
         path = a[i]; i += 1
 if path == "rate_limit":
+    n_rate = len([l for l in log if l.startswith("api rate_limit")])
+    if n_rate <= cfg.get("rate5xx_times", 0):
+        sys.stderr.write("gh: Bad Gateway (HTTP 502)\n"); sys.exit(1)
     rem = 5000
     if low_after is not None and n_api >= low_after:
         rem = cfg.get("low_value", 3)
     print(json.dumps({"resources": {"core": {"remaining": rem, "reset": 1}}}))
     sys.exit(0)
+if n_api <= cfg.get("fail5xx_until", 0):
+    sys.stderr.write("gh: Bad Gateway (HTTP 502)\n"); sys.exit(1)
 if fail_after is not None and n_api > fail_after:
+    if cfg.get("fail_status") == 404:
+        sys.stderr.write("gh: Not Found (HTTP 404)\n"); sys.exit(1)
+    if cfg.get("fail_status") == 502:
+        sys.stderr.write("gh: Bad Gateway (HTTP 502)\n"); sys.exit(1)
     sys.stderr.write("HTTP 500 boom\n"); sys.exit(1)
 if cfg.get("sleep_after") is not None and n_api > cfg["sleep_after"]:
     time.sleep(30)
@@ -442,13 +451,67 @@ class Cli(unittest.TestCase):
         self.assertIn("一覧 1200", r.stdout)
         self.assertNotIn("警告", r.stdout)
 
+    def api_calls(self):
+        return [c for c in self.calls() if not c.startswith("api rate_limit")]
+
     def test_gh_failure_keeps_cache_no_out(self):
         self.cfg["fail_after"] = 4
         self.write_cfg()
-        r = self.run_cli()
+        r = self.run_cli(["--retry-wait", "0"])
         self.assertEqual(r.returncode, 1)
         self.assertFalse(os.path.exists(self.out))
         self.assertIn("gh api 失敗", r.stderr)
+        # 失敗した 1 回目 + 既定の再試行 3 回
+        self.assertEqual(len(self.api_calls()), 4 + 1 + fj.DEFAULT_RETRIES)
+
+    def test_transient_5xx_then_success(self):
+        base = self.run_cli()
+        self.assertEqual(base.returncode, 0, base.stderr)
+        expected = self.rows()
+        os.unlink(self.out)
+        shutil.rmtree(self.cache)
+        self.reset_calls()
+        self.cfg["fail5xx_until"] = 2
+        self.write_cfg()
+        r = self.run_cli(["--retry-wait", "0"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.rows(), expected)
+        self.assertIn("5xx 再試行 2 回", r.stdout)
+
+    def test_transient_5xx_on_rate_limit(self):
+        self.cfg["rate5xx_times"] = 2
+        self.write_cfg()
+        r = self.run_cli(["--retry-wait", "0"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("5xx 再試行 2 回", r.stdout)
+
+    def test_5xx_exhausted_exits_1(self):
+        self.cfg["fail_after"] = 4
+        self.cfg["fail_status"] = 502
+        self.write_cfg()
+        r = self.run_cli(["--retry-wait", "0", "--retries", "2"])
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(os.path.exists(self.out))
+        for word in ("gh api 失敗", "HTTP 502", "5xx"):
+            self.assertIn(word, r.stderr)
+        self.assertEqual(len(self.api_calls()), 4 + 1 + 2)
+
+    def test_4xx_not_retried(self):
+        self.cfg["fail_after"] = 4
+        self.cfg["fail_status"] = 404
+        self.write_cfg()
+        r = self.run_cli(["--retry-wait", "0"])
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(self.api_calls()), 4 + 1)
+        self.assertNotIn("5xx", r.stderr)
+
+    def test_retries_zero_does_not_retry(self):
+        self.cfg["fail_after"] = 4
+        self.cfg["fail_status"] = 502
+        self.write_cfg()
+        r = self.run_cli(["--retries", "0"])
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(self.api_calls()), 4 + 1)
 
     def bad_minutes_bodies(self):
         """agg[].minutes の不正値（bool・文字列・欠損・None・NaN・inf・巨大な整数）。受理集合は nonneg_num と同一（Issue #182）。"""
@@ -686,6 +749,9 @@ class Cli(unittest.TestCase):
         cases = [
             dict(extra=["--max-seconds", "-1"]), dict(extra=["--progress-interval", "-1"]),
             dict(extra=["--max-seconds", "nan"]),
+            dict(extra=["--retries", "-1"]), dict(extra=["--retries", "11"]),
+            dict(extra=["--retry-wait", "-1"]), dict(extra=["--retry-wait", "61"]),
+            dict(extra=["--retry-wait", "nan"]), dict(extra=["--retry-wait", "inf"]),
             dict(org="bad_org!"), dict(since="2026-10-1"), dict(since="2026-13-01"), dict(since=future),
             dict(out=self.work), dict(out=os.path.join(self.work, "nodir", "x.json")), dict(cache=a_file),
         ]
@@ -696,6 +762,67 @@ class Cli(unittest.TestCase):
         self.assertEqual(os.listdir(self.work), ["afile"])
         self.assertFalse(os.path.exists(self.cache))
         self.assertFalse(os.path.exists(self.out))
+
+
+class GhApiRetryTest(unittest.TestCase):
+    """_common.gh_api の再試行契約（既定は再試行なし・5xx だけ・有界）。"""
+
+    def setUp(self):
+        import _common
+        self.c = _common
+        self.orig = _common.subprocess.run
+        self.addCleanup(setattr, _common.subprocess, "run", self.orig)
+        self.sleeps = []
+
+    def fake(self, responses):
+        it = iter(responses)
+        self.n = 0
+
+        def run(*a, **k):
+            self.n += 1
+            r = next(it)
+            if isinstance(r, BaseException):
+                raise r
+            code, out, err = r
+            return subprocess.CompletedProcess(a, code, out, err)
+        self.c.subprocess.run = run
+
+    def call(self, **kw):
+        return self.c.gh_api(["x"], _sleep=self.sleeps.append, **kw)
+
+    def test_5xx_then_success(self):
+        e = (1, "", "gh: Bad Gateway (HTTP 502)")
+        self.fake([e, e, (0, "ok", "")])
+        self.assertEqual(self.call(retries=3, retry_wait=2), "ok")
+        self.assertEqual(self.sleeps, [2, 4])
+
+    def test_5xx_exhausted(self):
+        self.fake([(1, "", "gh: HTTP 503")] * 4)
+        with self.assertRaises(self.c.FetchError) as cm:
+            self.call(retries=3, retry_wait=1000)
+        self.assertIn("HTTP 503", str(cm.exception))
+        self.assertEqual(self.n, 4)
+        self.assertEqual(len(self.sleeps), 3)
+        self.assertTrue(all(w <= fj.MAX_RETRY_WAIT for w in self.sleeps), self.sleeps)
+
+    def test_4xx_and_timeout_not_retried(self):
+        self.fake([(1, "", "gh: Not Found (HTTP 404)")])
+        with self.assertRaises(self.c.FetchError):
+            self.call(retries=3)
+        self.fake([subprocess.TimeoutExpired("gh", 1)])
+        with self.assertRaises(self.c.FetchError):
+            self.call(retries=3)
+        self.fake([(1, "", "no status here")])
+        with self.assertRaises(self.c.FetchError):
+            self.call(retries=3)
+        self.assertEqual(self.sleeps, [])
+
+    def test_default_does_not_retry_and_keeps_message(self):
+        self.fake([(1, "", "gh: Bad Gateway (HTTP 502)")])
+        with self.assertRaises(self.c.FetchError) as cm:
+            self.call()
+        self.assertEqual(str(cm.exception), "gh api 失敗: gh: Bad Gateway (HTTP 502)")
+        self.assertEqual((self.n, self.sleeps), (1, []))
 
 
 class SharedCommonTest(unittest.TestCase):
