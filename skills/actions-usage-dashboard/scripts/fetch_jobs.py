@@ -31,6 +31,9 @@
 終了コード: 0 成功 / 1 失敗 / 3 レート制限の残量不足で中断（キャッシュ保存済み。
   同じコマンドで再実行すると続きから取る。中断時と失敗時は --out を書かない）/
   4 --max-seconds の時間上限で中断（キャッシュ保存済み。3 と違い待たずにすぐ再実行してよい。--out は書かない）。
+  一時的な 5xx は --retries 回（既定 3）まで --retry-wait 秒（既定 5、指数バックオフ、1 回 60 秒上限）で
+  再試行する。上限まで回復しなければ終了コード 1。4xx・レート制限・タイムアウトは再試行しない。
+  再試行の待ちは --max-seconds の予算に含まれず、その上に乗る（run / リポジトリの境目でしか予算を見ないため）。
 
 runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, from}}）に、リポジトリごとの
   「次回の一覧の下限候補」を持つ。2 回目以降は created>=from から一覧し、API 呼び出しを減らす。
@@ -117,6 +120,12 @@ DEFAULT_SAMPLE_RUNS = 3
 # 抜き取り数 K の上限。K x 組数が API 呼び出し数の上限になるため、処理量を抑える
 MAX_SAMPLE_RUNS = 20
 ESTIMATE_METHOD = "sample_mean_per_workflow"
+# 5xx の再試行。長い取得が数十分かかる org で、1〜1.5 時間に 1 回返る一時的な 502 のたびに最初からやり直さない
+# ための有界な再試行。上限は暴走防止（回数 10・1 回 60 秒）で、_common._MAX_RETRY_WAIT と揃える
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_WAIT = 5
+MAX_RETRIES = 10
+MAX_RETRY_WAIT = 60
 # GitHub の run を再実行できる期間（公式: 初回実行から 30 日まで。
 # https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs ）に
 # 余裕を持たせた値。公式の起点は作成日ではなく初回実行で、一覧の絞り込み（created>=）より遅れ得る
@@ -381,17 +390,29 @@ def _json(text, what):
 class GhClient:
     """API 呼び出し数の計数とレート制限の確認を担う。runs / jobs は page を手で回す。"""
 
-    def __init__(self, min_remaining, check_every):
+    def __init__(self, min_remaining, check_every, retries=0, retry_wait=0.0):
         self.counts = {"repos": 0, "runs": 0, "jobs": 0}
         self.rate_checks = 0
+        self.retries, self.retry_wait = 0, retry_wait
+        self._max_retries = retries
         self.min_remaining, self.check_every = min_remaining, check_every
         self._since_check = None  # None は未確認
 
     def total(self):
         return sum(self.counts.values())
 
+    def _on_retry(self):
+        # 5xx の試行もレート制限を消費し得るため、安全側に倒して呼び出し数へ加える
+        self.retries += 1
+        if self._since_check is not None:
+            self._since_check += 1
+
+    def _gh(self, args):
+        """gh_api の唯一の入口。runs / jobs / rate_limit / リポジトリ一覧のすべてで 5xx を再試行する（GET で冪等）。"""
+        return gh_api(args, retries=self._max_retries, retry_wait=self.retry_wait, on_retry=self._on_retry)
+
     def _call(self, kind, args, n=1):
-        out = gh_api(args)
+        out = self._gh(args)
         self.counts[kind] += n
         if self._since_check is not None:
             self._since_check += n
@@ -401,7 +422,7 @@ class GhClient:
         """run / リポジトリの境目でだけ呼ぶ。途中ページで止めず、半端な状態を残さない。"""
         if not force and self._since_check is not None and self._since_check < self.check_every:
             return
-        d = _json(gh_api(["rate_limit"]), "rate_limit")
+        d = _json(self._gh(["rate_limit"]), "rate_limit")
         self.rate_checks += 1
         self._since_check = 0
         core = d.get("resources", {}).get("core", {}) if isinstance(d, dict) else {}
@@ -412,7 +433,7 @@ class GhClient:
             raise RateLimited(rem, reset)
 
     def list_repos(self, org):
-        text = gh_api(["--paginate", "orgs/%s/repos?per_page=100&type=all" % org])
+        text = self._gh(["--paginate", "orgs/%s/repos?per_page=100&type=all" % org])
         repos, pages = parse_concatenated_json(text)
         self.counts["repos"] += max(pages, 1)
         if self._since_check is not None:
@@ -594,6 +615,10 @@ def main(argv=None):
                     help="API 呼び出しがこの回数増えるごとに残量を確認する")
     ap.add_argument("--max-seconds", type=float, default=0,
                     help="この秒数に達したら run / リポジトリの境目でキャッシュを保存して終了コード 4 で中断する（0 は無制限）")
+    ap.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
+                    help="一時的な 5xx の再試行回数（0〜%d。0 で再試行しない）" % MAX_RETRIES)
+    ap.add_argument("--retry-wait", type=float, default=DEFAULT_RETRY_WAIT,
+                    help="5xx の再試行の初回待ち秒（指数バックオフ。0〜%d）" % MAX_RETRY_WAIT)
     ap.add_argument("--progress-interval", type=float, default=DEFAULT_PROGRESS_INTERVAL,
                     help="進捗の stderr 出力とキャッシュ保存の間隔（秒。0 で境目ごと）")
     ap.add_argument("--estimate", action="store_true",
@@ -615,9 +640,10 @@ def main(argv=None):
         out = ["出力: %s" % a.out, "期間: %s..%s（UTC）" % (a.since, until_s),
                "リポジトリ: 対象 %d（アーカイブ除外 %d / 名前不正で除外 %d）" % (
                    stats.get("targets", 0), stats["archived"], stats["badname"]),
-               "API 呼び出し: 計 %d（repos %d / runs %d / jobs %d）・rate_limit 確認 %d 回" % (
+               "API 呼び出し: 計 %d（repos %d / runs %d / jobs %d）・rate_limit 確認 %d 回%s" % (
                    client.total(), client.counts["repos"], client.counts["runs"],
-                   client.counts["jobs"], client.rate_checks),
+                   client.counts["jobs"], client.rate_checks,
+                   "・5xx 再試行 %d 回" % client.retries if client.retries else ""),
                "run: 一覧 %d / 新規取得 %d / キャッシュ利用 %d / 未完了で保留 %d" % (
                    stats["listed"], stats["fetched"], stats["cached"], stats["pending"])]
         if rows is not None:
@@ -659,6 +685,9 @@ def main(argv=None):
                 if not re.match(r"^[0-9]{1,9}\Z", a.sample_runs) or not 1 <= int(a.sample_runs) <= MAX_SAMPLE_RUNS:
                     raise FetchError("--sample-runs は 1 以上 %d 以下の整数で指定する" % MAX_SAMPLE_RUNS)
                 sample_k = int(a.sample_runs)
+        if not (0 <= a.retries <= MAX_RETRIES and math.isfinite(a.retry_wait)
+                and 0 <= a.retry_wait <= MAX_RETRY_WAIT):
+            raise FetchError("--retries は 0〜%d の整数、--retry-wait は 0〜%d の数で指定する" % (MAX_RETRIES, MAX_RETRY_WAIT))
         if os.path.isdir(a.out):
             raise FetchError("--out がディレクトリを指している")
         if not os.path.isdir(os.path.dirname(os.path.abspath(a.out))):
@@ -670,7 +699,7 @@ def main(argv=None):
         cache_path = os.path.join(a.cache, "jobs-cache-%s.json" % a.org)
         cache = load_cache(cache_path, a.org)
         os.makedirs(a.cache, exist_ok=True)
-        client = GhClient(a.min_remaining, a.rate_check_every)
+        client = GhClient(a.min_remaining, a.rate_check_every, a.retries, a.retry_wait)
         pacer = Pacer(a.max_seconds, a.progress_interval)
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)
