@@ -163,8 +163,20 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 ```
 
   `sampled_runs` は有効な抜き取り run の合計、`estimated_runs` は推定した run 数、`groups` は組の数、`unestimated_runs` は抜き取りが全て不正 job（または作成日が不正）で 0 分として数えた run 数。`warnings` に推定値である旨の 1 行（数値のみ）が入り、標準出力にも 1 行足す
+- 推定の式（再掲）: 組 g の推定分 = (Σ 抜き取り run のセルフホスト分 ÷ 有効な抜き取り数) × 抜き取らなかった完了 run 数（runner_group ごと）
 - API 呼び出し数: リポジトリ一覧のページ数 + runs 一覧のページ数（二分探索を含む）+ 抜き取りで新規に取る run の jobs ページ数。jobs が 1 ページなら jobs の呼び出しは K × 組数以下。runs 一覧が支配的になり、約 640 回 + K × 組数、1〜1.5 時間程度の見込み（呼び出し 1 回 0.5〜1 秒の仮定。未計測）
-- 限界: workflow 内のばらつきが大きいと誤差が出る。推定と実測の誤差は #199 で実 org を使って測る。要約・ダッシュボードでの `estimate` の専用表示は #198
+- 誤差要因（実装は fetch_jobs.py の `plan_samples` / `estimate_entries`）
+  - workflow 内のばらつき: 条件付き job・matrix・`paths` による job の有無で、run ごとの分数が大きく変わる
+  - 母集団は完了 run 全体: cancelled・failure など短く終わった run も同じ平均に入る
+  - K が小さいほど外れ値の影響が大きい
+  - 期間途中のランナー移行: 抜き取りを分散させて和らげるが、組の平均は期間全体に広がる
+  - 旧 attempt 残し（再実行で完了した run）: 推定せず旧 attempt の値を使うため過少になり得る
+  - 推定不能（抜き取りが全て不正 job、または作成日が不正）: 0 分として数えるため過少になる（`unestimated_runs`）
+  - 割り当て日は run の作成日（UTC）: 日をまたぐ run は実測と日別の配分がずれる
+  - 推定と実測の誤差の測定は #199 で実 org を使って行う
+- 要約・ダッシュボードの表示: どちらも jobs 文書に `estimate` があるかないかだけを読み、数値・文字列は表示に使わない
+  - `summarize.py`: セルフホスト行に「（推定）」を付け、`--json` の `breakdown.self_hosted.estimated` を true にする（キーは常にあり、推定でなければ false。対象月が jobs の取得期間外なら false）。`estimate` がオブジェクトでなければ終了コード 1。billing 文書の `estimate` は無視する
+  - 雛形 `templates/dashboard/index.html`: リード文・セルフホストのタイルに「（推定）」、タイルの注記と総分数の注記・注記行に推定である旨を出す。選択期間に jobs がないとき、jobs 未接続のときは出さない。グループ別の上位行・グラフ・内訳表には推定表示がない
 
 ### レート制限と終了コード
 

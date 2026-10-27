@@ -22,6 +22,11 @@ helper の共有: FetchError / gh_api / nonneg_num / safe / CTRL_RE / MAX_NAME_L
   nonneg_num は origin="rows" を渡し、例外メッセージの入力元表記だけを API から変えている。
   検証用の正規表現の終端は `\\Z` に統一する（`$` は末尾の改行の手前にも一致するため）。
 
+推定の表示: jobs の rows JSON にトップレベルの estimate（fetch_jobs.py --estimate が付ける）があるときだけ、
+  セルフホスト行に「（推定）」を付け、--json の breakdown.self_hosted.estimated を true にする。
+  estimate の中身（method・件数）は読まず出力もしない（非信頼値を端末へ出さない）。オブジェクト以外なら止める。
+  billing 側の estimate は無視する。
+
 アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
 """
 import argparse
@@ -107,11 +112,17 @@ def month_overlap(cov, month, today=None):
 
 
 def load_rows(paths):
-    """rows ファイルを検証して (org, rows, sources, warnings) を返す。非信頼入力として fail-closed。
+    """rows ファイルを検証して (org, rows, sources, warnings) を返す。_load の推定フラグ抜き版。"""
+    return _load(paths)[:4]
+
+
+def _load(paths):
+    """rows ファイルを検証して (org, rows, sources, warnings, estimated) を返す。非信頼入力として fail-closed。
 
     warnings は取得元（fetch_*.py）が記録した欠損・取得時点の警告で、出力へ引き継ぐ。
+    estimated は jobs 文書が推定を含むか（estimate キーがあるか）。
     """
-    org, rows, sources, warnings = None, [], {}, []
+    org, rows, sources, warnings, estimated = None, [], {}, [], False
     for p in paths:
         try:
             if os.path.getsize(p) > MAX_ROWS_BYTES:
@@ -130,6 +141,10 @@ def load_rows(paths):
         if src in sources:
             raise FetchError("同じ source（%s）の rows が重複している" % src)
         sources[src] = _coverage(src, data, p)
+        if src == "jobs" and "estimate" in data:
+            if not isinstance(data["estimate"], dict):
+                raise FetchError("rows の estimate がオブジェクトではない: %s" % safe(p))
+            estimated = True
         o = data.get("org")
         if not isinstance(o, str) or not ORG_RE.match(o):
             raise FetchError("rows の org が不正: %s" % safe(p))
@@ -163,7 +178,7 @@ def load_rows(paths):
                 "quota_minutes": nonneg_num(r, "quota_minutes", False, origin="rows"),
                 "net_usd": nonneg_num(r, "net_usd", False, origin="rows"),
             })
-    return org, rows, sources, warnings
+    return org, rows, sources, warnings, estimated
 
 
 def included_for(plan):
@@ -186,10 +201,12 @@ def _r(x):
     return round(x, 6)
 
 
-def breakdown(rows, included_minutes, has_jobs, has_billing=True):
+def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=False):
     """内訳を作る。unknown 区分の利用がある月は含有枠の消費が過小になるため、
     remaining / ratio を確定値にせず None（不明）にし、quota_minutes は下限として扱う。
     """
+    # 推定は jobs 文書全体の属性。セルフホストの分を取れているときだけ真にする。
+    est = bool(estimated and has_jobs)
     s = {c: {"minutes": 0.0, "net_usd": 0.0, "quota": 0.0} for c in CHARGE_CLASSES}
     for r in rows:
         a = s[r["charge_class"]]
@@ -210,13 +227,13 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True):
         # billing 未入力では GitHub ホスト分の内訳と枠の残りを計算できない。0 と誤読させず不明にする。
         return {
             "paid": None, "included": None, "public_free": None, "unknown": None,
-            "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs},
+            "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est},
         }
     return {
         "paid": {"minutes": _r(s["paid"]["minutes"]), "net_usd": _r(s["paid"]["net_usd"])},
         "included": inc,
         "public_free": {"minutes": _r(s["public_free"]["minutes"])},
-        "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs},
+        "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est},
         "unknown": {"minutes": _r(s["unknown"]["minutes"])},
     }
 
@@ -266,7 +283,7 @@ def candidates(month_rows, all_rows, top):
             "others": max(len(ordered) - top, 0)}
 
 
-def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=(), today=None):
+def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=(), today=None, estimated=False):
     mrows = select_month(rows, month)
     inc_min = included_for(plan)
     warnings = list(src_warnings)
@@ -297,7 +314,7 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
         warnings.append(plan_warning)
     elif inc_min is None:
         warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
-    bd = breakdown(mrows, inc_min, has_jobs, has_billing)
+    bd = breakdown(mrows, inc_min, has_jobs, has_billing, estimated)
     if has_billing and bd["unknown"]["minutes"] > 0:
         warnings.append("区分不明あり。含有枠の消費は下限で、残量・割合は不明。期間中に公開範囲が変わっていないと保証できる場合だけ、"
                         "fetch_billing.py に --assume-current-visibility を付けると現在の公開範囲で分類できる"
@@ -346,8 +363,9 @@ def render_text(s):
 
 def _render_tail(s, out):
     bd = s["breakdown"]
-    out.append("セルフホスト: %s" % ("%.1f 分" % bd["self_hosted"]["minutes"]
-                                 if bd["self_hosted"]["available"] else "データなし"))
+    sh = bd["self_hosted"]
+    out.append("セルフホスト: %s" % (("%.1f 分" % sh["minutes"]) + ("（推定）" if sh["estimated"] else "")
+                                 if sh["available"] else "データなし"))
     if bd["unknown"] is not None and bd["unknown"]["minutes"] > 0:
         out.append("区分不明: %.1f 分" % bd["unknown"]["minutes"])
     g = s["group_by"]
@@ -388,7 +406,7 @@ def main(argv=None):
             raise FetchError("--rows は最大 2 件")
         if a.month is not None and not MONTH_RE.match(a.month):
             raise FetchError("--month は YYYY-MM 形式で指定する")
-        org, rows, sources, src_warnings = load_rows(a.rows)
+        org, rows, sources, src_warnings, estimated = _load(a.rows)
         month = a.month or (max(r["day"][:7] for r in rows) if rows
                             else datetime.now(timezone.utc).strftime("%Y-%m"))
         plan, plan_warning = a.plan, None
@@ -397,7 +415,8 @@ def main(argv=None):
                 plan = fetch_plan(org)
             except FetchError as e:
                 plan, plan_warning = None, "プラン取得に失敗（含有分は不明）: %s" % safe(e, MAX_WARNING_LEN)
-        summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top, src_warnings)
+        summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top, src_warnings,
+                                estimated=estimated)
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)
         return 1
