@@ -701,7 +701,7 @@ function paintTotals(rows, sel, period, cov, ready, approx) {
   else if (period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
   // 行がない単月は、billing 取得済み（上の分岐を通過）かつ準備完了のときだけ消費 0 として全量を残量にする。
   else if (!row && !ready) remaining = '不明（集計を取得できていない）';
-  else remaining = fmtMin(Math.max(sel.plan - (row || zeroRow).quota_minutes, 0)) + ' 分';
+  else remaining = (approx ? '約 ' : '') + fmtMin(Math.max(sel.plan - (row || zeroRow).quota_minutes, 0)) + ' 分';
   $('#aud-remaining').textContent = remaining;
 }
 
@@ -719,31 +719,36 @@ function paintWarnings(warnings) {
   el.hidden = items.length === 0;
 }
 
-// 含有枠の消費の数値に付ける印（タイル・表）。区分不明の利用があるときだけ付け、
-// 概算なら「（概算）」、下限なら「 以上」。区分不明の分は quota に入らないため、既定モードでは下限になる。
+// 含有枠の消費の数値に付ける印（タイル・表・凡例・ツールチップで共通）。概算なら区分不明の有無にかかわらず
+// 「（概算）」（公開範囲と換算式による誤差は区分不明と独立）。概算でなく区分不明があれば「 以上」
+// （区分不明の分は quota に入らないため、既定モードでは下限になる）。どちらでもなければ印なし。
 function quotaMark(hasUnknown, approx) {
-  if (!hasUnknown) return '';
-  return approx ? '（概算）' : ' 以上';
+  if (approx) return '（概算）';
+  return hasUnknown ? ' 以上' : '';
 }
 
-// 凡例とツールチップの文言。「以上」は g.lower（chartModel が確度を反映済み）の群にだけ付ける。
+// 凡例とツールチップの文言。印は chartModel が確度を反映して g.mark に入れたものを使う。
 function legendLabel(axis, g) {
-  return labelOf(axis, g.id) + ' ' + fmtMin(g.total) + (g.lower ? ' 以上' : '');
+  return labelOf(axis, g.id) + ' ' + fmtMin(g.total) + g.mark;
 }
 function tipRowLabel(axis, g, v) {
-  return labelOf(axis, g.id) + ' ' + fmtMin(v) + (g.lower ? ' 以上' : '');
+  return labelOf(axis, g.id) + ' ' + fmtMin(v) + g.mark;
 }
 function tipTotalLabel(groups, total) {
-  return '合計 ' + fmtMin(total) + (groups.some((g) => g.lower) ? ' 分以上' : ' 分');
+  const mark = groups.some((g) => g.lower) ? '以上' : (groups.some((g) => g.mark === '（概算）') ? '（概算）' : '');
+  return '合計 ' + fmtMin(total) + ' 分' + mark;
 }
 
-// グラフのモデルを作り、概算なら下限の印（g.lower / lowerBound）を落とす。drawChart / drawLegend は
-// g.lower で「以上」を付けるため、描画より前にここで確定させる（描画後に落とすと凡例・ツールチップに
-// 「以上」が残り、タイル・表の「（概算）」と食い違う。#209）。unknownInQuota は確度に関係なく
+// グラフのモデルを作り、群ごとの印（g.mark）を確度で決め、概算なら下限の印（g.lower / lowerBound）を落とす。
+// drawChart / drawLegend は g.mark と g.lower で文言を作るため、描画より前にここで確定させる（描画後に
+// 落とすと凡例・ツールチップに「以上」が残り、タイル・表の「（概算）」と食い違う。#209）。印は枠消費の
+// グラフ（無料枠を除く）のときだけ付ける。unknownInQuota は確度に関係なく
 // 「枠消費のグラフに区分不明の行がある（その分は quota に入らない）」かを残す。
 function chartModel(factRows, sel, sources, approx) {
   const model = U.daily(factRows, Object.assign({}, sel, { sources: sources }));
+  const quota = model.metric === 'quota_minutes';
   model.unknownInQuota = model.lowerBound;
+  model.groups.forEach((g) => { g.mark = quota ? quotaMark(g.lower, approx) : ''; });
   if (approx) {
     model.groups.forEach((g) => { g.lower = false; });
     model.lowerBound = false;

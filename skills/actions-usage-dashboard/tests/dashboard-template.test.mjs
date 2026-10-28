@@ -506,7 +506,7 @@ const pageConst = (name) => {
   return m[0]
 }
 const chartTexts = (factRows, sel, approx) => {
-  const src = ['labelOf', 'legendLabel', 'tipRowLabel', 'tipTotalLabel', 'chartModel', 'lowerNote'].map(pageFn).join('\n')
+  const src = ['labelOf', 'quotaMark', 'legendLabel', 'tipRowLabel', 'tipTotalLabel', 'chartModel', 'lowerNote'].map(pageFn).join('\n')
     + pageConst('LOWER_NOTE') + pageConst('APPROX_NOTE')
   const code = `${src}
     const model = chartModel(factRows, sel, [], approx);
@@ -522,7 +522,7 @@ const chartTexts = (factRows, sel, approx) => {
 }
 const quotaSel = { period: '*', group_by: 'charge_class', include_free: false }
 
-test('凡例・ツールチップ: 下限のときだけ「以上」、概算では「以上」を出さず注記を「（概算）」にする', () => {
+test('凡例・ツールチップ: 下限のときだけ「以上」、概算では「以上」を出さず「（概算）」を付ける', () => {
   const lower = chartTexts(defaultFacts, quotaSel, false)
   assert.ok(lower.legend.some((t) => t.endsWith(' 以上')), JSON.stringify(lower.legend))
   assert.ok(lower.tipRows.some((t) => t.endsWith(' 以上')), JSON.stringify(lower.tipRows))
@@ -533,7 +533,8 @@ test('凡例・ツールチップ: 下限のときだけ「以上」、概算で
     const ap = chartTexts(rows, quotaSel, true)
     const all = [...ap.legend, ...ap.tipRows, ap.tipTotal]
     assert.ok(all.every((t) => !t.includes('以上')), `${name}: ${JSON.stringify(all)}`)
-    assert.match(ap.tipTotal, / 分$/)
+    assert.ok(all.every((t) => t.endsWith('（概算）')), `${name}: ${JSON.stringify(all)}`)
+    assert.match(ap.tipTotal, / 分（概算）$/)
     assert.equal(ap.note.hidden, false, name)
     assert.match(ap.note.text, /（概算）。$/)
     assert.doesNotMatch(ap.note.text, /下限|以上/)
@@ -547,6 +548,21 @@ test('注記は枠消費のグラフに区分不明の行があるときだけ�
   }
   const noUnknown = plain(U.facts(defaultModeBilling.filter((r) => r.charge_class !== 'unknown'), []))
   assert.equal(chartTexts(noUnknown, quotaSel, false).note.hidden, true)
+})
+
+test('凡例・ツールチップ: 区分不明がなくても概算なら「（概算）」、無料枠込みのグラフには印を付けない', () => {
+  const noUnknown = plain(U.facts(defaultModeBilling.filter((r) => r.charge_class !== 'unknown'), []))
+  const ap = chartTexts(noUnknown, quotaSel, true)
+  assert.ok([...ap.legend, ...ap.tipRows].every((t) => t.endsWith('（概算）')), JSON.stringify(ap))
+  assert.match(ap.tipTotal, / 分（概算）$/)
+  assert.equal(ap.note.hidden, true, '区分不明がなければグラフ下の注記は出さない')
+  const exact = chartTexts(noUnknown, quotaSel, false)
+  assert.ok([...exact.legend, ...exact.tipRows].every((t) => !/以上|概算/.test(t)), JSON.stringify(exact))
+  assert.match(exact.tipTotal, / 分$/)
+  for (const approx of [false, true]) {
+    const free = chartTexts(defaultFacts, { ...quotaSel, include_free: true }, approx)
+    assert.ok([...free.legend, ...free.tipRows, free.tipTotal].every((t) => !/以上|概算/.test(t)), JSON.stringify(free))
+  }
 })
 
 // paintTotals を取り出し、枠消費のタイル・注記・残量の文言を捕まえる。
@@ -569,7 +585,7 @@ const paintQuota = (row, approx) => {
   return { tile: tile.textContent, qnote: qnote.textContent, remaining: remaining.textContent }
 }
 
-test('タイル: 区分不明ありで下限なら「以上」、概算なら「（概算）」。残量はどちらも不明', () => {
+test('タイル: 下限なら「以上」、概算なら区分不明の有無にかかわらず「（概算）」。残量は区分不明があれば不明、概算なら「約」', () => {
   const lower = paintQuota({ unknown_minutes: 50 }, false)
   assert.equal(lower.tile, '800 以上')
   assert.match(lower.qnote, /下限値/)
@@ -580,14 +596,17 @@ test('タイル: 区分不明ありで下限なら「以上」、概算なら「
   assert.doesNotMatch(ap.qnote, /下限/)
   assert.equal(ap.remaining, '不明（区分不明の利用があり、消費は概算）')
   const none = paintQuota({ unknown_minutes: 0 }, true)
-  assert.equal(none.tile, '800')
-  assert.equal(none.remaining, '2200 分')
+  assert.equal(none.tile, '800（概算）')
+  assert.equal(none.remaining, '約 2200 分')
+  const exact = paintQuota({ unknown_minutes: 0 }, false)
+  assert.equal(exact.tile, '800')
+  assert.equal(exact.remaining, '2200 分')
 })
 
 test('表とタイルは同じ quotaMark を使う', () => {
   const mark = runInNewContext(`${pageFn('quotaMark')}\nquotaMark`, {})
   assert.equal(mark(false, false), '')
-  assert.equal(mark(false, true), '')
+  assert.equal(mark(false, true), '（概算）')
   assert.equal(mark(true, false), ' 以上')
   assert.equal(mark(true, true), '（概算）')
   assert.match(pageFn('paintTable'), /const lb = quotaMark\(r\.unknown_minutes > 0, approx\)/)
