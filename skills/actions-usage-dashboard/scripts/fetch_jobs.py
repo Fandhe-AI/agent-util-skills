@@ -23,7 +23,10 @@
   金額系と quota_minutes は 0。day は job の started_at の UTC 日。
 
 増分キャッシュ: <--cache>/jobs-cache-<org>.json
-  {schema_version, org, runs: {"<run_id>": {repo, attempt, created_at, agg: [{day, runner_group, minutes}]}}}
+  {schema_version: 2, org, runs: {"<run_id>": {repo, attempt, created_at, agg: [{day, runner_group, minutes}],
+   jobs: {hosted, self_hosted}}}}
+  jobs は job 件数の記録（推定モードの 0 分組の打ち切りの根拠。無い run は旧版 v1 由来で、v1 は読み込み時に 2 へ移行する。
+  旧版のスクリプトは v2 を読めない）。
   jobs を全ページ取り終えた「完了済み run」だけを run 単位で登録する。未完了の run は
   後から job が完了するため登録せず、次回の一覧で再び候補にする。run_attempt が増えた
   （再実行）ときは全 attempt の jobs（filter=all）を job id で重複除去して取り直す。再実行中は
@@ -69,7 +72,7 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
   API 呼び出し数は「リポジトリ一覧 + runs 一覧のページ数 + 予算 B（jobs が 1 ページのとき）」に収まる。
   予算 B = sum(min(n, K))（n は組の完了 run 数）で、K x 組数以下。抜き取りは 2 段階で配分する:
   段階 1 で各組の先頭・中央・末尾の 3 run を試し取りし、全部が 0 分（GitHub ホストだけ）の組は 0 分組として
-  そこで打ち切る（K >= 4 のときだけ。打ち切った run 数は estimate.zero_runs と警告に出る）。段階 2 で、浮いた予算を 0 分組でない組へ run 数に比例して足す（0 分でない組は下限 min(n, K)
+  そこで打ち切る（記録が GitHub ホストの job だけを示し、組内の記録にセルフホストの痕跡が無いときだけ。K >= 4 のときだけ。打ち切った run 数は estimate.zero_runs と警告に出る）。段階 2 で、浮いた予算を 0 分組でない組へ run 数に比例して足す（0 分でない組は下限 min(n, K)
   を保証し、各組の上限は n）。K <= 3 では浮く予算が無く、どの組も打ち切らず均等配分と同じになる。同じ入力から同じ配分になる。
   抜き取りは (created_at, id) 順に並べた列から等間隔に選ぶ決定的な方式で、期間の前・中・後に散らす。
   最新の K 件だけを取らないのは、期間の途中でセルフホストへ移した workflow の値を期間全体へ広げないため。
@@ -109,7 +112,10 @@ from _common import (  # noqa: E402
     DAY_RE, ISO_RE, ORG_RE, FetchError, atomic_write_json, gh_api, nonneg_num, parse_concatenated_json,
 )
 
+# 出力文書の版。summarize / build_dashboard が 1 だけを受理するため、キャッシュの版とは分けて据え置く
 SCHEMA_VERSION = 1
+# キャッシュの版。2 は run エントリに job 件数の記録 jobs を持てる（1 は記録なしとして読み込み時に 2 へ移行する）
+CACHE_SCHEMA_VERSION = 2
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
@@ -236,8 +242,12 @@ def validate_job(job):
 
 
 def aggregate_jobs(jobs):
-    """jobs を (agg, hosted, unfinished) にする。agg は [{day, runner_group, minutes}]。job id で重複除去。"""
-    seen, acc, hosted, unfinished = set(), {}, 0, 0
+    """jobs を (agg, hosted, unfinished, self_hosted) にする。agg は [{day, runner_group, minutes}]。job id で重複除去。
+
+    self_hosted は重複除去後のセルフホスト job の総数で、未完了・時刻不正・0 分の job も含む（agg が空でも
+    セルフホスト job があったことを推定モードの打ち切り判定の根拠にするため。fetch_pass が jobs 記録として保存する）。
+    """
+    seen, acc, hosted, unfinished, self_hosted = set(), {}, 0, 0, 0
     for job in jobs:
         validate_job(job)
         if job["id"] in seen:
@@ -246,6 +256,7 @@ def aggregate_jobs(jobs):
         if not is_self_hosted(job):
             hosted += 1
             continue
+        self_hosted += 1
         w = job_window(job)
         if w is None:
             unfinished += 1
@@ -256,7 +267,7 @@ def aggregate_jobs(jobs):
         key = (start.date().isoformat(), group)
         acc[key] = acc.get(key, 0.0) + minutes
     agg = [{"day": d, "runner_group": g, "minutes": round(m, 6)} for (d, g), m in sorted(acc.items())]
-    return agg, hosted, unfinished
+    return agg, hosted, unfinished, self_hosted
 
 
 def build_rows(entries, visibility, since):
@@ -332,9 +343,35 @@ def pilot_samples(groups, k):
 
 
 def _is_zero_evidence(rid, att, cache_runs):
-    """rid が 0 分の証拠か。取得済み（attempt が足りる）で agg が空の run だけ。skipped・未取得は証拠にしない。"""
+    """rid が 0 分の証拠か。取得済み（attempt が足りる）の run だけで、skipped・未取得は証拠にしない。
+
+    jobs 記録がある run は「GitHub ホストの job だけ」（self_hosted == 0 かつ hosted >= 1）のときだけ証拠にする。
+    job 0 件の run や、未完了・時刻不正で agg が空のセルフホスト job を持つ run は証拠にしない（#227）。
+    記録が無い run（旧版キャッシュ由来）は従来どおり agg が空かで判定する。
+    """
     ent = cache_runs.get(str(rid))
-    return ent is not None and ent["attempt"] >= att and not ent["agg"]
+    if ent is None or ent["attempt"] < att:
+        return False
+    rec = ent.get("jobs")
+    if rec is not None:
+        return rec["self_hosted"] == 0 and rec["hosted"] >= 1
+    return not ent["agg"]
+
+
+def _has_selfhosted_trace(pool, cache_runs):
+    """組の run のどれかが、キャッシュにセルフホスト利用の痕跡を持つか（attempt は問わず安全側に使う）。
+
+    記録がある run は jobs.self_hosted > 0、記録が無い run は agg が非空を痕跡とする。
+    pool に無い run（期間外・一覧から外れた run）は組へ帰属できないので見ない。
+    """
+    for r in pool:
+        ent = cache_runs.get(str(r[0]))
+        if ent is None:
+            continue
+        rec = ent.get("jobs")
+        if (rec["self_hosted"] > 0) if rec is not None else bool(ent["agg"]):
+            return True
+    return False
 
 
 def allocate_samples(groups, k, cache_runs, skipped):
@@ -342,6 +379,8 @@ def allocate_samples(groups, k, cache_runs, skipped):
 
     予算 B = sum(min(n, K))（均等配分の jobs 呼び出し数と同じ）を超えない。
     - 0 分組（試し取りが 3 run で全て 0 分の証拠、かつ min(n, K) が 3 より大きい組）: 抜き取りを試し取りだけにする。
+      さらに組内のキャッシュにセルフホスト利用の痕跡（jobs 記録の self_hosted > 0、記録なしは agg 非空）が
+      1 件も無いことを要する（#227）。判定は単調で、キャッシュに run が増えても打ち切りを妨げる方向にしか働かない。
     - それ以外（0 分でない組・不明の組）: 下限 min(n, K) を保証する。均等配分より減らさない。
     - 0 分組で浮いた予算は、0 分組でない組へ run 数 n に比例して足す。各組の上限は n で、溢れた分は
       残りの組へ配り直す（組数で有界）。整数化は最大剰余法、同点は str(key) 昇順で決める。
@@ -363,7 +402,8 @@ def allocate_samples(groups, k, cache_runs, skipped):
         pilot = g["pilot"]
         by_rid = {r[0]: r for r in g["pool"]}
         if (floor > len(pilot) >= PILOT_RUNS
-                and all(_is_zero_evidence(rid, by_rid[rid][1], cache_runs) for rid in pilot)):
+                and all(_is_zero_evidence(rid, by_rid[rid][1], cache_runs) for rid in pilot)
+                and not _has_selfhosted_trace(g["pool"], cache_runs)):
             g["sample"] = set(pilot)
             zero_groups += 1
             saved += floor - len(pilot)
@@ -609,7 +649,7 @@ def _run_key(r):
 # ---- キャッシュ層 ----
 
 def load_cache(path, org):
-    empty = {"schema_version": SCHEMA_VERSION, "org": org, "runs": {}}
+    empty = {"schema_version": CACHE_SCHEMA_VERSION, "org": org, "runs": {}}
     if not os.path.exists(path):
         return empty
     bad = FetchError("キャッシュが壊れている: %s（削除して再取得するか確認すること）" % path)
@@ -618,9 +658,11 @@ def load_cache(path, org):
             c = json.load(f)
     except (OSError, ValueError):
         raise bad
-    if not isinstance(c, dict) or c.get("schema_version") != SCHEMA_VERSION or c.get("org") != org \
+    if not isinstance(c, dict) or c.get("schema_version") not in (1, CACHE_SCHEMA_VERSION) \
+            or isinstance(c.get("schema_version"), bool) or c.get("org") != org \
             or not isinstance(c.get("runs"), dict):
         raise bad
+    c["schema_version"] = CACHE_SCHEMA_VERSION  # v1 は記録なしのまま読み、以後の保存は v2 にそろえる
     ls = c.get("listing")
     if ls is not None:
         if not isinstance(ls, dict) or not isinstance(ls.get("since"), str) or not isinstance(ls.get("day"), str) \
@@ -670,6 +712,13 @@ def load_cache(path, org):
                 or not REPO_RE.match(e["repo"]) or not _pos_int(e.get("attempt")) \
                 or not isinstance(e.get("created_at"), str) or not isinstance(e.get("agg"), list):
             raise bad
+        rec = e.get("jobs")
+        if rec is not None:
+            # 非信頼入力。bool は int の部分型なので除外し、上限は 1 run の jobs 取得上限に合わせる
+            if not isinstance(rec, dict) or not all(
+                    type(rec.get(x)) is int and 0 <= rec[x] <= MAX_JOB_PAGES * PER_PAGE
+                    for x in ("hosted", "self_hosted")):
+                raise bad
         for a in e["agg"]:
             if not isinstance(a, dict) or not isinstance(a.get("runner_group"), str) \
                     or not isinstance(a.get("day"), str) or not DAY_RE.match(a["day"]):
@@ -923,7 +972,7 @@ def main(argv=None):
                 pacer.done("jobs")
                 progress["done"] += 1
                 try:
-                    agg, hosted, unfinished = aggregate_jobs(jobs)
+                    agg, hosted, unfinished, self_hosted = aggregate_jobs(jobs)
                 except InvalidJob as e:
                     msg = "%s/%s run %d: %s" % (a.org, repo, rid, e)
                     skipped.append(msg)
@@ -931,7 +980,8 @@ def main(argv=None):
                     pacer.report("jobs 取得", progress["done"], progress["todo"], client.total(), checkpoint)
                     continue
                 created = run.get("created_at") if isinstance(run.get("created_at"), str) else ""
-                cache["runs"][str(rid)] = {"repo": repo, "attempt": att, "created_at": created, "agg": agg}
+                cache["runs"][str(rid)] = {"repo": repo, "attempt": att, "created_at": created, "agg": agg,
+                                          "jobs": {"hosted": hosted, "self_hosted": self_hosted}}
                 stats["fetched"] += 1
                 stats["hosted"] += hosted
                 stats["unfinished"] += unfinished
@@ -1002,7 +1052,7 @@ def main(argv=None):
         }
         if est:
             out_doc["warnings"].append(
-                "推定値を含む: (repo, workflow) %d 組（試し取りで 0 分と見なして打ち切った組 %d・%d run を 0 分と推定）で抜き取った %d run"
+                "推定値を含む: (repo, workflow) %d 組（試し取りと job 件数の記録で 0 分と見なして打ち切った組 %d・%d run を 0 分と推定）で抜き取った %d run"
                 "（予算 %d）の平均から %d run を推定した（K=%d）。正確な値は --estimate なしで取得する" % (
                     est["groups"], est["zero_groups"], est["zero_runs"], est["sampled_runs"],
                     est["budget_runs"], est["estimated_runs"], est["sample_runs"]))
