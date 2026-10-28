@@ -20,6 +20,12 @@
   --update --add-dataset jobs は、作成時に無かった dataset を op: set（全体）で足し、
   既存分の update と同じ batch に入れる。「--if-version が無ければ新規」と推測しないのは、
   書き忘れが版固定なしの上書きにならないよう fail-closed にするため。
+  --update --refresh-template は、ページ本体（files/index.html）をスキル同梱の雛形で置き換える
+  op: set を batch の末尾に足す。雛形を直しても datasets の更新だけでは既存ダッシュボードの
+  ページは変わらないため、opt-in の経路として持つ。store には作成時の files/index.html が必ずあり
+  版なしの set は拒否されるので、2 段目では --template-if-version <N> を必須にして、他所の変更を
+  黙って上書きしない（--add-dataset と同じく「版が無ければ新規」とは推測せず fail-closed）。
+  指定しない更新の batch は従来と変わらない。
   更新では billing の rows を省いて jobs だけを渡せる（作成は billing 必須のまま）。
   --add-dataset が jobs だけなのは、dataset id が雛形・本スクリプト・テストで固定の契約であり、
   warnings は fetch 出力の warnings として既に表示されるため（詳細は SKILL.md）。
@@ -66,6 +72,15 @@ DEFAULT_PARAMS = {"group_by": "charge_class", "include_free": True, "period": "l
 # 雛形はスキル同梱の 1 ファイルに固定する。任意パスを読む引数は持たない（Issue #145 L-4）。
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "..", "templates", "dashboard", "index.html")
+
+
+def load_template():
+    """スキル同梱の雛形 HTML を読む。作成と --refresh-template が共有する（パスは固定）。"""
+    try:
+        with open(TEMPLATE_PATH, "rb") as f:
+            return f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise BuildError("雛形を読めない")
 
 
 class BuildError(Exception):
@@ -218,6 +233,10 @@ def main(argv=None):
     ap.add_argument("--if-version", action="append", default=[], help="<id>=<N>（--update 用）")
     ap.add_argument("--add-dataset", action="append", default=[], choices=["jobs"],
                     help="--update で store にまだ無い dataset を op: set で作る（jobs のみ。理由は SKILL.md）")
+    ap.add_argument("--refresh-template", action="store_true",
+                    help="--update 用。files/index.html をスキル同梱の雛形で置き換える（op: set）")
+    ap.add_argument("--template-if-version", type=int,
+                    help="--refresh-template の 2 段目で必須。store 上の files/index.html の版")
     ap.add_argument("--title")
     ap.add_argument("--plan-included-minutes", type=int)
     ap.add_argument("--updated-at")
@@ -269,6 +288,16 @@ def run(a):
         if any(i.startswith(d + "=") for i in a.if_version):
             raise BuildError("--add-dataset %s と --if-version %s は同時に指定できない" % (d, d))
     stage1 = not a.asset_url
+    if a.refresh_template and not a.update:
+        raise BuildError("--refresh-template は --update と併用する（作成は常に雛形を書く）")
+    if a.template_if_version is not None:
+        if not a.refresh_template:
+            raise BuildError("--template-if-version は --refresh-template と併用する")
+        if a.template_if_version < 1:
+            raise BuildError("--template-if-version は正の整数で指定する")
+    if a.refresh_template and not stage1 and a.template_if_version is None:
+        raise BuildError("--refresh-template の 2 段目には --template-if-version <N> が必要"
+                         "（files/index.html の版を get で取る）")
     if_ver = (parse_if_versions(a.if_version, [i for i in ids if i not in adds])
               if (a.update and not stage1) else None)
     out_dir = os.path.realpath(a.out_dir)
@@ -300,12 +329,14 @@ def run(a):
                     fn = "dataset-%s.update.json" % did
                     files[fn] = build_update(u, e["path"], updated)
                     batch.append(write_entry("datasets", did, fn, out_dir, "update", if_ver[did]))
+        if a.refresh_template:
+            # 1 段目でもサイズ超過を検出できるよう、組み立ては段に依らず行う。
+            files["index.json"] = build_index(load_template())
+            if not stage1:
+                batch.append(write_entry("files", "index.html", "index.json", out_dir,
+                                         "set", a.template_if_version))
     else:
-        try:
-            with open(TEMPLATE_PATH, "rb") as f:
-                html = f.read().decode("utf-8")
-        except (OSError, UnicodeDecodeError):
-            raise BuildError("雛形を読めない")
+        html = load_template()
         files["dash-meta.json"] = build_meta(title)
         files["dash-params.json"] = build_params(a.plan_included_minutes)
         files["index.json"] = build_index(html)
@@ -330,7 +361,7 @@ def run(a):
     if stage1:
         # 古い url のまま書く事故を防ぐため、固定名の前回成果物だけを消す。
         # --update でも前回の batch.json（op: set など）を残すと誤使用で params が初期値に戻る。
-        names = (["batch.json"] + ["dataset-%s.json" % d for d in adds] if a.update
+        names = (["batch.json", "index.json"] + ["dataset-%s.json" % d for d in adds] if a.update
                  else ["batch.json", "dataset-billing.json", "dataset-jobs.json"])
         for fn in names:
             try:
@@ -348,6 +379,8 @@ def run(a):
                 print("%s は新しい dataset として作る（op: set）。既にあれば store が拒否する。"
                       "その場合は --add-dataset を外し --if-version %s=<N> にする。" % (d, d))
             print("既存 dataset は source と updated だけを書き換える（if_version で版を固定）。")
+            if a.refresh_template:
+                print("ページ（files/index.html）をスキル同梱の雛形で置き換える（op: set、if_version で版を固定）。")
         else:
             print("書き込み後、summarize.py の check モードで内容を確認する。")
     else:
@@ -355,7 +388,9 @@ def run(a):
         for i, e in enumerate(entries, 1):
             print("  %d. %s" % (i, safe(e["path"])))
         print("返った url を同じ順で --asset-url に渡し、同じ引数で再実行する%s。"
-              % ("（--update は既存 dataset ごとに --if-version <id>=<N>、新しく足す dataset に --add-dataset <id> が必要）" if a.update else ""))
+              % ("（--update は既存 dataset ごとに --if-version <id>=<N>、新しく足す dataset に --add-dataset <id> が必要%s）"
+                 % ("、ページ差し替えに --template-if-version <N>（files/index.html の版）が必要" if a.refresh_template else "")
+                 if a.update else ""))
         print("注意: 添付したファイルはダッシュボードを開ける全員が読める。")
     return 0
 
