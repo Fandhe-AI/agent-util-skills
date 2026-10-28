@@ -5,7 +5,7 @@ description: >
   作成・確認・更新の 3 用途に対応。「Actions の使用時間を見せて」「無料枠の残りを確認して」
   「minutes のグラフを作って」「Actions のダッシュボードを作って」「ダッシュボードを更新して」
   「GitHub ホストランナーを使っているリポを知りたい」で使用。料金区分（paid / included / public_free /
-  self_hosted）とセルフホスト移行候補を出す。単発の HTML レポートは create-html-report も参照。
+  dependabot_free / self_hosted）とセルフホスト移行候補を出す。単発の HTML レポートは create-html-report も参照。
 model: sonnet
 user-invocable: true
 ---

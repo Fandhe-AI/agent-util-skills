@@ -352,6 +352,11 @@ def load_usage_csv(path, org, months):
             for lineno, row in enumerate(reader, start=2):
                 if not row:
                     continue
+                if len(row) < len(names):
+                    # セルが欠けた行は username / workflow_path も欠けうる。空文字扱いで通すと
+                    # Dependabot でない行として含有枠を過大計上するため止める（値は出さない）
+                    raise FetchError("CSV 行 %d: 列数が %d で、ヘッダーの %d 列に満たない"
+                                     % (lineno, len(row), len(names)))
                 n_rows += 1
                 if n_rows > MAX_CSV_ROWS:
                     raise FetchError("--usage-csv の行数が上限（%d）を超えた" % MAX_CSV_ROWS)

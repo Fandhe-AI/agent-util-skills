@@ -432,6 +432,21 @@ class UsageCsvLoadTest(unittest.TestCase):
         write_csv(self.path, rows, **kw)
         return fb.load_usage_csv(self.path, ORG, list(months))
 
+    def test_short_row_missing_trailing_cells_rejected(self):
+        # 末尾の username / workflow_path が欠けた行は Dependabot 判定不能として止める（セル値は出さない）
+        write_csv(self.path, [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0)])
+        with open(self.path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        header = lines[0].split(",")
+        cut = min(header.index("username"), header.index("workflow_path"))
+        body = ",".join(lines[1].split(",")[:cut])
+        with open(self.path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(lines[0] + "\n" + body + "\n")
+        with self.assertRaises(fb.FetchError) as cm:
+            fb.load_usage_csv(self.path, ORG, ["2026-07"])
+        self.assertIn("CSV 行 2", str(cm.exception))
+        self.assertNotIn("priv-api", str(cm.exception))
+
     def test_dependabot_by_username_and_path(self):
         rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]"),
                 crow("2026-07-01", "priv-api", 20, 0.008, 0.16, 0.0, user=USER_ALICE, path=PATH_DEP),
