@@ -161,7 +161,7 @@ test('T10 サイズと契約', () => {
   assert.ok(Buffer.byteLength(HTML) < 256 * 1024, '256 KB 未満')
   const ids = new Set()
   for (const m of HTML.matchAll(/data-source="([^"]+)"/g)) m[1].split(/\s+/).forEach((i) => ids.add(i))
-  for (const id of ids) assert.ok(['billing', 'jobs', 'warnings', 'facts', 'totals', 'by_axis'].includes(id), id)
+  for (const id of ids) assert.ok(['billing', 'jobs', 'billing_meta', 'jobs_meta', 'facts', 'totals', 'by_axis'].includes(id), id)
   assert.equal((HTML.match(/dash\.calc\(/g) || []).length, 3)
 })
 
@@ -187,7 +187,7 @@ test('T12 取得期間外は 0 ではなく none、一部は partial になる',
 })
 
 test('T13 ページは範囲外のセルフホスト分を不明表示にする', () => {
-  assert.match(HTML, /U\.coverage\(/)
+  assert.match(HTML, /coverage\(docs\.billing, period, today, docs\.jobs\)/)
   assert.match(HTML, /cov\[k\] === 'none'/)
   assert.match(HTML, /id="aud-coverage"/)
 })
@@ -226,10 +226,6 @@ test('全期間の照合は当日で上限を切る（月末まで広がった b
 test('paintTotals のゼロ補完は準備完了時だけ、項目の取得元（セルフホストは jobs）の取得状況で行う', () => {
   assert.match(HTML, /const zeroOk = ready && src\.every\(\(k\) => cov\[k\] !== 'none' && cov\[k\] !== 'unknown'\)/)
   assert.match(HTML, /field === 'self_hosted_minutes' \? \['jobs'\]/)
-})
-
-test('paintWarnings は billing / jobs の JSON 内 warnings も引き継ぐ', () => {
-  assert.match(HTML, /\['billing', 'jobs'\]\.forEach\(\(k\) => \{[\s\S]*?\.warnings/)
 })
 
 // paintTotals だけを取り出し、DOM とフォーマッタを最小のスタブに差し替えて残量の文言を確かめる。
@@ -334,7 +330,7 @@ test('isEstimate は estimate がオブジェクトの jobs 文書だけを真�
 })
 
 test('ページ側の配線: 推定のときだけセルフホスト表示に「（推定）」を出す', () => {
-  assert.match(HTML, /U\.isEstimate\(jobsD\.data\)/)
+  assert.match(HTML, /isEstimate\(docs\.jobs\)/)
   const marks = [...HTML.matchAll(/<span class="aud-est"([^>]*)>（推定）<\/span>/g)]
   assert.equal(marks.length, 2, 'リード文とタイルの 2 か所')
   for (const m of marks) assert.match(m[1], /\bhidden\b/)
@@ -342,4 +338,123 @@ test('ページ側の配線: 推定のときだけセルフホスト表示に「
     assert.match(HTML, new RegExp(`id="${id}"`))
   }
   assert.match(HTML, /<span id="aud-estimate" hidden>/)
+})
+
+// ---- ランタイムが実際に渡す形（行配列だけ + {source, kind, value} の meta 行）の入力 ----
+const ok = (data) => ({ status: 'ok', data })
+const mrow = (source, kind, value) => ({ source, kind, value })
+const billingMeta = [mrow('billing', 'since', '2026-09'), mrow('billing', 'until', '2026-10')]
+const jobsMeta = [
+  mrow('jobs', 'since', '2026-10-01'), mrow('jobs', 'until', '2026-10-03'),
+  mrow('jobs', 'warning', '1,000 件上限で欠けた可能性: 2026-10-01..2026-10-03'),
+  mrow('jobs', 'warning', '不正な job を含むため run をスキップ: 42'),
+  mrow('jobs', 'estimate', 'true')
+]
+const runtimeInput = (over = {}) => ({
+  billing: ok(billing), jobs: ok(jobs), billing_meta: ok(billingMeta), jobs_meta: ok(jobsMeta), ...over
+})
+
+test('再現: 行配列だけを渡すと従来の関数では取得期間が読めず推定も偽になる', () => {
+  assert.equal(U.coverage(jobs, '2026-10', '2026-10-03'), 'unknown')
+  assert.equal(U.isEstimate(jobs), false)
+})
+
+test('annotate: meta 行から取得期間・推定・警告が読める', () => {
+  const a = plain(U.annotate(runtimeInput(), '2026-09', '2026-10-20'))
+  assert.equal(a.cov.billing, 'full')
+  assert.equal(a.cov.jobs, 'none')
+  assert.equal(a.estimate, false, '選択期間にセルフホストが無いときは推定と書かない')
+  const b = plain(U.annotate(runtimeInput(), '2026-10', '2026-10-03'))
+  assert.equal(b.cov.jobs, 'full')
+  assert.equal(b.estimate, true)
+  assert.deepEqual(b.warnings, [
+    'jobs: 1,000 件上限で欠けた可能性: 2026-10-01..2026-10-03',
+    'jobs: 不正な job を含むため run をスキップ: 42'
+  ])
+  assert.ok(!b.notes.some((n) => n.includes('取得期間（since / until）が読めず')))
+  assert.equal(plain(U.annotate(runtimeInput(), '2026-10', '2026-10-20')).cov.jobs, 'partial')
+})
+
+test('annotate: meta が missing / error なら unknown の注記を出す（黙って full にしない）', () => {
+  for (const status of ['missing', 'error']) {
+    const a = plain(U.annotate(runtimeInput({ jobs_meta: { status, data: undefined } }), '2026-10', '2026-10-03'))
+    assert.equal(a.cov.jobs, 'unknown', status)
+    assert.equal(a.estimate, false)
+    assert.deepEqual(a.warnings, [])
+    assert.ok(a.notes.some((n) => n.includes('取得期間（since / until）が読めず')), status)
+  }
+  const none = plain(U.annotate(runtimeInput({ billing_meta: ok([]) }), '2026-10', '2026-10-03'))
+  assert.equal(none.cov.billing, 'unknown')
+})
+
+test('annotate: meta が読み込み中の間は unknown の注記を出さない', () => {
+  const a = plain(U.annotate(runtimeInput({ jobs_meta: { status: 'loading' }, billing_meta: { status: 'refreshing' } }), '2026-10', '2026-10-03'))
+  assert.equal(a.cov.jobs, 'unknown')
+  assert.deepEqual(a.notes, [])
+})
+
+test('annotate: jobs 未接続・従来の文書形の入力', () => {
+  const a = plain(U.annotate({ billing: ok(billing), jobs: { status: 'missing' }, billing_meta: ok(billingMeta), jobs_meta: { status: 'missing' } }, '2026-10', '2026-10-03'))
+  assert.equal(a.cov.jobsConnected, false)
+  assert.equal(a.cov.jobs, 'none')
+  assert.deepEqual(a.notes, [])
+  const legacy = plain(U.annotate({ billing: ok(billingDoc), jobs: ok({ ...jobsDoc, warnings: ['w1'], estimate: { n: 1 } }) }, '2026-10', '2026-10-03'))
+  assert.equal(legacy.cov.jobs, 'full')
+  assert.equal(legacy.estimate, true)
+  assert.deepEqual(legacy.warnings, ['jobs: w1'])
+})
+
+test('withMeta: 不正な meta 行を無視し、警告は 20 件で切る', () => {
+  const rows = [{ x: 1 }]
+  const w = plain(U.withMeta(rows, [
+    null, 'x', mrow('billing', 'since', '2026-01'), mrow('jobs', 'since', 5), { source: 'jobs', kind: 7, value: 'v' },
+    mrow('jobs', 'since', '2026-10-01'), mrow('jobs', 'since', '2026-10-02'), mrow('jobs', 'until', '2026-10-03'),
+    mrow('jobs', 'bogus', 'v'),
+    ...Array.from({ length: 25 }, (_, i) => mrow('jobs', 'warning', 'w' + i))
+  ], 'jobs'))
+  assert.equal(w.since, '2026-10-01')
+  assert.equal(w.until, '2026-10-03')
+  assert.equal(w.warnings.length, 20)
+  assert.equal(w.estimate, undefined)
+  assert.deepEqual(w.rows, rows)
+  const noMeta = plain(U.withMeta(rows, undefined, 'jobs'))
+  assert.equal(noMeta.since, undefined)
+  assert.equal(U.coverage(U.withMeta(rows, { a: 1 }, 'jobs'), '2026-10', '2026-10-03'), 'unknown')
+  const docIn = { since: '2026-10', until: '2026-10', rows: [] }
+  assert.equal(U.withMeta(docIn, billingMeta, 'billing'), docIn)
+  assert.deepEqual(plain(U.withMeta('bad', [], 'jobs').rows), [])
+})
+
+// paintWarnings だけを取り出し、DOM を最小のスタブに差し替えて表示を確かめる。
+const paintWarn = (warnings) => {
+  const m = HTML.match(/function paintWarnings\([\s\S]*?\n\}\n/)
+  assert.ok(m, 'paintWarnings が見つかること')
+  const el = { hidden: true, kids: [], replaceChildren(...k) { this.kids = k } }
+  const box = {
+    $: () => el,
+    document: { createElement: () => ({ textContent: '' }) }
+  }
+  runInNewContext(`${m[0]}\npaintWarnings(w)`, { ...box, w: warnings })
+  return { hidden: el.hidden, texts: el.kids.map((k) => k.textContent) }
+}
+
+test('paintWarnings は annotate の warnings を「注意: 」付きで出し、0 件なら隠す', () => {
+  const w = plain(U.annotate(runtimeInput(), '2026-10', '2026-10-03')).warnings
+  const out = paintWarn(w)
+  assert.equal(out.hidden, false)
+  assert.deepEqual(out.texts, w.map((t) => '注意: ' + t))
+  assert.equal(paintWarn([]).hidden, true)
+  assert.equal(paintWarn(undefined).hidden, true)
+  assert.equal(paintWarn(['a'.repeat(400)]).texts[0].length, '注意: '.length + 300)
+})
+
+test('ページ側の配線: render は annotate の結果で注意欄・推定・注記を描く', () => {
+  assert.match(HTML, /U\.annotate\(input, period, today\)/)
+  assert.match(HTML, /paintWarnings\(ann\.warnings\)/)
+  assert.match(HTML, /const est = ann\.estimate/)
+  assert.doesNotMatch(HTML, /dash\.data\('warnings'\)/)
+  assert.doesNotMatch(HTML, /data-source="warnings"/)
+  for (const id of ['aud-coverage', 'aud-warnings']) {
+    assert.match(HTML, new RegExp(`id="${id}"[^>]*data-source="billing_meta jobs_meta"|data-source="billing_meta jobs_meta"[^>]*id="${id}"`))
+  }
 })

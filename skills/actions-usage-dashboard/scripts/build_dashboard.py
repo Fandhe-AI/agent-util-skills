@@ -13,11 +13,18 @@
   fetch_jobs.py（source: jobs）の rows JSON（schema_version 1）。
   出力は Dashboard 型の store のパス（dash/meta・dash/params・datasets/<id>・files/index.html）。
 
+付帯情報（since / until / warnings / estimate）の渡し方: Dashboard 型の添付ファイルはページへ行オブジェクトの
+  配列だけを渡し、fetch 出力のトップレベルの値は届かない。そこで rows の dataset 1 つにつき、付帯情報の
+  dataset を 1 つ対応させる（billing と billing_meta、jobs と jobs_meta）。meta は
+  {source, kind, value} の行（値はすべて文字列。kind は since / until / warning / estimate）で、
+  検証済みの rows 文書から本スクリプトが --out-dir/meta-<source>.json として作る。
+  source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。
+
 作成は 2 段階: 1 段目（--asset-url なし）はアップロードすべきファイルの一覧を出す。
-  アップロードで得た /_blob/ の url を --rows と同じ順で --asset-url に渡して再実行すると
-  batch.json が完成する。--update は既存 dataset の source と updated だけを書き換える
+  一覧は「rows ファイル → その meta ファイル」の順に並ぶ。アップロードで得た /_blob/ の url を
+  この一覧と同じ順・同じ数で --asset-url に渡して再実行すると batch.json が完成する。--update は既存 dataset の source と updated だけを書き換える
   op: update を作る（if_version は --if-version <id>=<N> で受ける）。
-  --update --add-dataset jobs は、作成時に無かった dataset を op: set（全体）で足し、
+  --update --add-dataset <jobs|billing_meta|jobs_meta> は、作成時に無かった dataset を op: set（全体）で足し、
   既存分の update と同じ batch に入れる。「--if-version が無ければ新規」と推測しないのは、
   書き忘れが版固定なしの上書きにならないよう fail-closed にするため。
   --update --refresh-template は、ページ本体（files/index.html）をスキル同梱の雛形で置き換える
@@ -27,8 +34,9 @@
   黙って上書きしない（--add-dataset と同じく「版が無ければ新規」とは推測せず fail-closed）。
   指定しない更新の batch は従来と変わらない。
   更新では billing の rows を省いて jobs だけを渡せる（作成は billing 必須のまま）。
-  --add-dataset が jobs だけなのは、dataset id が雛形・本スクリプト・テストで固定の契約であり、
-  warnings は fetch 出力の warnings として既に表示されるため（詳細は SKILL.md）。
+  --add-dataset jobs は jobs_meta も新規（op: set）にする。billing_meta / jobs_meta の単独指定は、
+  meta なしで作られた既存ダッシュボードの移行用。受け付ける id は固定の 4 つだけで、任意の dataset や
+  任意の JSON を store へ送る経路は持たない（meta は検証済みの rows 文書から作るものに限る。詳細は SKILL.md）。
 
 batch.json にはローカルの絶対パスが入る。このファイル自体は store へ送らない
   （ArtifactData が file_path を読み、参照先の中身だけを文書として送る）。
@@ -50,7 +58,7 @@ from datetime import datetime, timezone
 SCHEMA_VERSION = 1
 ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")
 BLOB_RE = re.compile(r"^/_blob/[A-Za-z0-9_-]{1,200}\Z")
-IFV_RE = re.compile(r"^(billing|jobs)=([0-9]+)\Z")
+IFV_RE = re.compile(r"^(billing|jobs|billing_meta|jobs_meta)=([0-9]+)\Z")
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 MAX_ROWS_BYTES = 8 * 1024 * 1024
@@ -59,8 +67,17 @@ MAX_BATCH_BYTES = 1024 * 1024
 MAX_BATCH_WRITES = 50
 MAX_TEXT_LEN = 100
 DEFAULT_BY = "actions-usage-dashboard"
+# rows の dataset id と、その付帯情報の dataset id。store への書き込み順は ALL_IDS の順。
 DATASET_IDS = ("billing", "jobs")
+META_IDS = {"billing": "billing_meta", "jobs": "jobs_meta"}
+ALL_IDS = ("billing", "billing_meta", "jobs", "jobs_meta")
+MAX_META_WARNINGS = 20
+MAX_META_TEXT = 300
 DATASET_META = {
+    "billing_meta": ("GitHub ホスト分の取得情報",
+                     "fetch_billing.py の出力の取得期間（since / until）と警告（warning）"),
+    "jobs_meta": ("セルフホスト分の取得情報",
+                  "fetch_jobs.py の出力の取得期間・警告・推定の有無（estimate）"),
     "billing": ("GitHub ホストの利用分数",
                 "fetch_billing.py が billing usage API から作った日次の行（料金区分つき）"),
     "jobs": ("セルフホストの実行時間",
@@ -156,7 +173,31 @@ def load_rows_doc(path, org):
         raise BuildError("rows の rows が配列ではない: %s" % base)
     ga = doc.get("generated_at")
     return {"id": doc["source"], "path": ap,
-            "generated_at": ga if isinstance(ga, str) and ISO_RE.match(ga) else None}
+            "generated_at": ga if isinstance(ga, str) and ISO_RE.match(ga) else None,
+            "meta_rows": build_meta_rows(doc)}
+
+
+def build_meta_rows(doc):
+    """rows 文書の付帯情報を {source, kind, value} 行（値は文字列）にする。
+
+    ページ（雛形の withMeta）が読む契約。warnings は非信頼の文字列なので、制御文字を除き
+    300 字・20 件で切る（雛形側でも同じ上限を重ねる）。estimate は中身を渡さず有無だけ（"true"）。
+    """
+    src = doc["source"]
+
+    def clean(v):
+        return CTRL_RE.sub("", v)[:MAX_META_TEXT]
+
+    rows = [{"source": src, "kind": "since", "value": clean(doc["since"])},
+            {"source": src, "kind": "until", "value": clean(doc["until"])}]
+    ws = doc.get("warnings")
+    if isinstance(ws, list):
+        texts = [clean(w) for w in ws if isinstance(w, str)]
+        for t in [t for t in texts if t][:MAX_META_WARNINGS]:
+            rows.append({"source": src, "kind": "warning", "value": t})
+    if isinstance(doc.get("estimate"), dict):
+        rows.append({"source": src, "kind": "estimate", "value": "true"})
+    return rows
 
 
 def resolve_updated_at(explicit, entries):
@@ -214,7 +255,7 @@ def parse_if_versions(items, ids):
     for it in items:
         m = IFV_RE.match(it)
         if not m or int(m.group(2)) < 1:
-            raise BuildError("--if-version は <billing|jobs>=<正の整数> で指定する")
+            raise BuildError("--if-version は <billing|jobs|billing_meta|jobs_meta>=<正の整数> で指定する")
         if m.group(1) in got:
             raise BuildError("--if-version %s が重複している" % m.group(1))
         got[m.group(1)] = int(m.group(2))
@@ -228,11 +269,11 @@ def main(argv=None):
     ap.add_argument("--org", required=True)
     ap.add_argument("--rows", action="append", required=True, help="rows JSON（作成は billing 必須・jobs 任意。--update では jobs だけも可）")
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--asset-url", action="append", default=[], help="アップロード後の /_blob/ url（--rows と同順）")
+    ap.add_argument("--asset-url", action="append", default=[], help="アップロード後の /_blob/ url（1 段目の一覧と同順・同数。rows → meta の交互）")
     ap.add_argument("--update", action="store_true")
     ap.add_argument("--if-version", action="append", default=[], help="<id>=<N>（--update 用）")
-    ap.add_argument("--add-dataset", action="append", default=[], choices=["jobs"],
-                    help="--update で store にまだ無い dataset を op: set で作る（jobs のみ。理由は SKILL.md）")
+    ap.add_argument("--add-dataset", action="append", default=[], choices=["jobs", "billing_meta", "jobs_meta"],
+                    help="--update で store にまだ無い dataset を op: set で作る（jobs は jobs_meta も。理由は SKILL.md）")
     ap.add_argument("--refresh-template", action="store_true",
                     help="--update 用。files/index.html をスキル同梱の雛形で置き換える（op: set）")
     ap.add_argument("--template-if-version", type=int,
@@ -270,8 +311,14 @@ def run(a):
     title = clean_text("--title", a.title) if a.title else "%s の Actions 利用状況" % a.org
     by = clean_text("--updated-by", a.updated_by)
     updated = {"at": resolve_updated_at(a.updated_at, entries), "by": by}
-    if a.asset_url and len(a.asset_url) != len(entries):
-        raise BuildError("--asset-url は --rows と同じ回数で指定する")
+    out_dir = os.path.realpath(a.out_dir)
+    # アップロードの一覧は「rows → その meta」の交互。--asset-url はこの順・この数で受ける。
+    uploads = []
+    for e in entries:
+        e["meta_path"] = os.path.join(out_dir, "meta-%s.json" % e["id"])
+        uploads += [("rows", e, e["path"]), ("meta", e, e["meta_path"])]
+    if a.asset_url and len(a.asset_url) != len(uploads):
+        raise BuildError("--asset-url は 1 段目の一覧と同じ回数（rows と meta で %d 件）で指定する" % len(uploads))
     for u in a.asset_url:
         if not BLOB_RE.match(u):
             raise BuildError("--asset-url は /_blob/<id> 形式のみ受け付ける")
@@ -282,10 +329,13 @@ def run(a):
         raise BuildError("--add-dataset は --update と併用する")
     if len(set(adds)) != len(adds):
         raise BuildError("--add-dataset が重複している")
+    # --add-dataset jobs は jobs_meta も新規にする（meta は rows と同じ扱い）。
+    new_ids = set(adds) | ({"jobs_meta"} if "jobs" in adds else set())
     for d in adds:
-        if d not in ids:
+        if d.split("_")[0] not in ids:
             raise BuildError("--add-dataset %s には対応する --rows が必要" % d)
-        if any(i.startswith(d + "=") for i in a.if_version):
+    for d in sorted(new_ids):
+        if any(i.split("=")[0] == d for i in a.if_version):
             raise BuildError("--add-dataset %s と --if-version %s は同時に指定できない" % (d, d))
     stage1 = not a.asset_url
     if a.refresh_template and not a.update:
@@ -298,13 +348,14 @@ def run(a):
     if a.refresh_template and not stage1 and a.template_if_version is None:
         raise BuildError("--refresh-template の 2 段目には --template-if-version <N> が必要"
                          "（files/index.html の版を get で取る）")
-    if_ver = (parse_if_versions(a.if_version, [i for i in ids if i not in adds])
+    written = [i for i in ALL_IDS if i.split("_")[0] in ids]
+    if_ver = (parse_if_versions(a.if_version, [i for i in written if i not in new_ids])
               if (a.update and not stage1) else None)
-    out_dir = os.path.realpath(a.out_dir)
     # 出力先の固定名が入力 rows と同じ実体を指すと、削除・上書きで rows を壊す。変更前に拒否する。
     reserved = ["batch.json", "dash-meta.json", "dash-params.json", "index.json"]
-    for did in DATASET_IDS:
+    for did in ALL_IDS:
         reserved += ["dataset-%s.json" % did, "dataset-%s.update.json" % did]
+    reserved += ["meta-%s.json" % did for did in DATASET_IDS]
     outs = set(os.path.realpath(os.path.join(out_dir, n)) for n in reserved)
     for e in entries:
         if os.path.realpath(e["path"]) in outs:
@@ -313,21 +364,28 @@ def run(a):
 
     # 書く内容をすべて組み立て、検査を通ってからファイルを書く。
     files = {}
+    assets = {}
     batch = []
+    for e in entries:
+        assets["meta-%s.json" % e["id"]] = e["meta_rows"]
+    by_id = {}
+    if not stage1:
+        # did（rows と meta の dataset id）→ (アップロード元のパス, url)。uploads と asset_url は同順。
+        for (kind, e, path), u in zip(uploads, a.asset_url):
+            by_id[e["id"] if kind == "rows" else META_IDS[e["id"]]] = (path, u)
     if a.update:
         if not stage1:
-            by_id = dict((e["id"], (e, u)) for e, u in zip(entries, a.asset_url))
-            for did in DATASET_IDS:
+            for did in ALL_IDS:
                 if did not in by_id:
                     continue
-                e, u = by_id[did]
-                if did in adds:
+                path, u = by_id[did]
+                if did in new_ids:
                     fn = "dataset-%s.json" % did
-                    files[fn] = build_dataset(did, u, e["path"], updated)
+                    files[fn] = build_dataset(did, u, path, updated)
                     batch.append(write_entry("datasets", did, fn, out_dir))
                 else:
                     fn = "dataset-%s.update.json" % did
-                    files[fn] = build_update(u, e["path"], updated)
+                    files[fn] = build_update(u, path, updated)
                     batch.append(write_entry("datasets", did, fn, out_dir, "update", if_ver[did]))
         if a.refresh_template:
             # 1 段目でもサイズ超過を検出できるよう、組み立ては段に依らず行う。
@@ -341,17 +399,21 @@ def run(a):
         files["dash-params.json"] = build_params(a.plan_included_minutes)
         files["index.json"] = build_index(html)
         if not stage1:
-            for e, u in zip(entries, a.asset_url):
-                files["dataset-%s.json" % e["id"]] = build_dataset(e["id"], u, e["path"], updated)
+            for did in ALL_IDS:
+                if did in by_id:
+                    path, u = by_id[did]
+                    files["dataset-%s.json" % did] = build_dataset(did, u, path, updated)
             batch.append(write_entry("dash", "meta", "dash-meta.json", out_dir))
             batch.append(write_entry("dash", "params", "dash-params.json", out_dir))
-            for did in DATASET_IDS:
-                if did in ids:
+            for did in ALL_IDS:
+                if did in by_id:
                     batch.append(write_entry("datasets", did, "dataset-%s.json" % did, out_dir))
             batch.append(write_entry("files", "index.html", "index.json", out_dir))
     total = 0
     for fn, obj in files.items():
         total += check_doc_size("files/index.html" if fn == "index.json" else fn, obj)
+    for fn, obj in assets.items():
+        check_doc_size(fn, obj)
     if len(batch) > MAX_BATCH_WRITES:
         raise BuildError("batch の要素数が 50 件を超える")
     if total >= MAX_BATCH_BYTES:
@@ -361,21 +423,21 @@ def run(a):
     if stage1:
         # 古い url のまま書く事故を防ぐため、固定名の前回成果物だけを消す。
         # --update でも前回の batch.json（op: set など）を残すと誤使用で params が初期値に戻る。
-        names = (["batch.json", "index.json"] + ["dataset-%s.json" % d for d in adds] if a.update
-                 else ["batch.json", "dataset-billing.json", "dataset-jobs.json"])
+        names = (["batch.json", "index.json"] + ["dataset-%s.json" % d for d in sorted(new_ids)] if a.update
+                 else ["batch.json"] + ["dataset-%s.json" % d for d in ALL_IDS])
         for fn in names:
             try:
                 os.unlink(os.path.join(out_dir, fn))
             except FileNotFoundError:
                 pass
-    for fn, obj in files.items():
+    for fn, obj in list(files.items()) + list(assets.items()):
         atomic_write_json(os.path.join(out_dir, fn), obj)
     if batch:
         bp = os.path.join(out_dir, "batch.json")
         atomic_write_json(bp, batch)
         print("ArtifactData の batch の writes に %s の中身（%d 件）を渡す。" % (safe(bp), len(batch)))
         if a.update:
-            for d in adds:
+            for d in sorted(new_ids):
                 print("%s は新しい dataset として作る（op: set）。既にあれば store が拒否する。"
                       "その場合は --add-dataset を外し --if-version %s=<N> にする。" % (d, d))
             print("既存 dataset は source と updated だけを書き換える（if_version で版を固定）。")
@@ -385,13 +447,13 @@ def run(a):
             print("書き込み後、summarize.py の check モードで内容を確認する。")
     else:
         print("アップロード（upload_asset）するファイル（この順）:")
-        for i, e in enumerate(entries, 1):
-            print("  %d. %s" % (i, safe(e["path"])))
+        for i, (_, _, path) in enumerate(uploads, 1):
+            print("  %d. %s" % (i, safe(path)))
         print("返った url を同じ順で --asset-url に渡し、同じ引数で再実行する%s。"
               % ("（--update は既存 dataset ごとに --if-version <id>=<N>、新しく足す dataset に --add-dataset <id> が必要%s）"
                  % ("、ページ差し替えに --template-if-version <N>（files/index.html の版）が必要" if a.refresh_template else "")
                  if a.update else ""))
-        print("注意: 添付したファイルはダッシュボードを開ける全員が読める。")
+        print("注意: 添付したファイル（meta も。警告文にリポジトリ名を含み得る）はダッシュボードを開ける全員が読める。")
     return 0
 
 
