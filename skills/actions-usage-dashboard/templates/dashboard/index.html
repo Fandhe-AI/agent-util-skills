@@ -10,7 +10,8 @@
   集計は usage-agg ブロックの自己完結関数（dash.calc に直接渡す）が行う。
   契約: dataset id = billing / jobs / billing_meta / jobs_meta。params = group_by / include_free / period /
   runner_type / repo / plan_included_minutes。jobs_meta の estimate 行（fetch_jobs.py --estimate が付ける）は
-  あるかないかだけを読み、中身は表示しない。billing_meta の assume_current_visibility 行（値 "true" のときだけ
+  推定の有無を示し、estimate_budget_runs / estimate_zero_groups / estimate_zero_runs 行（10 進の整数文字列）が
+  あれば予算と打ち切り数を推定の注記に出す（method 等の文字列は読まない）。billing_meta の assume_current_visibility 行（値 "true" のときだけ
   build_dashboard.py が付ける）は quotaApprox が含有枠の消費を概算と表示する根拠になる。詳細は references/data-sources.md と
   tests/dashboard-template.test.mjs（集計関数の回帰テスト）を参照。
 -->
@@ -67,7 +68,7 @@
       セルフホストは <b data-source="totals" data-field="self_hosted_minutes" data-where="key=*%7C*%7C*">—</b><span class="aud-est" hidden>（推定）</span> 分。
     </p>
     <p class="aud-note">日付はすべて UTC。<span id="aud-partial">最新日は集計途中の可能性がある。</span></p>
-    <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-estimate" hidden>セルフホストは抜き取り推定の値で、実測ではない。正確な値は fetch_jobs.py を --estimate なしで実行して取り直す。</span><span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
+    <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-estimate" hidden>セルフホストは抜き取り推定の値で、実測ではない。正確な値は fetch_jobs.py を --estimate なしで実行して取り直す。</span><span id="aud-estimate-detail" data-source="jobs_meta" hidden></span><span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
     <p class="aud-note aud-alert" id="aud-coverage" data-source="billing_meta jobs_meta" hidden></p>
     <p class="aud-note aud-alert" id="aud-lower" hidden>区分不明の利用があるため、グラフの枠消費は下限値（「以上」）になる。</p>
     <p class="aud-note" id="aud-invalid" hidden></p>
@@ -452,6 +453,34 @@ window.UsageAgg = (function () {
       doc.estimate !== null && typeof doc.estimate === 'object' && !Array.isArray(doc.estimate);
   }
 
+  // 推定の件数 3 値（予算・打ち切った組・打ち切った run 数）。bool 以外の 0..1e9 の整数だけを通し、
+  // 1 つも無ければ null。不正値は表示しないだけにする（止める検証は生成側 summarize.py / build_dashboard.py の責務）。
+  const EST_KEYS = ['budget_runs', 'zero_groups', 'zero_runs'];
+  const EST_MAX = 1e9;
+  function estimateCounts(doc) {
+    if (!isEstimate(doc)) return null;
+    const out = {};
+    let any = false;
+    EST_KEYS.forEach((k) => {
+      const v = doc.estimate[k];
+      if (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= EST_MAX) { out[k] = v; any = true; }
+    });
+    return any ? out : null;
+  }
+
+  // 推定の注記の文言。値が無い部分は省き、1 つも無ければ空文字。summarize.py のセルフホスト行と同じ情報を同じ順で出す。
+  function estimateText(c) {
+    if (!c) return '';
+    const parts = [];
+    if (typeof c.budget_runs === 'number') parts.push('抜き取りの予算は ' + c.budget_runs + ' run（jobs 呼び出しの上限）');
+    if (typeof c.zero_groups === 'number') {
+      let z = '試し取りが全部 0 分で打ち切った組は ' + c.zero_groups + ' 組';
+      if (typeof c.zero_runs === 'number') z += '（' + c.zero_runs + ' run）';
+      parts.push(z + 'で、その分は 0 分と推定している');
+    }
+    return parts.length ? parts.join('。') + '。' : '';
+  }
+
   // dash.data() が渡す形（行オブジェクトの配列。添付ファイルは行だけが届く）と、付帯情報の
   // meta 行（{source, kind, value}。値は文字列）から、span / coverage / isEstimate が読む文書の形
   // {rows, since, until, warnings, estimate?, assume_current_visibility?} を組み直す。従来の文書形（配列でないオブジェクト）はそのまま返す。
@@ -460,6 +489,7 @@ window.UsageAgg = (function () {
     if (data !== null && typeof data === 'object' && !Array.isArray(data)) return data;
     const doc = { rows: Array.isArray(data) ? data : [], warnings: [] };
     if (!Array.isArray(metaRows)) return doc;
+    const counts = {};
     metaRows.forEach((m) => {
       if (!m || typeof m !== 'object' || m.source !== source) return;
       if (typeof m.kind !== 'string' || typeof m.value !== 'string') return;
@@ -467,7 +497,13 @@ window.UsageAgg = (function () {
       else if (m.kind === 'warning' && doc.warnings.length < 20) doc.warnings.push(m.value);
       else if (m.kind === 'estimate') doc.estimate = {};
       else if (m.kind === 'assume_current_visibility' && source === 'billing' && m.value === 'true') doc.assume_current_visibility = true;
+      else if (source === 'jobs' && m.kind.indexOf('estimate_') === 0 && EST_KEYS.indexOf(m.kind.slice(9)) >= 0 && /^\d{1,10}$/.test(m.value)) {
+        const n = Number(m.value);
+        if (n <= EST_MAX) counts[m.kind.slice(9)] = n;
+      }
     });
+    // count 行は estimate 行より前に来ても反映する。estimate 行が無ければ推定ではないので捨てる。
+    if (doc.estimate) Object.keys(counts).forEach((k) => { doc.estimate[k] = counts[k]; });
     return doc;
   }
 
@@ -525,7 +561,7 @@ window.UsageAgg = (function () {
       }
     });
     const warnings = Array.from(new Set(all)).slice(0, 20);
-    return { docs: docs, cov: cov, estimate: estimate, notes: notes, warnings: warnings };
+    return { docs: docs, cov: cov, estimate: estimate, estimateCounts: estimate ? estimateCounts(docs.jobs) : null, notes: notes, warnings: warnings };
   }
 
   return {
@@ -544,6 +580,8 @@ window.UsageAgg = (function () {
     months: months_,
     span: span,
     isEstimate: isEstimate,
+    estimateCounts: estimateCounts,
+    estimateText: estimateText,
     withMeta: withMeta,
     quotaApprox: quotaApprox,
     docsOf: docsOf,
@@ -924,6 +962,9 @@ function render() {
   const est = ann.estimate;
   page.querySelectorAll('.aud-est').forEach((el) => { el.hidden = !est; });
   $('#aud-estimate').hidden = !est;
+  const estDetail = U.estimateText(ann.estimateCounts);
+  $('#aud-estimate-detail').textContent = estDetail;
+  $('#aud-estimate-detail').hidden = !est || estDetail === '';
   $('#aud-sh-note').textContent = est ? '請求対象外・推定値' : '請求対象外';
   $('#aud-total-note').textContent = est ? '全区分の合計（セルフホストは推定）' : '全区分の合計';
   const notes = ann.notes;

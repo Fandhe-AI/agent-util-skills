@@ -98,7 +98,7 @@ class Base(unittest.TestCase):
                               capture_output=True, text=True, env=env)
 
     def build(self, rows, flag, plan="team"):
-        org, rd, src, w, est, ac = sm._load([self.write("b.json", doc("billing", rows, assume_current=flag))])
+        org, rd, src, w, est, ac, _ec = sm._load([self.write("b.json", doc("billing", rows, assume_current=flag))])
         return sm.build_summary(org, rd, src, "2026-10", plan, None, "repo", 5, w, today="2026-10-31",
                                 assume_current=ac)
 
@@ -668,6 +668,7 @@ class RowsStringSanitizeTests(Base):
 
 NONE = object()  # estimate キーを付けない指定（None は JSON の null として付く）
 EST = {"method": "sample_mean_per_workflow", "sample_runs": 3}
+EST_FULL = {"method": "sample_mean_per_workflow", "sample_runs": 4, "budget_runs": 15, "zero_groups": 2, "zero_runs": 330}
 
 
 class EstimateTests(Base):
@@ -741,6 +742,65 @@ class EstimateTests(Base):
         out = self.run_ok(self.est_files(billing=rows), ["--group-by", "repo"])
         self.assertLessEqual(len(out.splitlines()), 20, out)
         self.assertIn("（推定）", out)
+
+
+    def sh_json(self, args):
+        return json.loads(self.run_ok(args, ["--json"]))["breakdown"]["self_hosted"]
+
+    def test_counts_shown_in_text_and_json(self):
+        """#219: 推定の予算と打ち切った組・run 数を要約に出す。"""
+        args = self.est_files(estimate=EST_FULL)
+        self.assertIn("セルフホスト: 40.0 分（推定）予算 15 run・0 分で打ち切り 2 組 / 330 run", self.run_ok(args))
+        self.assertEqual(self.sh_json(args)["estimate_counts"],
+                         {"budget_runs": 15, "zero_groups": 2, "zero_runs": 330})
+
+    def test_zero_groups_zero_is_shown(self):
+        out = self.run_ok(self.est_files(estimate=dict(EST_FULL, zero_groups=0, zero_runs=0)))
+        self.assertIn("0 分で打ち切り 0 組 / 0 run", out)
+
+    def test_missing_zero_runs_is_omitted(self):
+        e = {k: v for k, v in EST_FULL.items() if k != "zero_runs"}
+        args = self.est_files(estimate=e)
+        out = self.run_ok(args)
+        self.assertIn("（推定）予算 15 run・0 分で打ち切り 2 組\n", out + "\n")
+        self.assertNotIn(" / 330", out)
+        self.assertIsNone(self.sh_json(args)["estimate_counts"]["zero_runs"])
+
+    def test_no_counts_keeps_plain_estimate(self):
+        args = self.est_files()
+        self.assertIn("セルフホスト: 40.0 分（推定）\n", self.run_ok(args) + "\n")
+        self.assertNotIn("estimate_counts", self.sh_json(args))
+
+    def test_counts_hidden_when_not_estimate(self):
+        for args in (self.est_files(estimate=NONE),
+                     self.est_files(estimate=EST_FULL, jobs_since="2026-11-01", jobs_until="2026-11-30"),
+                     self.est_files(estimate=NONE, billing_estimate=EST_FULL)):
+            out = self.run_ok(args)
+            self.assertNotIn("予算", out)
+            self.assertNotIn("打ち切り", out)
+            self.assertNotIn("estimate_counts", self.sh_json(args))
+
+    def test_counts_jobs_only_branch(self):
+        args = self.est_files(estimate=EST_FULL, billing=None)
+        self.assertIn("予算 15 run", self.run_ok(args))
+        self.assertEqual(self.sh_json(args)["estimate_counts"]["zero_groups"], 2)
+
+    def test_invalid_counts_exit_1(self):
+        for k in ("budget_runs", "zero_groups", "zero_runs"):
+            for bad in (True, -1, 1.5, "3", None, 10 ** 9 + 1):
+                r = self.run_cli(self.est_files(estimate=dict(EST_FULL, **{k: bad})) + ["--plan", "team"])
+                self.assertEqual(r.returncode, 1, (k, bad))
+                self.assertIn("estimate." + k, r.stderr)
+
+    def test_text_within_20_lines_with_counts(self):
+        rows = []
+        for i in range(12):
+            rows.append(row("2026-10-%02d" % (i + 1), "repo-%02d" % i, "paid", 10 + i, usd=1 + i))
+            rows.append(row("2026-10-%02d" % (i + 1), "inc-%02d" % i, "included", 5 + i, quota=5 + i))
+        rows.append(row("2026-10-20", "u", "unknown", 3))
+        out = self.run_ok(self.est_files(estimate=EST_FULL, billing=rows), ["--group-by", "repo"])
+        self.assertLessEqual(len(out.splitlines()), 20, out)
+        self.assertIn("打ち切り 2 組", out)
 
 
 class SharedCommonTest(unittest.TestCase):

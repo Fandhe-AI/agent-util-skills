@@ -698,6 +698,7 @@ class ValidationTests(unittest.TestCase):
             j = json.load(f)
         j["estimate"] = {"method": "sample_mean_per_workflow", "sample_runs": 3, "sampled_runs": 6,
                          "estimated_runs": 40, "groups": 2, "unestimated_runs": 0}
+        j["estimate"].update({"budget_runs": 15, "zero_groups": 2, "zero_runs": 330})
         j["warnings"] = ["推定値を含む: テスト"]
         jp = os.path.join(self.d, "jobs-est.json")
         with open(jp, "w") as f:
@@ -709,6 +710,8 @@ class ValidationTests(unittest.TestCase):
         meta = load(self.out, "meta-jobs.json")
         self.assertIn({"source": "jobs", "kind": "estimate", "value": "true"}, meta)
         self.assertNotIn("sample_mean_per_workflow", json.dumps(meta))
+        for k, v in (("budget_runs", "15"), ("zero_groups", "2"), ("zero_runs", "330")):
+            self.assertIn({"source": "jobs", "kind": "estimate_" + k, "value": v}, meta)
         self.assertIn({"source": "jobs", "kind": "warning", "value": "推定値を含む: テスト"}, meta)
 
     def test_t13_no_network_imports(self):
@@ -755,6 +758,27 @@ class MetaRowsTests(unittest.TestCase):
         self.assertEqual(kinds({"method": "m"}), ["since", "until", "estimate"])
         for bad in ([], None, "x", 3, True):
             self.assertEqual(kinds(bad), ["since", "until"], bad)
+
+    def test_estimate_count_rows(self):
+        """#219: jobs 文書の estimate から予算・打ち切り数の整数 3 値を文字列行にする。"""
+        e = {"method": "m", "budget_runs": 15, "zero_groups": 2, "zero_runs": 330}
+        rows = bd.build_meta_rows(self.doc(estimate=e))
+        self.assertEqual([r["kind"] for r in rows], ["since", "until", "estimate", "estimate_budget_runs",
+                                                     "estimate_zero_groups", "estimate_zero_runs"])
+        self.assertEqual([r["value"] for r in rows[3:]], ["15", "2", "330"])
+        part = bd.build_meta_rows(self.doc(estimate={"zero_groups": 0}))
+        self.assertEqual([(r["kind"], r["value"]) for r in part[2:]], [("estimate", "true"), ("estimate_zero_groups", "0")])
+        self.assertNotIn("estimate_budget_runs", [r["kind"] for r in part])
+
+    def test_estimate_count_rows_only_on_jobs(self):
+        kinds = [r["kind"] for r in bd.build_meta_rows(self.doc(source="billing", estimate={"budget_runs": 5}))]
+        self.assertEqual(kinds, ["since", "until", "estimate"])
+
+    def test_estimate_count_invalid_raises(self):
+        for k in bd.EST_COUNT_KEYS:
+            for bad in (True, -1, 1.5, "3", None, 10 ** 9 + 1):
+                with self.assertRaises(bd.BuildError, msg=(k, bad)):
+                    bd.build_meta_rows(self.doc(estimate={k: bad}))
 
     def test_assume_current_visibility_only_when_true_on_billing(self):
         """#209: 雛形が概算と表示する根拠を billing_meta で渡す。真のときだけ、billing のときだけ。"""
@@ -806,6 +830,9 @@ class CommonParityTest(unittest.TestCase):
         self.assertEqual(bd.ISO_RE.pattern, cm.ISO_RE.pattern)
         self.assertEqual(bd.ISO_RE.flags, cm.ISO_RE.flags)
         self.assertEqual(bd.MAX_ROWS_BYTES, cm.MAX_ROWS_BYTES)
+        import summarize
+        self.assertEqual(bd.MAX_EST_COUNT, summarize.MAX_EST_COUNT)
+        self.assertEqual(bd.EST_COUNT_KEYS, summarize.EST_COUNT_KEYS)
         self.assertEqual(inspect.getsource(bd.atomic_write_json),
                          inspect.getsource(cm.atomic_write_json))
 

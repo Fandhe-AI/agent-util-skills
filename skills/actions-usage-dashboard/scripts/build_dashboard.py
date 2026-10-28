@@ -17,7 +17,7 @@
   配列だけを渡し、fetch 出力のトップレベルの値は届かない。そこで rows の dataset 1 つにつき、付帯情報の
   dataset を 1 つ対応させる（billing と billing_meta、jobs と jobs_meta）。meta は
   {source, kind, value} の行（値はすべて文字列。kind は since / until / warning / estimate /
-  assume_current_visibility）で、
+  estimate_budget_runs / estimate_zero_groups / estimate_zero_runs / assume_current_visibility）で、
   検証済みの rows 文書から本スクリプトが --out-dir/meta-<source>.json として作る。
   source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。
 
@@ -71,6 +71,9 @@ IFV_RE = re.compile(r"^(billing|jobs|billing_meta|jobs_meta)=([0-9]+)\Z")
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 MAX_ROWS_BYTES = 8 * 1024 * 1024
+# 推定の件数の上限とキー。summarize.py の MAX_EST_COUNT / EST_COUNT_KEYS の複製（正典は summarize、テストで一致検査）
+MAX_EST_COUNT = 10 ** 9
+EST_COUNT_KEYS = ("budget_runs", "zero_groups", "zero_runs")
 MAX_DOC_BYTES = 256 * 1024
 MAX_BATCH_BYTES = 1024 * 1024
 MAX_BATCH_WRITES = 50
@@ -86,7 +89,7 @@ DATASET_META = {
     "billing_meta": ("GitHub ホスト分の取得情報",
                      "fetch_billing.py の出力の取得期間（since / until）と警告（warning）"),
     "jobs_meta": ("セルフホスト分の取得情報",
-                  "fetch_jobs.py の出力の取得期間・警告・推定の有無（estimate）"),
+                  "fetch_jobs.py の出力の取得期間・警告・推定の有無と予算・打ち切り数（estimate）"),
     "billing": ("GitHub ホストの利用分数",
                 "fetch_billing.py が billing usage API から作った日次の行（料金区分つき）"),
     "jobs": ("セルフホストの実行時間",
@@ -193,7 +196,9 @@ def build_meta_rows(doc):
     """rows 文書の付帯情報を {source, kind, value} 行（値は文字列）にする。
 
     ページ（雛形の withMeta）が読む契約。warnings は非信頼の文字列なので、制御文字を除き
-    300 字・20 件で切る（雛形側でも同じ上限を重ねる）。estimate は中身を渡さず有無だけ（"true"）。
+    300 字・20 件で切る（雛形側でも同じ上限を重ねる）。estimate は有無（"true"）に加え、jobs 文書では
+    予算・打ち切り数の整数 3 値（estimate_<key> 行、10 進文字列）だけを渡す（method 等の文字列は渡さない）。
+    値は bool 以外の 0..MAX_EST_COUNT の整数でなければ BuildError（キーが無ければその行を作らない）。
     assume_current_visibility は billing 文書で真のときだけ "true" の行を足す（雛形の quotaApprox が
     含有枠の消費を下限ではなく概算と表示する根拠。偽・欠落なら行を作らず、雛形は行の内容で判定する）。
     """
@@ -211,6 +216,14 @@ def build_meta_rows(doc):
             rows.append({"source": src, "kind": "warning", "value": t})
     if isinstance(doc.get("estimate"), dict):
         rows.append({"source": src, "kind": "estimate", "value": "true"})
+        if src == "jobs":
+            for k in EST_COUNT_KEYS:
+                if k not in doc["estimate"]:
+                    continue
+                v = doc["estimate"][k]
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > MAX_EST_COUNT:
+                    raise BuildError("rows の estimate.%s が不正" % k)
+                rows.append({"source": src, "kind": "estimate_" + k, "value": str(v)})
     if src == "billing" and doc.get("assume_current_visibility") is True:
         rows.append({"source": src, "kind": "assume_current_visibility", "value": "true"})
     return rows

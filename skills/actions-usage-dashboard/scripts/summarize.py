@@ -24,7 +24,10 @@ helper の共有: FetchError / gh_api / nonneg_num / safe / CTRL_RE / MAX_NAME_L
 
 推定の表示: jobs の rows JSON にトップレベルの estimate（fetch_jobs.py --estimate が付ける）があるときだけ、
   セルフホスト行に「（推定）」を付け、--json の breakdown.self_hosted.estimated を true にする。
-  estimate の中身（method・件数）は読まず出力もしない（非信頼値を端末へ出さない）。オブジェクト以外なら止める。
+  estimate の method 等の文字列は読まず出力しない（非信頼値を端末へ出さない）。オブジェクト以外なら止める。
+  数値は budget_runs・zero_groups・zero_runs の 3 つだけを検証して（bool 以外の 0..MAX_EST_COUNT の整数。
+  不正なら止める）出す。セルフホスト行の「（推定）」の後ろに「予算 N run・0 分で打ち切り M 組 / K run」を続け、
+  --json では breakdown.self_hosted.estimate_counts に入れる。キーが無い値は出さず、3 つとも無ければ何も足さない。
   billing 側の estimate は無視する。
 
 含有枠の表示: 「下限」と出すのは quota が構造上 0 の既定モード（included / public_free 行がなく
@@ -58,6 +61,9 @@ GROUP_KEYS = ("charge_class", "repo", "runner_type", "visibility")
 DEFAULT_TOP = 5
 MAX_WARNING_LEN = 500
 MAX_SRC_WARNINGS = 5
+# 推定の件数（jobs 呼び出しの予算・打ち切った組・run 数）の上限。build_dashboard.py に同じ値の複製がある（テストで一致検査）
+MAX_EST_COUNT = 10 ** 9
+EST_COUNT_KEYS = ("budget_runs", "zero_groups", "zero_runs")
 
 
 def strip_ctrl(s):
@@ -122,15 +128,30 @@ def load_rows(paths):
     return _load(paths)[:4]
 
 
+def _est_counts(est, path):
+    """jobs 文書の estimate から推定の件数 3 値を検証して取り出す。キー欠落は None、不正は fail-closed。"""
+    out = {}
+    for k in EST_COUNT_KEYS:
+        if k not in est:
+            out[k] = None
+            continue
+        v = est[k]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > MAX_EST_COUNT:
+            raise FetchError("rows の estimate.%s が不正: %s" % (k, safe(path)))
+        out[k] = v
+    return out
+
+
 def _load(paths):
-    """rows ファイルを検証して (org, rows, sources, warnings, estimated, assume_current) を返す。非信頼入力として fail-closed。
+    """rows ファイルを検証して (org, rows, sources, warnings, estimated, assume_current, est_counts) を返す。非信頼入力として fail-closed。
 
     warnings は取得元（fetch_*.py）が記録した欠損・取得時点の警告で、出力へ引き継ぐ。
-    estimated は jobs 文書が推定を含むか（estimate キーがあるか）。
+    estimated は jobs 文書が推定を含むか（estimate キーがあるか）。est_counts はその件数 3 値（推定でなければ None）。
     assume_current は billing 文書の assume_current_visibility（True / False / 旧形式で欠落なら None）。
     """
     org, rows, sources, warnings, estimated = None, [], {}, [], False
     assume_current = None
+    est_counts = None
     for p in paths:
         try:
             if os.path.getsize(p) > MAX_ROWS_BYTES:
@@ -153,6 +174,7 @@ def _load(paths):
             if not isinstance(data["estimate"], dict):
                 raise FetchError("rows の estimate がオブジェクトではない: %s" % safe(p))
             estimated = True
+            est_counts = _est_counts(data["estimate"], p)
         if src == "billing" and "assume_current_visibility" in data:
             # 表示文言を選ぶ入力なので、bool 以外は null を含めて拒否する（欠落とは区別する）
             if not isinstance(data["assume_current_visibility"], bool):
@@ -191,7 +213,7 @@ def _load(paths):
                 "quota_minutes": nonneg_num(r, "quota_minutes", False, origin="rows"),
                 "net_usd": nonneg_num(r, "net_usd", False, origin="rows"),
             })
-    return org, rows, sources, warnings, estimated, assume_current
+    return org, rows, sources, warnings, estimated, assume_current, est_counts
 
 
 def included_for(plan):
@@ -227,7 +249,7 @@ def is_classified(rows, assume_current):
 
 
 def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=False, assume_current=None,
-              classified=None):
+              classified=None, est_counts=None):
     """内訳を作る。含有枠の消費の確度を approximate / lower_bound / 確定の 3 通りに分ける。
 
     「下限」と言えるのは quota が構造上 0 の既定モード（非有料分がすべて unknown）で、
@@ -239,6 +261,9 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=Fals
     """
     # 推定は jobs 文書全体の属性。セルフホストの分を取れているときだけ真にする。
     est = bool(estimated and has_jobs)
+    sh_extra = {}
+    if est and est_counts and any(v is not None for v in est_counts.values()):
+        sh_extra["estimate_counts"] = dict(est_counts)
     s = {c: {"minutes": 0.0, "net_usd": 0.0, "quota": 0.0} for c in CHARGE_CLASSES}
     for r in rows:
         a = s[r["charge_class"]]
@@ -263,13 +288,13 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=Fals
         # billing 未入力では GitHub ホスト分の内訳と枠の残りを計算できない。0 と誤読させず不明にする。
         return {
             "paid": None, "included": None, "public_free": None, "unknown": None,
-            "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est},
+            "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est, **sh_extra},
         }
     return {
         "paid": {"minutes": _r(s["paid"]["minutes"]), "net_usd": _r(s["paid"]["net_usd"])},
         "included": inc,
         "public_free": {"minutes": _r(s["public_free"]["minutes"])},
-        "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est},
+        "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est, **sh_extra},
         "unknown": {"minutes": _r(s["unknown"]["minutes"])},
     }
 
@@ -320,7 +345,7 @@ def candidates(month_rows, all_rows, top):
 
 
 def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=(), today=None, estimated=False,
-                  assume_current=None):
+                  assume_current=None, est_counts=None):
     mrows = select_month(rows, month)
     inc_min = included_for(plan)
     warnings = list(src_warnings)
@@ -352,7 +377,7 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
     elif inc_min is None:
         warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
     bd = breakdown(mrows, inc_min, has_jobs, has_billing, estimated, assume_current,
-                   classified=is_classified(rows, assume_current))
+                   classified=is_classified(rows, assume_current), est_counts=est_counts)
     inc_bd = bd["included"] or {}
     if has_billing and inc_bd.get("approximate"):
         if bd["unknown"]["minutes"] > 0:
@@ -420,10 +445,26 @@ def render_text(s):
     return _render_tail(s, out)
 
 
+def _est_counts_text(c):
+    """セルフホスト行の「（推定）」に続ける予算・打ち切りの文言。値が無ければ空文字（検証済みの整数だけを %d で出す）。"""
+    if not c:
+        return ""
+    parts = []
+    if c.get("budget_runs") is not None:
+        parts.append("予算 %d run" % c["budget_runs"])
+    if c.get("zero_groups") is not None:
+        z = "0 分で打ち切り %d 組" % c["zero_groups"]
+        if c.get("zero_runs") is not None:
+            z += " / %d run" % c["zero_runs"]
+        parts.append(z)
+    return "・".join(parts)
+
+
 def _render_tail(s, out):
     bd = s["breakdown"]
     sh = bd["self_hosted"]
     out.append("セルフホスト: %s" % (("%.1f 分" % sh["minutes"]) + ("（推定）" if sh["estimated"] else "")
+                                 + _est_counts_text(sh.get("estimate_counts"))
                                  if sh["available"] else "データなし"))
     if bd["unknown"] is not None and bd["unknown"]["minutes"] > 0:
         out.append("区分不明: %.1f 分" % bd["unknown"]["minutes"])
@@ -465,7 +506,7 @@ def main(argv=None):
             raise FetchError("--rows は最大 2 件")
         if a.month is not None and not MONTH_RE.match(a.month):
             raise FetchError("--month は YYYY-MM 形式で指定する")
-        org, rows, sources, src_warnings, estimated, assume_current = _load(a.rows)
+        org, rows, sources, src_warnings, estimated, assume_current, est_counts = _load(a.rows)
         month = a.month or (max(r["day"][:7] for r in rows) if rows
                             else datetime.now(timezone.utc).strftime("%Y-%m"))
         plan, plan_warning = a.plan, None
@@ -475,7 +516,7 @@ def main(argv=None):
             except FetchError as e:
                 plan, plan_warning = None, "プラン取得に失敗（含有分は不明）: %s" % safe(e, MAX_WARNING_LEN)
         summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top, src_warnings,
-                                estimated=estimated, assume_current=assume_current)
+                                estimated=estimated, assume_current=assume_current, est_counts=est_counts)
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)
         return 1
