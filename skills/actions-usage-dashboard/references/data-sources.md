@@ -206,9 +206,9 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
   - 推定不能（抜き取りが全て不正 job、または作成日が不正）: 0 分として数えるため過少になる（`unestimated_runs`）
   - 割り当て日は run の作成日（UTC）: 日をまたぐ run は実測と日別の配分がずれる
   - 誤差の大きさと傾向は次の「実測との比較（#199）」に載せた
-- 要約・ダッシュボードの表示: どちらも `estimate` があるかないかだけを読み、数値・文字列は表示に使わない。ダッシュボードは jobs 文書そのものではなく `jobs_meta` の `estimate` 行（値は固定の `"true"`）で判定する（下の「ページへ渡る値」）
-  - `summarize.py`: セルフホスト行に「（推定）」を付け、`--json` の `breakdown.self_hosted.estimated` を true にする（キーは常にあり、推定でなければ false。対象月が jobs の取得期間外なら false）。`estimate` がオブジェクトでなければ終了コード 1。billing 文書の `estimate` は無視する
-  - 雛形 `templates/dashboard/index.html`: リード文・セルフホストのタイルに「（推定）」、タイルの注記と総分数の注記・注記行に推定である旨を出す。選択期間に jobs がないとき、jobs 未接続のときは出さない。グループ別の上位行・グラフ・内訳表には推定表示がない
+- 要約・ダッシュボードの表示: どちらも `estimate` の有無で推定かを判定し、`method` 等の文字列は表示に使わない。表示するのは検証済みの整数 3 値 `budget_runs`（jobs 呼び出しの予算）・`zero_groups`（打ち切った組数）・`zero_runs`（打ち切って 0 分と推定した run 数）だけで、bool 以外の 0〜10^9 の整数を要求する（#219）。ダッシュボードは jobs 文書そのものではなく `jobs_meta` の `estimate` 行（値は固定の `"true"`）と `estimate_<key>` 行で判定する（下の「ページへ渡る値」）
+  - `summarize.py`: セルフホスト行に「（推定）」を付け、`--json` の `breakdown.self_hosted.estimated` を true にする（キーは常にあり、推定でなければ false。対象月が jobs の取得期間外なら false）。`estimate` がオブジェクトでなければ終了コード 1。billing 文書の `estimate` は無視する。同じ行の「（推定）」の後ろに「予算 N run・0 分で打ち切り M 組 / K run」を続け（行数は増やさない）、`--json` には推定表示が真で 3 値のどれかがあるときだけ `breakdown.self_hosted.estimate_counts`（無い値は null）を付ける。キーが無い値は出さず（#212・#225 より前の出力を受け付ける）、不正な値は終了コード 1
+  - 雛形 `templates/dashboard/index.html`: リード文・セルフホストのタイルに「（推定）」、タイルの注記と総分数の注記・注記行に推定である旨を出す。選択期間に jobs がないとき、jobs 未接続のときは出さない。予算・打ち切り数は注記行に続けて出す（`jobs_meta` の `estimate_<key>` 行があるときだけ。値の欠けた部分は省く。不正な値は表示せず無視する）。グループ別の上位行・グラフ・内訳表には推定表示がない
 
 #### 実測との比較（#199）
 
@@ -395,10 +395,11 @@ K=1・2 は新旧が同一のため、以下の表は K=3・5・10 だけを載�
 - 添付する JSON は「行オブジェクトの配列、または `rows` / `data` / `results` の下にある配列」。`dash.data(id).data` には行の配列だけが届き、セルは文字列として扱うのが安全
 - `dash.data(id).meta` に値が入るのは、query dataset の `dash.loader` が `meta` を返したときだけで、`kind: "file"` の dataset では使えない
 - したがって fetch 出力のトップレベルの `since` / `until` / `warnings` / `estimate` / `assume_current_visibility` / `generated_at` はそのままではページに届かない
-- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate"|"assume_current_visibility", "value": "<文字列>"}`
+- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate"|"estimate_budget_runs"|"estimate_zero_groups"|"estimate_zero_runs"|"assume_current_visibility", "value": "<文字列>"}`
   - `since` / `until`: 1 行ずつ（billing は `YYYY-MM`、jobs は `YYYY-MM-DD`）
   - `warning`: `warnings` の文字列要素を先頭から最大 20 件。制御文字を除き 300 字で切る
-  - `estimate`: 文書の `estimate` がオブジェクトのときだけ 1 行（`value` は `"true"`。中身は渡さない）
+  - `estimate`: 文書の `estimate` がオブジェクトのときだけ 1 行（`value` は `"true"`）
+  - `estimate_budget_runs` / `estimate_zero_groups` / `estimate_zero_runs`: jobs 文書の `estimate` に同名キーがあるときだけ 1 行ずつ（`value` は 10 進の整数文字列。bool 以外の 0〜10^9 の整数でなければ build_dashboard は止まる。`method` 等の文字列は渡さない）
   - `assume_current_visibility`: billing 文書の `assume_current_visibility` が `true` のときだけ 1 行（`value` は `"true"`）。偽・欠落なら行を作らない。真偽値以外なら build_dashboard は止まる（`summarize.py` と同じ）
 - ページは `withMeta` で行配列と meta 行から `{rows, since, until, warnings, estimate?, assume_current_visibility?}` を組み直し、既存の `span` / `coverage` / `isEstimate` と `quotaApprox` に渡す。meta が読めない（`missing` / `error`、行なし）ときは取得期間が `unknown` になり、注記を出す（読み込み中は出さない）
 - source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。meta は rows と同じ版固定・同じ更新の扱いで、meta の警告文も rows と同様にダッシュボードを開ける全員が読める

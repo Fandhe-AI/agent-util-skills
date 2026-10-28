@@ -630,3 +630,55 @@ test('ページ側の配線: 確度は描画より前に確定し、凡例・ツ
   assert.match(chartFn, /tipTotalLabel\(visible, total\)/)
   for (const body of [legendFn, chartFn]) assert.doesNotMatch(body, /以上/)
 })
+
+// ---- 推定の予算と打ち切り数（#219） ----
+const countRows = [
+  mrow('jobs', 'estimate_budget_runs', '15'), mrow('jobs', 'estimate_zero_groups', '2'), mrow('jobs', 'estimate_zero_runs', '330')
+]
+const withCounts = (extra = countRows) => runtimeInput({ jobs_meta: ok([...jobsMeta, ...extra]) })
+
+test('推定の件数: meta 行から estimateCounts と文言が出る', () => {
+  const a = plain(U.annotate(withCounts(), '2026-10', '2026-10-03'))
+  assert.deepEqual(a.estimateCounts, { budget_runs: 15, zero_groups: 2, zero_runs: 330 })
+  assert.equal(U.estimateText(a.estimateCounts),
+    '抜き取りの予算は 15 run（jobs 呼び出しの上限）。試し取りが全部 0 分で打ち切った組は 2 組（330 run）で、その分は 0 分と推定している。')
+})
+
+test('推定の件数: 推定でないときは null（選択期間外・estimate 行なし・meta 欠落）', () => {
+  assert.equal(U.annotate(withCounts(), '2026-09', '2026-10-20').estimateCounts, null)
+  const noEst = jobsMeta.filter((m) => m.kind !== 'estimate')
+  assert.equal(U.annotate(runtimeInput({ jobs_meta: ok([...noEst, ...countRows]) }), '2026-10', '2026-10-03').estimateCounts, null)
+  for (const status of ['missing', 'error']) {
+    assert.equal(U.annotate(runtimeInput({ jobs_meta: { status, data: undefined } }), '2026-10', '2026-10-03').estimateCounts, null)
+  }
+  assert.equal(U.annotate(runtimeInput(), '2026-10', '2026-10-03').estimateCounts, null, '件数行が無ければ null')
+})
+
+test('推定の件数: count 行が estimate 行より前でも反映し、不正値は無視する', () => {
+  const before = [...countRows, ...jobsMeta]
+  assert.deepEqual(plain(U.annotate(runtimeInput({ jobs_meta: ok(before) }), '2026-10', '2026-10-03').estimateCounts),
+    { budget_runs: 15, zero_groups: 2, zero_runs: 330 })
+  for (const bad of ['1.5', '-1', ' 3', 'abc', '99999999999', '1e3', '']) {
+    const a = U.annotate(withCounts([mrow('jobs', 'estimate_budget_runs', bad)]), '2026-10', '2026-10-03')
+    assert.equal(a.estimateCounts, null, JSON.stringify(bad))
+  }
+  for (const bad of [15, true, null]) {
+    const a = U.annotate(withCounts([mrow('jobs', 'estimate_budget_runs', bad)]), '2026-10', '2026-10-03')
+    assert.equal(a.estimateCounts, null)
+  }
+  assert.equal(U.annotate(withCounts([mrow('billing', 'estimate_budget_runs', '15')]), '2026-10', '2026-10-03').estimateCounts, null)
+})
+
+test('推定の件数: 従来の文書形でも読め、不正な型は無視する', () => {
+  const d = (e) => plain(U.annotate({ billing: ok(billingDoc), jobs: ok({ ...jobsDoc, estimate: e }) }, '2026-10', '2026-10-03'))
+  assert.deepEqual(d({ budget_runs: 15, zero_groups: 2 }).estimateCounts, { budget_runs: 15, zero_groups: 2 })
+  assert.equal(d({ budget_runs: true, zero_groups: -1, zero_runs: '3' }).estimateCounts, null)
+  assert.equal(U.estimateText(null), '')
+  assert.equal(U.estimateText({}), '')
+})
+
+test('推定の件数: ページ配線', () => {
+  assert.match(HTML, /<span id="aud-estimate-detail" data-source="jobs_meta" hidden><\/span>/)
+  assert.match(HTML, /U\.estimateText\(ann\.estimateCounts\)/)
+  assert.match(HTML, /\$\('#aud-estimate-detail'\)\.textContent = /)
+})
