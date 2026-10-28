@@ -361,13 +361,14 @@ def load_usage_csv(path, org, months):
                 if n_rows > MAX_CSV_ROWS:
                     raise FetchError("--usage-csv の行数が上限（%d）を超えた" % MAX_CSV_ROWS)
                 day = _day_of(cell(row, "date"))
-                stats["dates"].append(day)
                 if cell(row, "product").lower() != "actions" or cell(row, "unit_type").lower() != "minutes":
                     continue
                 org_cell = cell(row, "organization")
                 if org_cell and org_cell.lower() != org.lower():
                     stats["other_org"] += 1
                     continue
+                # 範囲確認は対象 org・Actions 分の行だけで行う（他 org・他 product の行が欠損を隠さない）
+                stats["dates"].append(day)
                 month = "%04d-%02d" % (day.year, day.month)
                 if month not in allowed:
                     stats["out_of_period"] += 1
@@ -483,6 +484,13 @@ def main(argv=None):
         if a.usage_csv:
             # CSV の検証は gh を呼ぶ前に済ませ、不正な入力でネットワークへ出ない
             payloads, cstats = load_usage_csv(a.usage_csv, a.org, months)
+            seen = {"%04d-%02d" % (d.year, d.month) for d in cstats["dates"]}
+            absent = [m for m in months if m not in seen]
+            if absent:
+                # 出力の since/until は集計・表示側が取得済み範囲として扱う。CSV に 1 日も無い月を
+                # 含めると「取得済み・利用ゼロ」になるため、保証できない指定は拒否する
+                raise FetchError("--usage-csv に対象 org の Actions 明細が無い月がある（%s）。"
+                                 "--since / --until を CSV の範囲に合わせる" % ", ".join(absent))
             warnings = csv_warnings(cstats, months, now.date())
             extra = {"input": "usage_csv", "dependabot": {
                 "rule": DEPENDABOT_RULE, "items": cstats["items"],

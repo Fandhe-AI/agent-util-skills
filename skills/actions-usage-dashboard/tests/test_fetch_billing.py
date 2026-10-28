@@ -660,6 +660,28 @@ class UsageCsvCliTest(CliStubTest):
         with open(self.out, "rb") as f:
             self.assertEqual(f.read(), b"previous\n")
 
+    def test_wider_period_than_csv_rejected(self):
+        # 7 月だけの CSV に 6..7 月を指定すると 6 月が「取得済み・利用ゼロ」になるため拒否する
+        with open(self.out, "wb") as f:
+            f.write(b"previous\n")
+        r = self.run_cli("--org", ORG, "--since", "2026-06", "--until", "2026-07", "--out", self.out,
+                         "--usage-csv", self.csv)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("2026-06", r.stderr)
+        self.assertEqual(self.calls(), [])
+        with open(self.out, "rb") as f:
+            self.assertEqual(f.read(), b"previous\n")
+
+    def test_other_product_rows_do_not_hide_missing_month(self):
+        write_csv(self.csv, [
+            crow("2026-07-01", "priv-api", 1, 0.008, 0.008, 0.0),
+            crow("2026-06-15", "priv-api", 1, 0.008, 0.008, 0.0, product="Packages"),
+            crow("2026-06-16", "priv-api", 1, 0.008, 0.008, 0.0, org="other-org")])
+        r = self.run_cli("--org", ORG, "--since", "2026-06", "--until", "2026-07", "--out", self.out,
+                         "--usage-csv", self.csv)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("2026-06", r.stderr)
+
     def test_directory_csv_never_calls_gh(self):
         r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-07", "--out", self.out,
                          "--usage-csv", self.work)
