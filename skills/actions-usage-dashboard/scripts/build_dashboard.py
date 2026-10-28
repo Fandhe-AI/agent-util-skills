@@ -39,6 +39,14 @@
   meta なしで作られた既存ダッシュボードの移行用。受け付ける id は固定の 4 つだけで、任意の dataset や
   任意の JSON を store へ送る経路は持たない（meta は検証済みの rows 文書から作るものに限る。詳細は SKILL.md）。
 
+雛形だけの差し替え（--update --refresh-template --template-only）は rows を伴わない 1 段の経路で、
+  files/index.html の op: set 1 件（if_version 付き）だけの batch.json と index.json を書く。
+  rows・meta・datasets・dash は書かず、--template-if-version <N> が必須。--rows・--asset-url・--if-version・
+  --add-dataset・--title・--plan-included-minutes・--updated-at・--updated-by とは併用できず、指定されたら
+  何も書かずに終了する。明示フラグにしたのは、--rows の付け忘れを「雛形だけ」と推測すると通常の更新が
+  データを書かずにページだけを置き換える batch に化けるため（--add-dataset と同じ fail-closed）。
+  承認（ページ差し替えの確認）は SKILL.md 側の責務で、このスクリプトはローカルのファイル生成だけを行う。
+
 batch.json にはローカルの絶対パスが入る。このファイル自体は store へ送らない
   （ArtifactData が file_path を読み、参照先の中身だけを文書として送る）。
 
@@ -275,7 +283,7 @@ def parse_if_versions(items, ids):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Dashboard 型 Artifact へ書く文書と batch.json を生成する")
     ap.add_argument("--org", required=True)
-    ap.add_argument("--rows", action="append", required=True, help="rows JSON（作成は billing 必須・jobs 任意。--update では jobs だけも可）")
+    ap.add_argument("--rows", action="append", default=[], help="rows JSON（作成は billing 必須・jobs 任意。--update では jobs だけも可。--template-only では指定しない）")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--asset-url", action="append", default=[], help="アップロード後の /_blob/ url（1 段目の一覧と同順・同数。rows → meta の交互）")
     ap.add_argument("--update", action="store_true")
@@ -284,12 +292,14 @@ def main(argv=None):
                     help="--update で store にまだ無い dataset を op: set で作る（jobs は jobs_meta も。理由は SKILL.md）")
     ap.add_argument("--refresh-template", action="store_true",
                     help="--update 用。files/index.html をスキル同梱の雛形で置き換える（op: set）")
+    ap.add_argument("--template-only", action="store_true",
+                    help="--update --refresh-template 用。rows・meta を書かず files/index.html だけを置き換える（1 段。--template-if-version 必須）")
     ap.add_argument("--template-if-version", type=int,
-                    help="--refresh-template の 2 段目で必須。store 上の files/index.html の版")
+                    help="--refresh-template の 2 段目と --template-only で必須。store 上の files/index.html の版")
     ap.add_argument("--title")
     ap.add_argument("--plan-included-minutes", type=int)
     ap.add_argument("--updated-at")
-    ap.add_argument("--updated-by", default=DEFAULT_BY)
+    ap.add_argument("--updated-by", default=None)
     a = ap.parse_args(argv)
     try:
         return run(a)
@@ -301,9 +311,62 @@ def main(argv=None):
         return 1
 
 
+def run_template_only(a):
+    """雛形だけを置き換える 1 段の経路（rows・meta・datasets・dash は書かない）。
+
+    run() から --template-only のときだけ呼ばれる。検証はすべてファイル操作の前に行い、
+    違反時は何も消さず何も書かない。承認の取得は SKILL.md の手順側の責務。
+    """
+    if not (a.update and a.refresh_template):
+        raise BuildError("--template-only は --update --refresh-template と併用する")
+    if a.rows:
+        raise BuildError("--template-only は --rows と併用できない")
+    if a.asset_url:
+        raise BuildError("--template-only は --asset-url と併用できない")
+    if a.if_version:
+        raise BuildError("--template-only は --if-version と併用できない")
+    if a.add_dataset:
+        raise BuildError("--template-only は --add-dataset と併用できない")
+    for flag, v in (("--title", a.title), ("--plan-included-minutes", a.plan_included_minutes),
+                    ("--updated-at", a.updated_at), ("--updated-by", a.updated_by)):
+        if v is not None:
+            raise BuildError("--template-only は %s と併用できない" % flag)
+    if a.template_if_version is None:
+        raise BuildError("--template-only には --template-if-version <N> が必要（files/index.html の版を get で取る）")
+    if a.template_if_version < 1:
+        raise BuildError("--template-if-version は正の整数で指定する")
+    out_dir = os.path.realpath(a.out_dir)
+    index = build_index(load_template())
+    total = check_doc_size("files/index.html", index)
+    if total >= MAX_BATCH_BYTES:
+        raise BuildError("batch の本文の合計が 1 MiB を超える（%d バイト）" % total)
+    batch = [write_entry("files", "index.html", "index.json", out_dir, "set", a.template_if_version)]
+
+    os.makedirs(out_dir, exist_ok=True)
+    # 前回の通常更新の成果物が残ると別 batch.json の誤用を招くため、固定名だけを消す。
+    names = ["batch.json", "index.json", "dash-meta.json", "dash-params.json"]
+    names += ["dataset-%s.json" % d for d in ALL_IDS] + ["dataset-%s.update.json" % d for d in ALL_IDS]
+    names += ["meta-%s.json" % d for d in DATASET_IDS]
+    for fn in names:
+        try:
+            os.unlink(os.path.join(out_dir, fn))
+        except FileNotFoundError:
+            pass
+    atomic_write_json(os.path.join(out_dir, "index.json"), index)
+    bp = os.path.join(out_dir, "batch.json")
+    atomic_write_json(bp, batch)
+    print("ArtifactData の batch の writes に %s の中身（1 件）を渡す。" % safe(bp))
+    print("ページ（files/index.html）だけをスキル同梱の雛形で置き換える（op: set、if_version %d）。"
+          "rows・meta・datasets は書かない。" % a.template_if_version)
+    print("書き込み後、check 文書を確認する（summarize.py は rows が無いので使わない）。")
+    return 0
+
+
 def run(a):
     if not ORG_RE.match(a.org):
         raise BuildError("--org が不正")
+    if a.template_only:
+        return run_template_only(a)
     if not 1 <= len(a.rows) <= 2:
         raise BuildError("--rows は 1〜2 回指定する")
     if a.plan_included_minutes is not None and a.plan_included_minutes < 0:
@@ -317,7 +380,7 @@ def run(a):
     if not a.update and "billing" not in ids:
         raise BuildError("作成には billing の rows が必要")
     title = clean_text("--title", a.title) if a.title else "%s の Actions 利用状況" % a.org
-    by = clean_text("--updated-by", a.updated_by)
+    by = clean_text("--updated-by", a.updated_by if a.updated_by is not None else DEFAULT_BY)
     updated = {"at": resolve_updated_at(a.updated_at, entries), "by": by}
     out_dir = os.path.realpath(a.out_dir)
     # アップロードの一覧は「rows → その meta」の交互。--asset-url はこの順・この数で受ける。
