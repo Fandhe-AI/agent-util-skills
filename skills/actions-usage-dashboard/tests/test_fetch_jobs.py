@@ -89,7 +89,10 @@ if parts[-1] == "runs":
         lo, hi = c[2:], "9999-12-31"
     else:
         lo, hi = c.split("..")
-    runs = [r for r in runs if lo <= r["created_at"][:10] <= hi]
+    if len(lo) > 10:
+        runs = [r for r in runs if lo <= r["created_at"] <= hi]
+    else:
+        runs = [r for r in runs if lo <= r["created_at"][:10] <= hi]
     capped = runs[:1000]
     print(json.dumps({"total_count": len(runs), "workflow_runs": capped[(page-1)*per:page*per]}))
 elif parts[-1] == "jobs":
@@ -996,6 +999,40 @@ class Cli(unittest.TestCase):
             r = self.run_cli()
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("1,000 件上限", r.stdout)
+
+    def test_subday_bisect_fetches_all_when_one_day_exceeds_cap(self):
+        self.cfg["repos"] = self.cfg["repos"][:1]
+        # 1 日 1,100 件（70 秒間隔で 1 日に収まる）。日単位では分けられず、時刻範囲で二分して全件取る
+        self.cfg["runs"] = {"pub-site": [
+            run(i, created=D0 + "T%02d:%02d:%02dZ" % ((i * 70) // 3600, ((i * 70) % 3600) // 60, (i * 70) % 60),
+                status="queued") for i in range(1, 1101)]}
+        self.cfg["jobs"] = {}
+        self.write_cfg()
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("1,000 件上限", r.stdout)
+        specs = [c for c in self.runs_list_calls() if "Z..20" in c]
+        self.assertGreaterEqual(len(specs), 2)
+        self.assertIn("run: 一覧 1100 ", r.stdout)
+        # 日全体の範囲（二分する内部ノード）は 1 ページ目で打ち切る。旧実装は 10 ページ取っていた
+        nxt = (datetime.fromisoformat(D0).date() + timedelta(days=1)).isoformat()
+        root = [c for c in self.runs_list_calls()
+                if "created=%sT00:00:00Z..%sT00:00:00Z" % (D0, nxt) in c]
+        self.assertEqual(len(root), 1, root)
+
+    def test_subday_min_span_still_over_cap_is_truncated(self):
+        self.cfg["repos"] = self.cfg["repos"][:1]
+        # 同一秒に 1,100 件。最小区間でも超えるので truncated になり、検索回数は有界
+        self.cfg["runs"] = {"pub-site": [run(i, created=D0 + "T00:00:00Z", status="queued") for i in range(1, 1101)]}
+        self.cfg["jobs"] = {}
+        self.write_cfg()
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("1,000 件上限", r.stdout)
+        with open(self.out) as f:
+            warns = [w for w in json.load(f)["warnings"] if "1,000 件上限" in w]
+        self.assertTrue(warns and all("T00:00:00Z.." in w for w in warns), warns)
+        self.assertLessEqual(len(self.runs_list_calls()), 2 * 86400 // fj.SUBDAY_MIN_SPAN_SECONDS * 11)
 
     def test_tampered_future_cursor_does_not_skip_listing(self):
         wide = (TODAY - timedelta(days=90)).isoformat()
