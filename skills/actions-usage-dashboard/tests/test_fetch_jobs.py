@@ -7,6 +7,7 @@ Python スクリプトで、呼び出しを calls.log に記録し、cfg.json �
 import importlib.util
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -267,6 +268,182 @@ class EstimatePure(unittest.TestCase):
         # run 1 は推定、run 2 は旧 attempt 残しで推定しない、run 3 は作成日が不正で推定不能
         self.assertEqual(c, {"sampled": 1, "estimated": 1, "unestimated": 1})
         self.assertEqual(len(ent), 1)
+
+
+def _mk_groups(sizes, k):
+    """sizes: {(repo, wf): n}。run id は組ごとに 1000 刻みで、created_at は id 昇順。"""
+    listed = []
+    for gi, ((repo, wf), n) in enumerate(sorted(sizes.items(), key=str)):
+        for i in range(n):
+            rid = (gi + 1) * 1000 + i
+            day = (TODAY - timedelta(days=19) + timedelta(days=i % 19)).isoformat()
+            listed.append((rid, 1, repo, run(rid, created=day + "T%02d:00:00Z" % (i // 19), workflow_id=wf)))
+    g = fj.plan_samples(listed, k)
+    fj.pilot_samples(g, k)
+    return listed, g
+
+
+def _ent(minutes):
+    return {"repo": "r", "attempt": 1, "created_at": "",
+            "agg": [{"day": D0, "runner_group": "g", "minutes": minutes}] if minutes else []}
+
+
+class EstimateAllocation(unittest.TestCase):
+    """2 段階の抜き取り配分（Issue #205）。本番の plan_samples / pilot_samples / allocate_samples を使う。"""
+
+    def test_pilot_samples(self):
+        for n, k, want in ((1, 3, 1), (5, 3, 2), (5, 2, 2), (5, 1, 1), (2, 5, 2)):
+            _l, g = _mk_groups({("r", 1): n}, k)
+            self.assertEqual(len(g[("r", 1)]["pilot"]), want, (n, k))
+        _l, g = _mk_groups({("r", 1): 9}, 3)
+        self.assertEqual(g[("r", 1)]["pilot"], {1000, 1008})
+        _l, g = _mk_groups({("r", 1): 9}, 1)
+        self.assertEqual(g[("r", 1)]["pilot"], g[("r", 1)]["sample"])
+
+    def test_zero_group_cut_and_floor(self):
+        k = 4
+        listed, g = _mk_groups({("a", 1): 20, ("b", 1): 20, ("c", 1): 20, ("d", 1): 30, ("e", 1): 3}, k)
+        cache = {}
+        for key in (("a", 1), ("c", 1), ("d", 1)):  # a: 両端 0 分、c: 片端だけ 0 分、d: 両端とも 0 分でない
+            ids = sorted(g[key]["pilot"])
+            cache[str(ids[0])] = _ent(0)
+            cache[str(ids[1])] = _ent(0 if key == ("a", 1) else 5)
+        cache[str(sorted(g[("c", 1)]["pilot"])[0])] = _ent(0)
+        # b は試し取りが skipped、e は n=3 で試し取り 2 run が 0 分（残り 1 run があり floor 3 > pilot 2）
+        skipped = {str(r): {"attempt": 1} for r in g[("b", 1)]["pilot"]}
+        for r in g[("e", 1)]["pilot"]:
+            cache[str(r)] = _ent(0)
+        before = json.dumps(cache, sort_keys=True)
+        info = fj.allocate_samples(g, k, cache, skipped)
+        self.assertEqual(json.dumps(cache, sort_keys=True), before)
+        self.assertEqual(g[("a", 1)]["sample"], g[("a", 1)]["pilot"])
+        self.assertEqual(g[("e", 1)]["sample"], g[("e", 1)]["pilot"])
+        self.assertEqual(info["zero_groups"], 2)
+        for key in (("b", 1), ("c", 1), ("d", 1)):
+            self.assertGreaterEqual(len(g[key]["sample"]), min(len(g[key]["pool"]), k))
+            self.assertTrue(g[key]["pilot"] <= g[key]["sample"])
+        # 浮いた予算 (4-2) + (3-2) = 3 は run 数 20:20:30 で b/c/d へ比例（最大剰余で d が +2 ではなく配分）
+        self.assertEqual(info["extra"], 3)
+        self.assertEqual(sum(len(x["sample"]) for x in g.values()), info["budget"] - 3 + 3)
+        # 試し取りが未取得なら打ち切らない
+        _l, g2 = _mk_groups({("a", 1): 20}, k)
+        fj.allocate_samples(g2, k, {}, {})
+        self.assertEqual(len(g2[("a", 1)]["sample"]), k)
+
+    def test_budget_cap_and_proportional(self):
+        k = 5
+        sizes = {("z", 1): 10, ("s", 1): 6, ("m", 1): 30, ("l", 1): 90}
+        listed, g = _mk_groups(sizes, k)
+        cache = {str(r): _ent(0) for r in g[("z", 1)]["pilot"]}
+        info = fj.allocate_samples(g, k, cache, {})
+        budget = sum(min(n, k) for n in sizes.values())
+        self.assertEqual(info["budget"], budget)
+        self.assertLessEqual(sum(len(x["sample"]) for x in g.values()), budget)
+        for key, n in sizes.items():
+            self.assertLessEqual(len(g[key]["sample"]), n)
+        self.assertEqual(len(g[("z", 1)]["sample"]), 2)
+        # 浮いた 3 run は 6:30:90 に比例し、大きい組が最も多く受け取る
+        gain = {key: len(g[key]["sample"]) - min(n, k) for key, n in sizes.items() if key != ("z", 1)}
+        self.assertEqual(sum(gain.values()), 3)
+        self.assertGreaterEqual(gain[("l", 1)], gain[("m", 1)])
+        # 全組が上限に達する場合は余りを使わない（上限 n=5 の組だけ・K=5）
+        _l, g3 = _mk_groups({("z", 1): 8, ("t", 1): 6}, 6)
+        c3 = {str(r): _ent(0) for r in g3[("z", 1)]["pilot"]}
+        fj.allocate_samples(g3, 6, c3, {})
+        self.assertEqual(len(g3[("t", 1)]["sample"]), 6)
+        self.assertEqual(len(g3[("z", 1)]["sample"]), 2)
+
+    def test_deterministic_and_nested(self):
+        k = 4
+        sizes = {("a", 1): 12, ("b", 2): 40, ("c", 3): 7, ("d", 4): 25}
+        outs = []
+        for order in (False, True):
+            listed, g = _mk_groups(sizes, k)
+            cache = {str(r): _ent(0) for r in g[("a", 1)]["pilot"]}
+            cache.update({str(r): _ent(0) for r in g[("c", 3)]["pilot"]})
+            items = list(g.items())
+            if order:
+                items.reverse()
+            gg = dict(items)
+            fj.allocate_samples(gg, k, cache, {})
+            fj.allocate_samples(gg, k, cache, {})
+            outs.append({key: sorted(x["sample"]) for key, x in g.items()})
+            for x in g.values():
+                self.assertTrue(x["pilot"] <= x["sample"])
+        self.assertEqual(outs[0], outs[1])
+
+    def test_k_le_2_matches_uniform(self):
+        for k in (1, 2):
+            sizes = {("a", 1): 12, ("b", 2): 40, ("c", 3): 1}
+            listed, g = _mk_groups(sizes, k)
+            uni = fj.plan_samples(listed, k)
+            cache = {str(r): _ent(0) for x in g.values() for r in x["pilot"]}
+            fj.allocate_samples(g, k, cache, {})
+            for key in sizes:
+                self.assertEqual(g[key]["sample"], uni[key]["sample"], (k, key))
+
+    def _population(self, seed):
+        rnd = random.Random(seed)
+        listed, truth, kinds = [], {}, {}
+        rid = 0
+        groups_spec = []
+        for i in range(3):
+            groups_spec.append(("big", rnd.randint(100, 300)))
+        groups_spec += [("mid", rnd.randint(30, 60)) for _ in range(6)]
+        groups_spec += [("small", rnd.randint(2, 10)) for _ in range(25)]
+        groups_spec += [("zero", rnd.randint(4, 12)) for _ in range(40)]
+        groups_spec += [("moved", rnd.randint(40, 90)) for _ in range(3)]
+        groups_spec += [("sparse", rnd.randint(40, 90)) for _ in range(3)]
+        for gi, (kind, n) in enumerate(groups_spec):
+            key = ("repo%d" % (gi % 7), gi + 1)
+            kinds[key] = kind
+            mean = rnd.uniform(2, 40)
+            cv = rnd.uniform(0.1, 0.8)
+            for i in range(n):
+                rid += 1
+                day = (TODAY - timedelta(days=19) + timedelta(days=i * 19 // n)).isoformat()
+                if kind == "zero":
+                    m = 0.0
+                elif kind == "moved":
+                    m = 0.0 if i < n // 2 else max(0.1, rnd.gauss(mean, mean * cv))
+                elif kind == "sparse":
+                    m = 0.0 if rnd.random() < 0.5 else max(0.1, rnd.gauss(mean, mean * cv))
+                else:
+                    m = max(0.1, rnd.gauss(mean, mean * cv))
+                truth[rid] = m
+                listed.append((rid, 1, key[0], run(rid, created=day + "T%02d:00:00Z" % (i % 24), workflow_id=key[1])))
+        return listed, truth
+
+    @staticmethod
+    def _total(groups, cache, truth):
+        ent, _c = fj.estimate_entries(groups, cache, {})
+        est = sum(a["minutes"] for e in ent for a in e["agg"])
+        got = sum(e["agg"][0]["minutes"] if e["agg"] else 0.0 for e in cache.values())
+        return est + got
+
+    def test_total_error_smaller_with_same_calls(self):
+        k = 3
+        errs_old, errs_new = [], []
+        for seed in range(15):
+            listed, truth = self._population(seed)
+            actual = sum(truth.values())
+            go = fj.plan_samples(listed, k)
+            co = {str(r): _ent(truth[r]) for g in go.values() for r in g["sample"]}
+            old_calls = len(co)
+            gn = fj.plan_samples(listed, k)
+            fj.pilot_samples(gn, k)
+            cn = {str(r): _ent(truth[r]) for g in gn.values() for r in g["pilot"]}
+            fj.allocate_samples(gn, k, cn, {})
+            cn = {str(r): _ent(truth[r]) for g in gn.values() for r in g["sample"]}
+            new_calls = len(cn)
+            self.assertLessEqual(new_calls, old_calls, seed)
+            for key in gn:
+                if not all(truth[r] == 0 for r in gn[key]["pilot"]):  # 打ち切り対象外の組は均等配分より減らさない
+                    self.assertGreaterEqual(len(gn[key]["sample"]), len(go[key]["sample"]), (seed, key))
+            errs_old.append(abs(self._total(go, co, truth) - actual))
+            errs_new.append(abs(self._total(gn, cn, truth) - actual))
+        self.assertLess(sum(errs_new) / len(errs_new), sum(errs_old) / len(errs_old),
+                        (errs_old, errs_new))
 
 
 class Cli(unittest.TestCase):
@@ -921,7 +1098,7 @@ class EstimateCli(unittest.TestCase):
         doc = self.load_out()
         self.assertEqual(doc["estimate"], {"method": "sample_mean_per_workflow", "sample_runs": 3,
                                            "sampled_runs": 12, "estimated_runs": 24, "groups": 4,
-                                           "unestimated_runs": 0})
+                                           "unestimated_runs": 0, "budget_runs": 12, "zero_groups": 0})
         self.assertTrue(any(w.startswith("推定値を含む") for w in doc["warnings"]))
         self.assertLessEqual(len(r.stdout.splitlines()), 11)
         self.assertIn("推定:", r.stdout)
@@ -945,6 +1122,69 @@ class EstimateCli(unittest.TestCase):
         codes = []
         for _ in range(80):
             r = self.run_cli(["--estimate", "--max-seconds", "0.001"])
+            codes.append(r.returncode)
+            if r.returncode == 0:
+                break
+            self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertEqual(codes[-1], 0, codes)
+        self.assertIn(4, codes)
+        with open(ref_out) as f:
+            ref = json.load(f)
+        got = self.load_out()
+        self.assertEqual(got["rows"], ref["rows"])
+        self.assertEqual(got["estimate"], ref["estimate"])
+
+    def make_alloc_cfg(self):
+        # GitHub ホストだけの組 2 つ（各 9 run）と、run 数の多いセルフホストの組（40 run、所要時間に変動あり）
+        cfg = {"repos": [{"name": "alloc-repo", "visibility": "private", "archived": False}],
+               "runs": {"alloc-repo": []}, "jobs": {}}
+        self.sizes = {1: 9, 2: 9, 3: 40}
+        self.ids = {}
+        for wf, n in self.sizes.items():
+            self.ids[wf] = []
+            for i in range(n):
+                rid = wf * 1000 + i
+                day = (TODAY - timedelta(days=19) + timedelta(days=i * 19 // n)).isoformat()
+                cfg["runs"]["alloc-repo"].append(run(rid, created=day + "T00:00:00Z", workflow_id=wf))
+                if wf == 3:
+                    cfg["jobs"][str(rid)] = [job(rid * 10, ["self-hosted"], "g", day + "T01:00:00+00:00", 5 + i % 7)]
+                else:
+                    cfg["jobs"][str(rid)] = [job(rid * 10, ["ubuntu-latest"], "GitHub Actions", day + "T01:00:00+00:00", 5)]
+                self.ids[wf].append(rid)
+        return cfg
+
+    def test_allocation_jobs_calls_bounded_and_zero_cut(self):
+        # Issue #205: 0 分の組は試し取りの 2 run で打ち切り、浮いた分を run 数の多い組へ回す
+        self.cfg = self.make_alloc_cfg()
+        self.write_cfg()
+        r = self.run_cli(["--estimate", "--sample-runs", "4"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        jobs_calls = [c for c in self.calls() if "/jobs" in c]
+        budget = sum(min(n, 4) for n in self.sizes.values())
+        doc = self.load_out()
+        self.assertEqual(doc["estimate"]["budget_runs"], budget)
+        self.assertEqual(doc["estimate"]["zero_groups"], 2)
+        cache = self.load_cache_file()
+        fetched = {int(k) for k in cache["runs"]}
+        for wf in (1, 2):
+            self.assertEqual(fetched & set(self.ids[wf]), {self.ids[wf][0], self.ids[wf][-1]})
+        self.assertGreater(len(fetched & set(self.ids[3])), 4)
+        self.assertEqual(len(jobs_calls), len(fetched))
+        self.assertLessEqual(len(jobs_calls), budget)
+        self.assertLessEqual(len(jobs_calls), 4 * len(self.sizes))
+        self.assertLessEqual(len(r.stdout.splitlines()), 11)
+        self.assertNotIn("alloc-repo", r.stdout)
+        self.assertFalse(any("alloc-repo" in w for w in doc["warnings"]))
+
+    def test_allocation_resume_matches_uninterrupted(self):
+        self.cfg = self.make_alloc_cfg()
+        self.write_cfg()
+        ref_out = os.path.join(self.root, "ref.json")
+        self.assertEqual(self.run_cli(["--estimate", "--sample-runs", "4"], out=ref_out,
+                                      cache=os.path.join(self.root, "refcache")).returncode, 0)
+        codes = []
+        for _ in range(150):
+            r = self.run_cli(["--estimate", "--sample-runs", "4", "--max-seconds", "0.001"])
             codes.append(r.returncode)
             if r.returncode == 0:
                 break

@@ -164,15 +164,18 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 `fetch_jobs.py --estimate [--sample-runs K]` は、正確さより速さを優先して傾向を見るためのモード。正確な値が要るとき、特に請求や合計分数の照合には `--estimate` なしの全件取得を使う（誤差は「実測との比較（#199）」）。
 
 - 目的: セルフホストかどうかは jobs のラベルにしかなく、全件取得は run ごとに jobs API を呼ぶ。run の多い org（4 週間で約 47,000 run）では初回に十数時間かかるため、jobs の取得を抜き取りに絞る
-- 単位と式: `(repo, workflow_id)` の組ごとに、完了 run から最大 K run（既定 3、1〜20）の jobs だけ取る。抜き取った run の runner_group ごとのセルフホスト分数を run 当たりの平均にし、抜き取らなかった完了 run に 1 run ずつ割り当てる（平均 × 完了 run 数）。セルフホスト分が 0 の抜き取り run も分母に入る。推定分は各 run の作成日（UTC）に載せる。抜き取った run は実測値を使う
+- 単位と式: `(repo, workflow_id)` の組ごとに、完了 run から最大 K run（既定 3、1〜20）を基準に jobs だけ取る（実際の数は次の 2 段階の配分で決まり、合計は予算 `B = Σ min(n, K)` 以下。n は組の完了 run 数）。抜き取った run の runner_group ごとのセルフホスト分数を run 当たりの平均にし、抜き取らなかった完了 run に 1 run ずつ割り当てる（平均 × 完了 run 数）。セルフホスト分が 0 の抜き取り run も分母に入る。推定分は各 run の作成日（UTC）に載せる。抜き取った run は実測値を使う
 - 抜き取りの選び方: `(created_at, id)` 順に並べた列から等間隔に選ぶ（先頭・末尾を含む。K=1 は中央）。乱数は使わない。期間の前・中・後に散らすので、期間の途中でセルフホストへ移した workflow の値を期間全体に広げない。決定的なので、中断後の再開でも同じ run を選び、取得済みの分がキャッシュに当たる
+- 2 段階の配分（#205）: 段階 1 で各組の先頭と末尾の 2 run（試し取り）の jobs を取る。両方が 0 分（GitHub ホストだけ）の組は「0 分組」として、試し取りだけで打ち切り、残りを 0 分と推定する。段階 2 で、0 分組で浮いた分（`min(n, K)` − 2）を 0 分でない組へ run 数 n に比例して足す（各組の上限は n。溢れた分は残りの組へ配り直し、整数化は最大剰余法、同点は `(repo, workflow_id)` の文字列昇順）。0 分でない組と試し取りが不正 job の組（不明）は、均等配分と同じ `min(n, K)` を下限として保証するので、組別の精度は下がらない。試し取りは必ず最終の抜き取りに含まれる。K ≤ 2 では浮く予算が無く、均等配分と同じ結果になる。判定は取得済みの run の値（キャッシュ）だけから決まり、中断後の再開でも同じ配分になる
+  - 先頭と末尾の 2 run で判定する理由: 1 run だけの判定は、K=1 のとき 0 分でない組を 0 分と誤った例があり危険側になる。期間の途中でセルフホストへ移した組は片端が 0 分でないため、打ち切られない
 - 経過時間（`updated_at` − `run_started_at`）で割り戻す方式は採らない。並列 job・キュー待ち・再実行で値がずれるため
 - run の区分
 
 | 区分 | 条件 | 扱い |
 |---|---|---|
 | 実測（キャッシュ） | `cache["runs"]` に attempt 以上で登録済み | キャッシュの値を使う |
-| 抜き取り | 抜き取りに入り、未登録または attempt が増えている | jobs を取り、`cache["runs"]` に実測値として登録する |
+| 0 分で打ち切り | 0 分組で、試し取り以外の完了 run | 残りを 0 分として推定する（jobs を取らない。キャッシュには入れない） |
+| 抜き取り | 抜き取り（試し取りを含む）に入り、未登録または attempt が増えている | jobs を取り、`cache["runs"]` に実測値として登録する |
 | 旧 attempt 残し | 抜き取り外で、古い attempt だけ登録済み | 推定しない。旧 attempt の値を使う（過少になり得る） |
 | 推定 | 抜き取り外で未登録 | 平均を作成日に割り当てる。キャッシュには入れない |
 | 除外 | 不正な job でスキップした run | 数えず、警告に残す |
@@ -185,28 +188,30 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 
 ```json
 "estimate": {"method": "sample_mean_per_workflow", "sample_runs": 3, "sampled_runs": 12,
-             "estimated_runs": 340, "groups": 5, "unestimated_runs": 0}
+             "estimated_runs": 340, "groups": 5, "unestimated_runs": 0,
+             "budget_runs": 15, "zero_groups": 2}
 ```
 
-  `sampled_runs` は有効な抜き取り run の合計、`estimated_runs` は推定した run 数、`groups` は組の数、`unestimated_runs` は抜き取りが全て不正 job（または作成日が不正）で 0 分として数えた run 数。`warnings` に推定値である旨の 1 行（数値のみ）が入り、標準出力にも 1 行足す
+  `sampled_runs` は有効な抜き取り run の合計、`estimated_runs` は推定した run 数、`groups` は組の数、`unestimated_runs` は抜き取りが全て不正 job（または作成日が不正）で 0 分として数えた run 数、`budget_runs` は予算 `Σ min(n, K)`（jobs 呼び出し数の上限）、`zero_groups` は試し取りで打ち切った 0 分組の数（`sample_runs` は K）。`warnings` に推定値である旨の 1 行（数値のみ）が入り、標準出力にも 1 行足す
 - 推定の式（再掲）: 組 g の推定分 = (Σ 抜き取り run のセルフホスト分 ÷ 有効な抜き取り数) × 抜き取らなかった完了 run 数（runner_group ごと）
-- API 呼び出し数: リポジトリ一覧のページ数 + runs 一覧のページ数（二分探索を含む）+ 抜き取りで新規に取る run の jobs ページ数。jobs が 1 ページなら jobs の呼び出しは K × 組数以下。runs 一覧が支配的になり、約 640 回 + K × 組数、1〜1.5 時間程度の見込み（呼び出し 1 回 0.5〜1 秒の仮定。未計測）
-- 誤差要因（実装は fetch_jobs.py の `plan_samples` / `estimate_entries`）
+- API 呼び出し数: リポジトリ一覧のページ数 + runs 一覧のページ数（二分探索を含む）+ 抜き取りで新規に取る run の jobs ページ数。jobs が 1 ページなら jobs の呼び出しは予算 `B = Σ min(n, K)`（K × 組数以下）以下。runs 一覧が支配的になり、約 640 回 + B（最大でも K × 組数）、1〜1.5 時間程度の見込み（呼び出し 1 回 0.5〜1 秒の仮定。未計測）
+- 誤差要因（実装は fetch_jobs.py の `plan_samples` / `pilot_samples` / `allocate_samples` / `estimate_entries`）
   - workflow 内のばらつき: 条件付き job・matrix・`paths` による job の有無で、run ごとの分数が大きく変わる
   - 母集団は完了 run 全体: cancelled・failure など短く終わった run も同じ平均に入る
   - K が小さいほど外れ値の影響が大きい
+  - 0 分組の打ち切り: 両端が 0 分でも、途中の run にセルフホスト分がある組は 0 分と推定される（過少）
   - 期間途中のランナー移行: 抜き取りを分散させて和らげるが、組の平均は期間全体に広がる
   - 旧 attempt 残し（再実行で完了した run）: 推定せず旧 attempt の値を使うため過少になり得る
   - 推定不能（抜き取りが全て不正 job、または作成日が不正）: 0 分として数えるため過少になる（`unestimated_runs`）
   - 割り当て日は run の作成日（UTC）: 日をまたぐ run は実測と日別の配分がずれる
   - 誤差の大きさと傾向は次の「実測との比較（#199）」に載せた
-- 要約・ダッシュボードの表示: どちらも jobs 文書に `estimate` があるかないかだけを読み、数値・文字列は表示に使わない
+- 要約・ダッシュボードの表示: どちらも `estimate` があるかないかだけを読み、数値・文字列は表示に使わない。ダッシュボードは jobs 文書そのものではなく `jobs_meta` の `estimate` 行（値は固定の `"true"`）で判定する（下の「ページへ渡る値」）
   - `summarize.py`: セルフホスト行に「（推定）」を付け、`--json` の `breakdown.self_hosted.estimated` を true にする（キーは常にあり、推定でなければ false。対象月が jobs の取得期間外なら false）。`estimate` がオブジェクトでなければ終了コード 1。billing 文書の `estimate` は無視する
   - 雛形 `templates/dashboard/index.html`: リード文・セルフホストのタイルに「（推定）」、タイルの注記と総分数の注記・注記行に推定である旨を出す。選択期間に jobs がないとき、jobs 未接続のときは出さない。グループ別の上位行・グラフ・内訳表には推定表示がない
 
 #### 実測との比較（#199）
 
-既定の K と使い分けを決めるため、推定を実測と比べた。
+既定の K と使い分けを決めるため、推定を実測と比べた。この節の表と数値は均等配分（#205 以前）で測った値である。#205 の配分での実データの再測はマージ後に別途行い、誤差率・件数・割合だけをここへ追記する（この節の数値は書き換えない）。
 
 測り方:
 
@@ -312,3 +317,17 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - [SKILL.md](../SKILL.md)
 - [`fetch_billing.py`](../scripts/fetch_billing.py)
 - [`fetch_jobs.py`](../scripts/fetch_jobs.py)
+
+## ページへ渡る値
+
+出典: claude.ai の Dashboard 型 Artifact の `SKILL.md`（An attached file）と `artifact-type/reference/features.md`（A loader）。2026-10-28 に Artifact の read で確かめた。
+
+- 添付する JSON は「行オブジェクトの配列、または `rows` / `data` / `results` の下にある配列」。`dash.data(id).data` には行の配列だけが届き、セルは文字列として扱うのが安全
+- `dash.data(id).meta` に値が入るのは、query dataset の `dash.loader` が `meta` を返したときだけで、`kind: "file"` の dataset では使えない
+- したがって fetch 出力のトップレベルの `since` / `until` / `warnings` / `estimate` / `generated_at` はそのままではページに届かない
+- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate", "value": "<文字列>"}`
+  - `since` / `until`: 1 行ずつ（billing は `YYYY-MM`、jobs は `YYYY-MM-DD`）
+  - `warning`: `warnings` の文字列要素を先頭から最大 20 件。制御文字を除き 300 字で切る
+  - `estimate`: 文書の `estimate` がオブジェクトのときだけ 1 行（`value` は `"true"`。中身は渡さない）
+- ページは `withMeta` で行配列と meta 行から `{rows, since, until, warnings, estimate?}` を組み直し、既存の `span` / `coverage` / `isEstimate` に渡す。meta が読めない（`missing` / `error`、行なし）ときは取得期間が `unknown` になり、注記を出す（読み込み中は出さない）
+- source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。meta は rows と同じ版固定・同じ更新の扱いで、meta の警告文も rows と同様にダッシュボードを開ける全員が読める

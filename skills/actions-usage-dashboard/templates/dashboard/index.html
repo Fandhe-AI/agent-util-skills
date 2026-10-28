@@ -2,10 +2,13 @@
   actions-usage-dashboard の Dashboard 型ページ雛形（files/index.html にそのまま入れる単一ファイル）。
 
   役割: build_dashboard.py（呼び出し元）がこのファイルを無加工で埋め込み、datasets/billing
-  （必須）と datasets/jobs（任意。どちらも fetch 出力の JSON 全体 {since, until, rows}。取得期間の照合に使う）、dash/params の既定値を添える。ページは数値を持たず、
+  （必須）と datasets/jobs（任意）、dash/params の既定値を添える。billing / jobs は行オブジェクトの配列だけが届く
+  （Dashboard 型の添付ファイルは行の配列しか渡さない）。fetch 出力の since / until / warnings / estimate は
+  datasets/billing_meta と datasets/jobs_meta の {source, kind, value} 行（値は文字列）で届き、
+  withMeta がページ内で文書の形に組み直す。ページは数値を持たず、
   集計は usage-agg ブロックの自己完結関数（dash.calc に直接渡す）が行う。
-  契約: dataset id = billing / jobs。params = group_by / include_free / period /
-  runner_type / repo / plan_included_minutes。jobs 文書の estimate（fetch_jobs.py --estimate が付ける）は
+  契約: dataset id = billing / jobs / billing_meta / jobs_meta。params = group_by / include_free / period /
+  runner_type / repo / plan_included_minutes。jobs_meta の estimate 行（fetch_jobs.py --estimate が付ける）は
   あるかないかだけを読み、中身は表示しない。詳細は references/data-sources.md と
   tests/dashboard-template.test.mjs（集計関数の回帰テスト）を参照。
 -->
@@ -63,10 +66,10 @@
     </p>
     <p class="aud-note">日付はすべて UTC。<span id="aud-partial">最新日は集計途中の可能性がある。</span></p>
     <p class="aud-note">セルフホストは jobs API の実行時間で、請求対象外。<span id="aud-estimate" hidden>セルフホストは抜き取り推定の値で、実測ではない。正確な値は fetch_jobs.py を --estimate なしで実行して取り直す。</span><span id="aud-nojobs" hidden>jobs データが未接続のため、セルフホストは集計していない。</span></p>
-    <p class="aud-note aud-alert" id="aud-coverage" hidden></p>
+    <p class="aud-note aud-alert" id="aud-coverage" data-source="billing_meta jobs_meta" hidden></p>
     <p class="aud-note aud-alert" id="aud-lower" hidden>区分不明の利用があるため、グラフの枠消費は下限値（「以上」）になる。</p>
     <p class="aud-note" id="aud-invalid" hidden></p>
-    <ul class="aud-note" id="aud-warnings" data-source="warnings" aria-label="取得元の警告" hidden></ul>
+    <ul class="aud-note" id="aud-warnings" data-source="billing_meta jobs_meta" aria-label="取得元の警告" hidden></ul>
     <p class="aud-note" data-source="billing jobs">データ源: billing usage API（GitHub ホスト）と Actions jobs API（セルフホスト）。</p>
   </header>
 
@@ -447,6 +450,70 @@ window.UsageAgg = (function () {
       doc.estimate !== null && typeof doc.estimate === 'object' && !Array.isArray(doc.estimate);
   }
 
+  // dash.data() が渡す形（行オブジェクトの配列。添付ファイルは行だけが届く）と、付帯情報の
+  // meta 行（{source, kind, value}。値は文字列）から、span / coverage / isEstimate が読む文書の形
+  // {rows, since, until, warnings, estimate?} を組み直す。従来の文書形（配列でないオブジェクト）はそのまま返す。
+  // meta 行が配列でなければ since / until を付けず、coverage は 'unknown' に倒れる（黙って full にしない）。
+  function withMeta(data, metaRows, source) {
+    if (data !== null && typeof data === 'object' && !Array.isArray(data)) return data;
+    const doc = { rows: Array.isArray(data) ? data : [], warnings: [] };
+    if (!Array.isArray(metaRows)) return doc;
+    metaRows.forEach((m) => {
+      if (!m || typeof m !== 'object' || m.source !== source) return;
+      if (typeof m.kind !== 'string' || typeof m.value !== 'string') return;
+      if ((m.kind === 'since' || m.kind === 'until') && doc[m.kind] === undefined) doc[m.kind] = m.value;
+      else if (m.kind === 'warning' && doc.warnings.length < 20) doc.warnings.push(m.value);
+      else if (m.kind === 'estimate') doc.estimate = {};
+    });
+    return doc;
+  }
+
+  // 取得元ごとの文書を作る。status が ok の dataset だけを文書にし、それ以外は null。
+  // input は dash.data() と同じ形の {billing, jobs, billing_meta, jobs_meta}（各 {status, data}）。
+  function docsOf(input) {
+    const inp = input || {};
+    const docFor = (id) => {
+      const d = inp[id];
+      if (!d || d.status !== 'ok') return null;
+      const m = inp[id + '_meta'];
+      return withMeta(d.data, m && m.status === 'ok' ? m.data : null, id);
+    };
+    return { billing: docFor('billing'), jobs: docFor('jobs') };
+  }
+
+  // 取得状況・推定・注記・警告の算出。DOM を触らない純関数で、render() はこの戻り値を描くだけにする。
+  // meta が読み込み中の間は「取得期間が読めない」注記を出さない（読み込み中の誤表示を避ける）。
+  function annotate(input, period, today) {
+    const inp = input || {};
+    const docs = docsOf(inp);
+    const pending = (id) => {
+      const m = inp[id + '_meta'];
+      return !!m && (m.status === 'loading' || m.status === 'refreshing');
+    };
+    const cov = {
+      billing: docs.billing ? coverage(docs.billing, period, today, docs.jobs) : 'none',
+      jobs: docs.jobs ? coverage(docs.jobs, period, today, docs.billing) : 'none',
+      jobsConnected: docs.jobs !== null
+    };
+    const estimate = docs.jobs !== null && isEstimate(docs.jobs) && cov.jobs !== 'none';
+    const notes = [];
+    [['billing', 'billing（GitHub ホスト分）'], ['jobs', 'jobs（セルフホスト分）']].forEach((p) => {
+      const c = cov[p[0]];
+      if (c === 'none' && !(p[0] === 'jobs' && !docs.jobs)) notes.push(p[1] + 'は選択期間を取得していないため不明（0 ではない）。');
+      else if (c === 'partial') notes.push(p[1] + 'は選択期間の一部しか取得しておらず、過小な値になる。');
+      else if (c === 'unknown' && !pending(p[0])) notes.push(p[1] + 'の取得期間（since / until）が読めず、範囲を確認できない。');
+    });
+    const all = [];
+    ['billing', 'jobs'].forEach((k) => {
+      const d = docs[k];
+      if (d && Array.isArray(d.warnings)) {
+        d.warnings.slice(0, 20).forEach((x) => { if (typeof x === 'string' && x !== '') all.push(k + ': ' + x.slice(0, 300)); });
+      }
+    });
+    const warnings = Array.from(new Set(all)).slice(0, 20);
+    return { docs: docs, cov: cov, estimate: estimate, notes: notes, warnings: warnings };
+  }
+
   return {
     CLASS_ORDER: CLASS_ORDER,
     CLASS_META: CLASS_META,
@@ -463,6 +530,9 @@ window.UsageAgg = (function () {
     months: months_,
     span: span,
     isEstimate: isEstimate,
+    withMeta: withMeta,
+    docsOf: docsOf,
+    annotate: annotate,
     coverage: coverage,
     matches: matches,
     topGroups: topGroups,
@@ -623,22 +693,14 @@ function paintTotals(rows, sel, period, cov, ready, approx) {
 }
 
 // 取得元（fetch_*.py）の warnings（1,000 件上限による欠損など）をそのまま見せる。
-// 取得漏れがあるのに通常の合計だけが出ないよう、warnings dataset が届いたときに表示する。
-function paintWarnings() {
+// 警告は billing_meta / jobs_meta の warning 行から annotate が集めたものを引数で受ける。
+// 取得漏れがあるのに通常の合計だけが出ないよう、1 件でもあれば注意欄を表示する。
+function paintWarnings(warnings) {
   const el = $('#aud-warnings');
-  const w = dash.data('warnings');
-  const all = w && w.status === 'ok' && Array.isArray(w.data) ? w.data.slice() : [];
-  // billing / jobs の JSON 自体の warnings も引き継ぐ（warnings dataset は任意）。
-  ['billing', 'jobs'].forEach((k) => {
-    const d = dash.data(k);
-    if (d && d.status === 'ok' && d.data && Array.isArray(d.data.warnings)) {
-      d.data.warnings.slice(0, 20).forEach((x) => { if (typeof x === 'string') all.push(k + ': ' + x); });
-    }
-  });
-  const items = Array.from(new Set(all.filter((x) => typeof x === 'string' && x !== ''))).slice(0, 20);
+  const items = Array.isArray(warnings) ? warnings.slice(0, 20) : [];
   el.replaceChildren(...items.map((t) => {
     const li = document.createElement('li');
-    li.textContent = '注意: ' + t.slice(0, 300);
+    li.textContent = '注意: ' + String(t).slice(0, 300);
     return li;
   }));
   el.hidden = items.length === 0;
@@ -780,10 +842,15 @@ function render() {
   const t = dash.data('totals');
   const a = dash.data('by_axis');
   const ready = f.status === 'ok' && t.status === 'ok' && a.status === 'ok' && Array.isArray(f.data);
-  const jobsD = dash.data('jobs');
-  const billD = dash.data('billing');
+  const input = {
+    billing: dash.data('billing'),
+    jobs: dash.data('jobs'),
+    billing_meta: dash.data('billing_meta'),
+    jobs_meta: dash.data('jobs_meta')
+  };
   const facts = ready ? f.data : [];
-  const srcs = [billD, jobsD].filter((d) => d.status === 'ok').map((d) => d.data);
+  const docs0 = U.docsOf(input);
+  const srcs = [docs0.billing, docs0.jobs].filter((d) => d !== null);
   const period = U.resolvePeriod(sel.period, facts, srcs);
   if (hiddenAxis !== sel.group_by) {
     hidden = new Set();
@@ -791,30 +858,22 @@ function render() {
   }
   paintControls(sel, facts, srcs);
   const today = new Date().toISOString().slice(0, 10);
-  const cov = {
-    billing: billD.status === 'ok' ? U.coverage(billD.data, period, today, jobsD.status === 'ok' ? jobsD.data : null) : 'none',
-    jobs: jobsD.status === 'ok' ? U.coverage(jobsD.data, period, today, billD.status === 'ok' ? billD.data : null) : 'none',
-    jobsConnected: jobsD.status === 'ok'
-  };
+  const ann = U.annotate(input, period, today);
+  const cov = ann.cov;
   // 含有枠の消費を「下限」と言えるのは quota が構造上 0 の既定モードだけ（summarize.py と同じ規則。
   // references/data-sources.md「含有枠の消費の確度」）。--assume-current-visibility で分類した行がある、または
   // billing 文書がその旨を記録しているときは、上振れもあり得るため概算と表示する。
-  const approx = (billD.status === 'ok' && !!billD.data && billD.data.assume_current_visibility === true)
+  const approx = (!!ann.docs.billing && ann.docs.billing.assume_current_visibility === true)
     || facts.some((r) => r.charge_class === 'included' || r.charge_class === 'public_free' || r.quota_minutes > 0);
   paintTotals(ready ? t.data : [], sel, period, cov, ready, approx);
-  $('#aud-nojobs').hidden = jobsD.status === 'ok';
-  // 推定は jobs 文書全体の属性。選択期間に jobs がない（不明表示）ときは推定と書かない。
-  const est = jobsD.status === 'ok' && U.isEstimate(jobsD.data) && cov.jobs !== 'none';
+  $('#aud-nojobs').hidden = cov.jobsConnected;
+  // 推定は jobs_meta の estimate 行（annotate が判定）。選択期間に jobs がない（不明表示）ときは推定と書かない。
+  const est = ann.estimate;
   page.querySelectorAll('.aud-est').forEach((el) => { el.hidden = !est; });
   $('#aud-estimate').hidden = !est;
   $('#aud-sh-note').textContent = est ? '請求対象外・推定値' : '請求対象外';
   $('#aud-total-note').textContent = est ? '全区分の合計（セルフホストは推定）' : '全区分の合計';
-  const notes = [];
-  [['billing', 'billing（GitHub ホスト分）'], ['jobs', 'jobs（セルフホスト分）']].forEach((p) => {
-    if (cov[p[0]] === 'none' && !(p[0] === 'jobs' && jobsD.status !== 'ok')) notes.push(p[1] + 'は選択期間を取得していないため不明（0 ではない）。');
-    else if (cov[p[0]] === 'partial') notes.push(p[1] + 'は選択期間の一部しか取得しておらず、過小な値になる。');
-    else if (cov[p[0]] === 'unknown') notes.push(p[1] + 'の取得期間（since / until）が読めず、範囲を確認できない。');
-  });
+  const notes = ann.notes;
   const covEl = $('#aud-coverage');
   covEl.textContent = notes.join(' ');
   covEl.hidden = notes.length === 0;
@@ -822,7 +881,7 @@ function render() {
   const inv = $('#aud-invalid');
   inv.hidden = invalid === 0;
   inv.textContent = '不正な値を含む行があり、0 として扱った（' + invalid + ' 件）。';
-  paintWarnings();
+  paintWarnings(ann.warnings);
   const latest = facts.reduce((m, r) => (r.day > m && /^\d{4}-/.test(r.day) ? r.day : m), '');
   $('#aud-partial').textContent = latest ? '最新日（' + latest + '）は集計途中の可能性がある。' : '最新日は集計途中の可能性がある。';
   const chart = document.getElementById('aud-chart');
