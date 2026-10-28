@@ -3,7 +3,7 @@
 
 役割: batch.json の形（ArtifactData batch の writes）、index.json の 256 KB 検査、
 --update が dataset の source と updated だけを変えること（jobs だけの更新を含む）、--add-dataset による新 dataset の set、入力検証の fail-closed、--refresh-template によるページ（files/index.html）の差し替えと
-差し替えなしの更新が従来と同じ batch を出すことを固定する。
+差し替えなしの更新が従来と同じ batch を出すこと、--template-only（rows・meta を書かず雛形だけを 1 段で差し替える経路）を固定する。
 CI（ci.yml の skill-tests ジョブ）で `python3 -I -B -m unittest discover` により直接実行される。
 
 fixture は既存の合成データ（org は example-org）。本リポは PUBLIC のため実在の値を入れない。
@@ -532,6 +532,114 @@ class RefreshTemplateTests(unittest.TestCase):
                 self.assertFalse(self.exists("index.json"))
 
 
+class TemplateOnlyTests(unittest.TestCase):
+    """--template-only: rows・meta・datasets を書かず files/index.html だけを版固定で書く 1 段の経路。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self.out = os.path.join(self.d, "o")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def args(self, out=None, extra=None, ver="7"):
+        a = ["--org", "example-org", "--out-dir", out or self.out, "--update",
+             "--refresh-template", "--template-only"]
+        if ver is not None:
+            a += ["--template-if-version", ver]
+        return a + (extra or [])
+
+    def test_template_only_batch(self):
+        rc, _, err = run(self.args())
+        self.assertEqual(rc, 0, err)
+        b = load(self.out, "batch.json")
+        self.assertEqual([(w["op"], w["collection"], w["doc_id"], w["if_version"]) for w in b],
+                         [("set", "files", "index.html", 7)])
+        self.assertEqual(set(b[0]), {"op", "collection", "doc_id", "file_path", "if_version"})
+        self.assertTrue(b[0]["file_path"].startswith(os.path.realpath(self.out) + os.sep))
+        with open(TEMPLATE, encoding="utf-8") as f:
+            self.assertEqual(load(self.out, "index.json"), {"text": f.read()})
+
+    def test_template_only_writes_no_rows_or_meta(self):
+        rc, _, err = run(self.args())
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(os.listdir(self.out)), {"batch.json", "index.json"})
+        for w in load(self.out, "batch.json"):
+            self.assertNotIn(w["collection"], ("datasets", "dash"))
+
+    def test_template_only_removes_stale_outputs(self):
+        os.makedirs(self.out)
+        for n in ("batch.json", "dataset-billing.update.json", "meta-billing.json",
+                  "dataset-jobs.json", "dash-params.json", "keep.txt"):
+            with open(os.path.join(self.out, n), "w") as f:
+                f.write("[]")
+        rc, _, err = run(self.args())
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(os.listdir(self.out)), {"batch.json", "index.json", "keep.txt"})
+        self.assertEqual(len(load(self.out, "batch.json")), 1)
+
+    def test_template_only_invalid(self):
+        cases = [
+            self.args(ver=None),
+            self.args(ver="0"),
+            self.args(ver="x"),
+            [a for a in self.args() if a != "--update"],
+            [a for a in self.args() if a != "--refresh-template"],
+            self.args(extra=["--rows", BILLING]),
+            self.args(extra=["--asset-url", "/_blob/a"]),
+            self.args(extra=["--if-version", "billing=3"]),
+            self.args(extra=["--add-dataset", "jobs"]),
+            self.args(extra=["--title", "x"]),
+            self.args(extra=["--plan-included-minutes", "1"]),
+            self.args(extra=["--updated-at", "2026-10-03T12:00:00Z"]),
+            self.args(extra=["--updated-by", "x"]),
+        ]
+        bad_org = self.args()
+        bad_org[1] = "a/b"
+        cases.append(bad_org)
+        for i, a in enumerate(cases):
+            out = os.path.join(self.d, "c%d" % i)
+            a = [out if x == self.out else x for x in a]
+            rc, _, _ = run(a)
+            self.assertIn(rc, (1, 2), a)
+            for n in ("batch.json", "index.json"):
+                self.assertFalse(os.path.exists(os.path.join(out, n)), (a, n))
+
+    def test_template_only_invalid_keeps_existing_files(self):
+        os.makedirs(self.out)
+        p = os.path.join(self.out, "batch.json")
+        with open(p, "w") as f:
+            f.write('["keep"]')
+        rc, _, _ = run(self.args(ver=None))
+        self.assertEqual(rc, 1)
+        with open(p) as f:
+            self.assertEqual(f.read(), '["keep"]')
+
+    def test_template_only_oversize(self):
+        import contextlib
+        import io
+        from unittest import mock
+        big = os.path.join(self.d, "big.html")
+        with open(big, "w", encoding="utf-8") as f:
+            f.write("a" * (256 * 1024 + 1))
+        buf = io.StringIO()
+        with mock.patch.object(bd, "TEMPLATE_PATH", big), contextlib.redirect_stderr(buf):
+            rc = bd.main(self.args())
+        self.assertEqual(rc, 1)
+        self.assertIn("256 KB", buf.getvalue())
+        for n in ("batch.json", "index.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.out, n)), n)
+
+    def test_template_only_output_small(self):
+        rc, out, err = run(self.args())
+        self.assertEqual(rc, 0, err)
+        self.assertLessEqual(len(out.strip().splitlines()), 8)
+        self.assertNotIn("<html", out)
+        self.assertIn(os.path.join(os.path.realpath(self.out), "batch.json"), out)
+        self.assertNotIn("アップロード", out)
+
+
 class ValidationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -555,6 +663,13 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(rc, 1, args)
         self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")))
         self.assertFalse(os.path.exists(os.path.join(self.out, "index.json")))
+
+    def test_rows_required_without_template_only(self):
+        """--rows を省いても雛形だけの経路とは推測せず、run() が 1 で拒否する。"""
+        self.fails(["--org", "example-org", "--out-dir", self.out])
+        self.fails(["--org", "example-org", "--out-dir", self.out, "--update"])
+        self.fails(["--org", "example-org", "--out-dir", self.out, "--update",
+                    "--refresh-template", "--template-if-version", "2"])
 
     def test_assume_current_visibility_must_be_bool(self):
         """summarize.py と同じく真偽値以外は止める（#209）。"""
