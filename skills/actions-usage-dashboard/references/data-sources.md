@@ -1,6 +1,6 @@
 <!-- source: skills/actions-usage-dashboard/scripts（fetch_billing.py / fetch_jobs.py の実装）と .agents/skills/github-docs/references/rest-api/（billing/usage.md・overview/rate-limits.md・overview/permissions.md）。公式: https://docs.github.com/en/rest/billing/usage 、https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens 、https://docs.github.com/en/billing/reference/billing-reports 、https://docs.github.com/en/billing/concepts/product-billing/github-actions 、https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs 、https://docs.github.com/en/rest/orgs/orgs -->
 <!-- 最終確認日: 2026-10-28 -->
-<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる）・run の再実行期間（初回実行から 30 日）・orgs/<org> でプランを含む全詳細を見る条件（owner。classic は admin:org、GitHub App は Organization plan 権限） / ⚠️ 未確認: billing usage の保持期間（本体ページに記載なし）、orgs/<org> の fine-grained PAT 用の権限、Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか、含有枠の消費の換算（定価 ÷ Linux 単価）の公式な明記（docs.github.com は倍率を明記せず SKU ごとの分単価だけを載せる。github.blog の FAQ と #221 の実測は定価換算を支持する）、arm64・slim・GPU の SKU が含有分を消費するか、削除済みリポジトリの区分不明分を請求画面が含有枠に数えるか（#221） -->
+<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる）・run の再実行期間（初回実行から 30 日）・orgs/<org> でプランを含む全詳細を見る条件（owner。classic は admin:org、GitHub App は Organization plan 権限） / ⚠️ 未確認: billing usage の保持期間（本体ページに記載なし）、orgs/<org> の fine-grained PAT 用の権限、Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか、含有枠の消費の換算（定価 ÷ Linux 単価）の公式な明記（docs.github.com は倍率を明記せず SKU ごとの分単価だけを載せる。github.blog の FAQ と #221 の実測は定価換算を支持する）、arm64・slim・GPU の SKU が含有分を消費するか、削除済みリポジトリの区分不明分を請求画面が含有枠に数えるか（#221）、実 org の使用量 CSV での列名・表記（#228。公式のフィールド表の名前で実装し、実データでは未確認） -->
 
 # データ源と換算式
 
@@ -12,17 +12,19 @@
 | データ源 | 担当スクリプト | 対象 |
 |---|---|---|
 | billing usage API | [`fetch_billing.py`](../scripts/fetch_billing.py) | GitHub ホストランナー |
+| 使用量 CSV（請求画面の詳細レポート） | [`fetch_billing.py --usage-csv`](../scripts/fetch_billing.py) | GitHub ホストランナー（billing usage API の代わり。Dependabot を見分けられる） |
 | Actions runs / jobs API | [`fetch_jobs.py`](../scripts/fetch_jobs.py) | セルフホストランナー |
 
 2 つの対象は互いに重ならない。billing usage API にセルフホストは含まれず、jobs 側は GitHub ホストの job を行にしない。
 
-料金区分 `charge_class` は次の 5 値である。
+料金区分 `charge_class` は次の 6 値である。
 
 | 値 | 意味 | 出力元 |
 |---|---|---|
 | `paid` | 金額が発生した分 | billing |
 | `included` | 含有枠で賄われた分（非公開・internal リポジトリ） | billing |
 | `public_free` | 公開リポジトリの無料分 | billing |
+| `dependabot_free` | Dependabot が起動したジョブの非有料分。含有枠を消費しない（公開範囲に依らない） | billing（`--usage-csv` だけ） |
 | `unknown` | 利用日時点の公開範囲を確認できない非有料分（既定の非有料分） | billing |
 | `self_hosted` | セルフホストランナー。GitHub への支払いなし | jobs |
 
@@ -57,6 +59,33 @@
 
 公開範囲 `visibility` は billing usage に無く、`orgs/<org>/repos` から取得時点の値を取る。
 
+## 使用量 CSV（`--usage-csv`）
+
+billing usage API の明細には、起動した利用者もワークフローも無く、Dependabot の分を見分けられない。
+請求画面からダウンロードする**詳細の**使用量レポート（CSV）には `username` と `workflow_path` があり、見分けられる（#221 の切り分けで確認、#228 で取り込み）。
+`fetch_billing.py --usage-csv <path>` は、billing usage API を呼ばずにこの CSV から同じ形（`schema_version 1`・`source: "billing"`）の rows を作る。公開範囲だけは CSV に無いため、従来どおり `orgs/<org>/repos` を gh で取る（`--assume-current-visibility` の扱いも同じ）。
+
+| CSV の列 | 出力列・用途 | 扱い |
+|---|---|---|
+| `date` | `day` | UTC の日に直す |
+| `product` / `unit_type` | （取り込み条件） | 大小文字を無視して `actions` かつ `minutes` だけ |
+| `sku` | `sku` / `runner_type` | API 経路と同じ |
+| `quantity` | `minutes` | 区分ごとに分ける |
+| `applied_cost_per_quantity` | （出力しない） | API の `pricePerUnit` に相当。有料分数の換算と Linux 単価の決定に使う |
+| `gross_amount` / `discount_amount` / `net_amount` | `gross_usd` / `discount_usd` / `net_usd` | API 経路と同じ（`discount_amount` は任意） |
+| `repository` | `repo` | 先頭の `<org>/` を外す。空なら `(unattributed)` |
+| `organization` | （取り込み条件） | 列があり、空でなく `--org` と違う行は捨てて件数を warning にする（org 名は出さない） |
+| `username` / `workflow_path` | （判定にだけ使う） | 下の Dependabot の判定。**値は出力のどこにも書かない** |
+
+- 列名は公式文書（https://docs.github.com/en/billing/reference/billing-reports ）のフィールド表の名前で、前後の空白と大小文字だけを吸収する。別名表は持たず、違えば推測で合わせず止める
+- 必須列が無い、集計レポート（`username` / `workflow_path` が無い）、数値が空・非数・非有限・負、ファイルが通常ファイルでない、`MAX_CSV_BYTES`（64 MB）または `MAX_CSV_ROWS`（100 万行）を超える、のいずれかは何も書かず終了コード 1 で止まる。エラー文は行番号と列名だけを出し、セルの値は出さない
+- Dependabot の判定: `username` が `dependabot[bot]` に完全一致、または `workflow_path` が `dynamic/dependabot/` で始まる。判定した明細は、`netAmount` が正の部分（有料分）を `paid` に残し、残りの非有料分を `dependabot_free` にする（`quota_minutes` と `billable_minutes` は 0）
+- 判定の記録は件数と分数だけ。出力のトップレベルに `"input": "usage_csv"` と `"dependabot": {rule, items, by_username, by_workflow_path_only, minutes}` を書き、`warnings` に「Dependabot のジョブを N 明細・m 分と判定し…」を入れる。N が 0 でも書く（判定が動いたことを示す）
+- 詳細レポートの期間は最大 31 日。CSV の日付範囲が `--since` の月初から `--until` の月末（当月は今日）までを覆わないと、warning で「範囲外の日は 0 ではなく未取得」と知らせる
+- CSV 経路は API 経路の代わりで、同じ期間の API の rows と一緒に summarize.py へ渡すと「同じ source の重複」で止まる。期間をまたいだ併用はしない
+- CSV のダウンロードには請求画面を見られる権限が要る（billing usage API の権限は要らない）。CSV は非公開リポジトリ名・利用者名・金額を含むため、作業ツリーの外に置いてコミットしない
+- 実 org の CSV での列名・表記・請求画面との再照合は**未確認**（合成データでの回帰テストだけ）
+
 ## 有料分と含有枠の換算式
 
 有料分数は明細ごとに求め、そのあと (day, repo, sku) 単位にまとめる。
@@ -86,7 +115,7 @@ quota_minutes = gross_c / Linux 単価
 Windows や macOS のように単価が高い SKU は、定価を Linux 単価で割るため、その倍率がそのまま含有枠の消費に反映される。
 これが「非公開リポジトリの定価 ÷ Linux 単価」の意味である。
 
-- paid / public_free / unknown の行は `quota_minutes` が 0
+- paid / public_free / dependabot_free / unknown の行は `quota_minutes` が 0
 - `billable_minutes` は paid 行の分数だけで、ほかの行は 0
 - 含有枠の上限（請求画面の「N min included」）は契約プランで決まる値で、API の出力にもスクリプトにも含まれない。全 org 共通の数字として扱わない
 
@@ -112,7 +141,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - 利用時は公開・現在は非公開のリポジトリは、現在値で included に数えるため上振れする。逆に利用時は非公開・現在は公開なら public_free になり下振れする
 - 換算式（定価 ÷ Linux 単価）について、docs.github.com に倍率の明記は無い。公式の Actions 課金ページ（確認日 2026-10-28）は SKU ごとの分単価だけを載せる。ただし github.blog の FAQ（標準ランナーは定価で含有分を消費する）と #221 の実測が定価換算を支持する。arm64・slim・GPU の SKU が含有分を消費するかは記載がない。larger runner は含有分を使わず常に課金されると記載がある
 - 端数は行ごとに 6 桁で丸める。billing usage API の `quantity` は job ごとに分へ切り上げ済みの値で、スキルは丸め直さない。#221 では端数の寄与は請求画面の表示丸めの範囲内だった
-- Dependabot が起動したジョブ（Dependabot graph jobs を含む）は、公式には含有分に数えない。billing usage API の行は通常のジョブと同じ形で見分けられないため、スキルは included に数え、上振れする。請求画面の使用量 CSV では見分けられる（username が `dependabot[bot]`、workflow_path が `dynamic/dependabot/...`）。CSV の取り込みは #228 で追う
+- Dependabot が起動したジョブ（Dependabot graph jobs を含む）は、公式には含有分に数えない。billing usage API の行は通常のジョブと同じ形で見分けられないため、API 経路ではスキルは included に数え、上振れする。`--usage-csv` 経路では username / workflow_path から判定して `dependabot_free` に分け、含有枠の消費から除く（#228。実 org の CSV での確認は未実施）
 - 区分不明（削除済み・権限不足のリポジトリ）の分は quota に入らない。請求画面がこの分を含有枠に数えていれば下振れする（削除済みリポジトリの分を数えるかは未確定。#221）
 
 実 org での確認（#138）では、フラグ付きの概算値が請求画面の使用量を約 0.9% 上回った。要因の切り分けは次の「請求画面との差の切り分け（#221）」に記す。
@@ -126,7 +155,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 | 換算式（定価 ÷ Linux 単価） | 0% | 実測と整合 | 定価換算のときだけ差が Linux の整数分になった。旧来の固定倍率（macOS 10 倍）では、実在する行の組み合わせで差を説明できない |
 | 端数処理 | 0%（表示丸めの範囲内） | 実測と整合 | job ごとに分へ切り上げた集計が billing usage の quantity と 23 セル中 22 セルで一致した。切り上げは API の時点で済んでおり、スキルは丸め直さない |
 | 公開範囲の誤分類 | 測れない | — | team プランでは audit log API が使えない。events は公開から非公開への変更を記録しない。含有枠の大半を占めるリポは期間中に作られたもので、そこに公開期間があれば差はずっと大きくなるため、誤分類があっても小さなセルに限られる |
-| Dependabot ジョブを含有枠に数えている（スキル側の上振れ） | +1.9% | 確定 | 公式は Dependabot ジョブ（Dependabot graph jobs を含む）を含有分に数えない。請求画面の使用量 CSV で、含有枠に当たるリポの該当行は username が `dependabot[bot]`、workflow_path が `dynamic/dependabot/...` だった。billing usage API の行にはこの 2 列が無く、スキルは見分けられない（#228） |
+| Dependabot ジョブを含有枠に数えている（スキル側の上振れ） | +1.9% | 確定 | 公式は Dependabot ジョブ（Dependabot graph jobs を含む）を含有分に数えない。請求画面の使用量 CSV で、含有枠に当たるリポの該当行は username が `dependabot[bot]`、workflow_path が `dynamic/dependabot/...` だった。billing usage API の行にはこの 2 列が無く、API 経路では見分けられない。#228 で CSV 経路（`--usage-csv`）を追加した（実データでの +1.9% の解消は未検証） |
 | 削除済みリポジトリの区分不明分を数えていない（スキル側の下振れ） | −0.9% | 推定（未確定） | 公開範囲を引けず unknown になる。この分は使用量 CSV にも通常の行として載っていたが、CSV には公開範囲の列が無い。請求画面が含有枠に数えたかは、差が閉じることからの逆算で推定した。今は公開で、使った時点では非公開だったリポの分とも区別できない |
 | 合計 | +0.9% | — | 観測値と一致。残差は約 0.006% で、請求画面の表示丸めの内側 |
 

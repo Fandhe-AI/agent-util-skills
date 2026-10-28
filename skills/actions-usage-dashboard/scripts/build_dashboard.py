@@ -39,6 +39,9 @@
   meta なしで作られた既存ダッシュボードの移行用。受け付ける id は固定の 4 つだけで、任意の dataset や
   任意の JSON を store へ送る経路は持たない（meta は検証済みの rows 文書から作るものに限る。詳細は SKILL.md）。
 
+使用量 CSV 由来の billing rows（input: usage_csv）を --update で載せ、--refresh-template が無いときは、
+  雛形の差し替えを促す案内を 1 行出す（失敗にはしない。Issue #228）。
+
 雛形だけの差し替え（--update --refresh-template --template-only）は rows を伴わない 1 段の経路で、
   files/index.html の op: set 1 件（if_version 付き）だけの batch.json と index.json を書く。
   rows・meta・datasets・dash は書かず、--template-if-version <N> が必須。--rows・--asset-url・--if-version・
@@ -189,7 +192,9 @@ def load_rows_doc(path, org):
     ga = doc.get("generated_at")
     return {"id": doc["source"], "path": ap,
             "generated_at": ga if isinstance(ga, str) and ISO_RE.match(ga) else None,
-            "meta_rows": build_meta_rows(doc)}
+            "meta_rows": build_meta_rows(doc),
+            # 使用量 CSV 由来（dependabot_free を含み得る）かの目印。行は走査せず、先頭の属性だけで判る
+            "usage_csv": doc["source"] == "billing" and doc.get("input") == "usage_csv"}
 
 
 def build_meta_rows(doc):
@@ -503,6 +508,11 @@ def run(a):
     if total >= MAX_BATCH_BYTES:
         raise BuildError("batch の本文の合計が 1 MiB を超える（%d バイト）" % total)
 
+    if a.update and not a.refresh_template and any(e.get("usage_csv") for e in entries):
+        # 古い雛形は dependabot_free を知らず区分不明と表示する。store 上の雛形の版は分からず、
+        # 差し替え済みのページのデータ更新を止めたくないため、失敗にはせず案内だけを出す（Issue #228）。
+        print("案内: 使用量 CSV 由来の rows は Dependabot の分（dependabot_free）を含み得る。"
+              "既存ページの雛形が古いと区分不明と表示するため、--refresh-template で雛形を差し替える。")
     os.makedirs(out_dir, exist_ok=True)
     if stage1:
         # 古い url のまま書く事故を防ぐため、固定名の前回成果物だけを消す。

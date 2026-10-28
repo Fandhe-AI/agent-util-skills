@@ -5,7 +5,7 @@ description: >
   作成・確認・更新の 3 用途に対応。「Actions の使用時間を見せて」「無料枠の残りを確認して」
   「minutes のグラフを作って」「Actions のダッシュボードを作って」「ダッシュボードを更新して」
   「GitHub ホストランナーを使っているリポを知りたい」で使用。料金区分（paid / included / public_free /
-  self_hosted）とセルフホスト移行候補を出す。単発の HTML レポートは create-html-report も参照。
+  dependabot_free / self_hosted）とセルフホスト移行候補を出す。単発の HTML レポートは create-html-report も参照。
 model: sonnet
 user-invocable: true
 ---
@@ -18,7 +18,7 @@ org の Actions 利用分数を、ダッシュボードを「作る」・ター�
 
 ## トークン節約の原則
 
-- 中身を読まない（Read のほか `cat`・`jq`・`head` で出すことも含む）: fetch の出力 rows JSON、`--cache` 配下、`templates/dashboard/index.html`、`--out-dir` の `dash-meta.json`・`dash-params.json`・`dataset-*.json`・`meta-*.json`・`index.json`、Artifact に保存した `files/index.html`、`get` の `out_dir` に保存した `files/index.html`（例外は雛形差し替え時の version の取り出しだけ。本文は読まない）
+- 中身を読まない（Read のほか `cat`・`jq`・`head` で出すことも含む）: fetch の出力 rows JSON、請求画面からダウンロードした使用量 CSV（非公開リポジトリ名・利用者名・金額を含む。作業ツリーの外の `mktemp -d` に置き、コミットしない）、`--cache` 配下、`templates/dashboard/index.html`、`--out-dir` の `dash-meta.json`・`dash-params.json`・`dataset-*.json`・`meta-*.json`・`index.json`、Artifact に保存した `files/index.html`、`get` の `out_dir` に保存した `files/index.html`（例外は雛形差し替え時の version の取り出しだけ。本文は読まない）
 - 見てよいのは、スクリプトの標準出力・標準エラー（数行の要約とファイルパス）と終了コードだけ
 - 唯一の例外は `batch.json`。ArtifactData batch の `writes` はインラインで渡す仕様なので Read が要る。中身は op / collection / doc_id / file_path（更新時は if_version）の数件で、rows は含まない
 - 失敗時もまず終了コードとエラー行（日本語 1 行）を見る。データファイルを開いて原因を探さない。終了コード 3（jobs のレート制限による中断）は reset 後に、終了コード 4（`--max-seconds` の時間上限による中断）はすぐに、同じコマンドで再実行する
@@ -31,7 +31,7 @@ org の Actions 利用分数を、ダッシュボードを「作る」・ター�
 
 ```bash
 # GitHub ホスト分（billing）
-python3 <skill-root>/scripts/fetch_billing.py --org "<org>" --since YYYY-MM [--until YYYY-MM] --out "<billing.json>"
+python3 <skill-root>/scripts/fetch_billing.py --org "<org>" --since YYYY-MM [--until YYYY-MM] --out "<billing.json>" [--usage-csv "<usage.csv>"]
 # セルフホスト分（jobs。--cache で増分取得）
 python3 <skill-root>/scripts/fetch_jobs.py --org "<org>" --since YYYY-MM-DD --out "<jobs.json>" --cache "<cache dir>" \
   [--max-seconds N] [--progress-interval S] [--estimate [--sample-runs K]]
@@ -46,6 +46,7 @@ python3 <skill-root>/scripts/build_dashboard.py --org "<org>" --rows "<billing.j
 python3 <skill-root>/scripts/build_dashboard.py --org "<org>" --out-dir "<dir>" --update --refresh-template --template-only --template-if-version N
 ```
 
+- fetch_billing の `--usage-csv` は、請求画面の詳細の使用量 CSV（31 日以内）から Dependabot の分を見分けて含有枠の消費から除く（`dependabot_free`）。billing usage API の代わりに読む経路で、同じ期間の API の rows とは併用しない。CSV を渡した rows をダッシュボードへ初めて載せる更新では `--refresh-template` を付ける（古い雛形は Dependabot の分を区分不明と表示する）。利用者名は rows に入れない。判定規則・列・制約は data-sources.md「使用量 CSV」節
 - fetch_billing の `--assume-current-visibility`、fetch_jobs の重複除去・キャッシュ・`--min-remaining`、summarize の含有分（`--plan`）の扱いは data-sources.md の該当節を参照する
 - 大きな org では初回の fetch_jobs が前景の timeout を超える。所要時間の目安と実行の仕方は「大きな org での実行」を参照する
 - `--plan` を省くと summarize は `gh api orgs/<org>` を呼ぶ
