@@ -287,6 +287,23 @@ class WarningAndMissingBillingTests(Base):
                 self.assertTrue(s["breakdown"]["included"]["approximate"])
                 self.assertFalse(s["breakdown"]["included"]["lower_bound"])
 
+    def test_classification_uses_whole_document_not_month(self):
+        """旧形式の文書で、対象月が unknown だけでも別の月に分類済みの行があれば概算（雛形と同じ規則）。"""
+        rows = [row("2026-09-02", "priv-api", "included", 500, quota=500),
+                row("2026-10-02", "gone-repo", "unknown", 50)]
+        s = self.build(rows, "absent")
+        inc = s["breakdown"]["included"]
+        self.assertTrue(inc["approximate"])
+        self.assertFalse(inc["lower_bound"])
+        self.assertNotIn("下限", "\n".join(sm.render_text(s)))
+
+    def test_is_classified_rule(self):
+        self.assertTrue(sm.is_classified([], True))
+        self.assertFalse(sm.is_classified(DEFAULT_MODE, False))
+        self.assertFalse(sm.is_classified(DEFAULT_MODE, None))
+        self.assertTrue(sm.is_classified([row("2026-10-01", "p", "public_free", 1, vis="public")], None))
+        self.assertFalse(sm.is_classified([row("2026-10-01", "p", "included", 0)], None))
+
     def test_flag_true_without_unknown_over_quota(self):
         rows = [row("2026-10-01", "r", "included", 2500, quota=2500)]
         s = self.build(rows, True, plan="free")

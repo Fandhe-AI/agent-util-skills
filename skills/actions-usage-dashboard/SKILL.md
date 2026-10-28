@@ -50,7 +50,7 @@ python3 <skill-root>/scripts/build_dashboard.py --org "<org>" --rows "<billing.j
 - build_dashboard.py の `--rows` は、作成では billing が必須（jobs は任意）。`--update` では jobs だけも渡せる
 - build_dashboard.py の `--refresh-template` は `--update` 専用。ページ（`files/index.html`）をスキル同梱の雛形で置き換える op: set を batch の末尾に足す。2 段目では `--template-if-version <N>`（store 上の `files/index.html` の版）が必須で、無ければ何も書かず終了する。指定しない更新の batch は従来どおり
 - build_dashboard.py の各文書は 256 KB 未満、rows は 8 MB 以下。超えると何も書かず非 0 で終了する。`--asset-url` は `/_blob/<id>` 形式のみ受け付ける
-- 雛形 `templates/dashboard/index.html` は数値を持たず、集計はページ内の関数が行う。datasets は `billing`（作成時は必須）と `jobs`（任意）の行配列に、それぞれの付帯情報の `billing_meta` / `jobs_meta` が対になる。Dashboard 型の添付ファイルはページへ行の配列しか渡さず、fetch 出力の `since` / `until` / `warnings` / `estimate` は届かない。そこで build_dashboard が検証済みの rows 文書から `meta-<source>.json`（`{source, kind, value}` の行。kind は since / until / warning / estimate。値は文字列）を作り、rows と並べてアップロードする。回帰テストは `tests/dashboard-template.test.mjs`
+- 雛形 `templates/dashboard/index.html` は数値を持たず、集計はページ内の関数が行う。datasets は `billing`（作成時は必須）と `jobs`（任意）の行配列に、それぞれの付帯情報の `billing_meta` / `jobs_meta` が対になる。Dashboard 型の添付ファイルはページへ行の配列しか渡さず、fetch 出力の `since` / `until` / `warnings` / `estimate` / `assume_current_visibility` は届かない。そこで build_dashboard が検証済みの rows 文書から `meta-<source>.json`（`{source, kind, value}` の行。kind は since / until / warning / estimate / assume_current_visibility。値は文字列）を作り、rows と並べてアップロードする。回帰テストは `tests/dashboard-template.test.mjs`
 - 1 段目の一覧は「rows → その meta」の順で、2 段目の `--asset-url` もその順・同じ数で渡す（rows 1 つにつき 2 件）。meta の警告文はリポジトリ名を含み得る
 
 ## 大きな org での実行

@@ -29,8 +29,9 @@ helper の共有: FetchError / gh_api / nonneg_num / safe / CTRL_RE / MAX_NAME_L
 
 含有枠の表示: 「下限」と出すのは quota が構造上 0 の既定モード（included / public_free 行がなく
   billing の assume_current_visibility が真でない）で unknown があるときだけ。分類済みの quota は
-  現在の公開範囲と換算式に依存し上振れもあるため「約 X 分（概算）」と出す。規則は
-  references/data-sources.md「含有枠の消費の確度」。
+  現在の公開範囲と換算式に依存し上振れもあるため「約 X 分（概算）」と出す。分類済みかどうかは
+  対象月ではなく入力全体で判定する（雛形 templates/dashboard/index.html の quotaApprox と同じ規則）。
+  規則は references/data-sources.md「含有枠の消費の確度」。
 
 アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
 """
@@ -213,7 +214,20 @@ def _r(x):
     return round(x, 6)
 
 
-def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=False, assume_current=None):
+def is_classified(rows, assume_current):
+    """含有枠の消費を分類済み（概算）とみなすか。rows は対象月に絞る前の全行を渡す。
+
+    assume_current が真、または included / public_free の分数や quota が 1 行でも正なら真。
+    雛形の quotaApprox と同じ規則（どちらも文書全体で判定し、選択期間では変えない）。
+    """
+    if assume_current is True:
+        return True
+    return any(r["quota_minutes"] > 0 or (r["charge_class"] in ("included", "public_free") and r["minutes"] > 0)
+               for r in rows)
+
+
+def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=False, assume_current=None,
+              classified=None):
     """内訳を作る。含有枠の消費の確度を approximate / lower_bound / 確定の 3 通りに分ける。
 
     「下限」と言えるのは quota が構造上 0 の既定モード（非有料分がすべて unknown）で、
@@ -221,6 +235,7 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=Fals
     現在の公開範囲と定価 ÷ Linux 単価の換算に依存し、上振れも下振れもあり得るため概算（approximate）とする。
     assume_current が None（旧形式）でも included / public_free 行や quota > 0 があれば分類済みとみなす
     （安全側。過大な値を下限と誤認させない）。条件は references/data-sources.md「含有枠の消費の確度」。
+    classified は入力全体で判定した結果（is_classified）。None なら rows だけで判定する。
     """
     # 推定は jobs 文書全体の属性。セルフホストの分を取れているときだけ真にする。
     est = bool(estimated and has_jobs)
@@ -234,8 +249,8 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=Fals
     inc = {"minutes": _r(s["included"]["minutes"]), "quota_minutes": _r(quota),
            "included_minutes": included_minutes, "remaining": None, "over": None, "ratio": None}
     has_unknown = s["unknown"]["minutes"] > 0
-    classified = (assume_current is True or s["included"]["minutes"] > 0
-                  or s["public_free"]["minutes"] > 0 or quota > 0)
+    if classified is None:
+        classified = is_classified(rows, assume_current)
     inc["approximate"] = classified
     inc["lower_bound"] = has_unknown and not classified
     if included_minutes:
@@ -336,7 +351,8 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
         warnings.append(plan_warning)
     elif inc_min is None:
         warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
-    bd = breakdown(mrows, inc_min, has_jobs, has_billing, estimated, assume_current)
+    bd = breakdown(mrows, inc_min, has_jobs, has_billing, estimated, assume_current,
+                   classified=is_classified(rows, assume_current))
     inc_bd = bd["included"] or {}
     if has_billing and inc_bd.get("approximate"):
         if bd["unknown"]["minutes"] > 0:

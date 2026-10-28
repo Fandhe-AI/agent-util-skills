@@ -104,7 +104,8 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - `--assume-current-visibility` で分類した quota は、現在の公開範囲と「定価 ÷ Linux 単価」の換算に依存する。上振れも下振れもあり得るため概算とし、下限とは言わない
 - `fetch_billing.py` は出力のトップレベルに `assume_current_visibility`（真偽値）を記録する。旧形式の文書（キーなし）は行の内容で判定し、included / public_free 行があれば概算に倒す。値が真偽値以外なら `summarize.py` は止まる
 - フラグが偽なのに分類済みの行がある矛盾した文書も、安全側の概算にする
-- 雛形 `templates/dashboard/index.html` も同じ規則を適用する。billing 文書の `assume_current_visibility` が真、または included / public_free 行・quota > 0 の行があれば、下限（「以上」）ではなく「（概算）」と表示し、残量は区分不明があれば不明とする。判定は文書全体で行う（選択期間では変えない）
+- 分類済みかどうかは、`summarize.py`（`is_classified`）も雛形（`quotaApprox`）も入力の文書全体で判定する（対象月・選択期間では変えない）。旧形式の文書で、対象月が unknown だけでも別の月に分類済みの行があれば概算にする。分類済みの行は分数か quota が正のものだけを数える
+- 雛形 `templates/dashboard/index.html` も同じ規則を適用する。`assume_current_visibility` は billing_meta の `assume_current_visibility` 行（`value` が `"true"`）で受け取る（「ページへ渡る値」節）。概算のときはタイル・表に「（概算）」を付け、凡例・ツールチップには「以上」を付けず、グラフ下の注記も概算の文言にする。下限のときは区分不明を含む値に「以上」を付ける。残量は区分不明があれば不明とする。この行を持たない meta で作られたダッシュボードは、次の更新で meta が作り直されるまで行の内容だけで判定する
 
 上振れ・下振れの要因（含有枠の消費が請求画面と一致しない理由）:
 
@@ -324,10 +325,11 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 
 - 添付する JSON は「行オブジェクトの配列、または `rows` / `data` / `results` の下にある配列」。`dash.data(id).data` には行の配列だけが届き、セルは文字列として扱うのが安全
 - `dash.data(id).meta` に値が入るのは、query dataset の `dash.loader` が `meta` を返したときだけで、`kind: "file"` の dataset では使えない
-- したがって fetch 出力のトップレベルの `since` / `until` / `warnings` / `estimate` / `generated_at` はそのままではページに届かない
-- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate", "value": "<文字列>"}`
+- したがって fetch 出力のトップレベルの `since` / `until` / `warnings` / `estimate` / `assume_current_visibility` / `generated_at` はそのままではページに届かない
+- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate"|"assume_current_visibility", "value": "<文字列>"}`
   - `since` / `until`: 1 行ずつ（billing は `YYYY-MM`、jobs は `YYYY-MM-DD`）
   - `warning`: `warnings` の文字列要素を先頭から最大 20 件。制御文字を除き 300 字で切る
   - `estimate`: 文書の `estimate` がオブジェクトのときだけ 1 行（`value` は `"true"`。中身は渡さない）
-- ページは `withMeta` で行配列と meta 行から `{rows, since, until, warnings, estimate?}` を組み直し、既存の `span` / `coverage` / `isEstimate` に渡す。meta が読めない（`missing` / `error`、行なし）ときは取得期間が `unknown` になり、注記を出す（読み込み中は出さない）
+  - `assume_current_visibility`: billing 文書の `assume_current_visibility` が `true` のときだけ 1 行（`value` は `"true"`）。偽・欠落なら行を作らない。真偽値以外なら build_dashboard は止まる（`summarize.py` と同じ）
+- ページは `withMeta` で行配列と meta 行から `{rows, since, until, warnings, estimate?, assume_current_visibility?}` を組み直し、既存の `span` / `coverage` / `isEstimate` と `quotaApprox` に渡す。meta が読めない（`missing` / `error`、行なし）ときは取得期間が `unknown` になり、注記を出す（読み込み中は出さない）
 - source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。meta は rows と同じ版固定・同じ更新の扱いで、meta の警告文も rows と同様にダッシュボードを開ける全員が読める
