@@ -16,7 +16,8 @@
 出力スキーマ（schema_version 1）:
   {schema_version, source: "jobs", org, since, until, generated_at, warnings, rows[, estimate]}
   estimate は --estimate のときだけ付く（全件取得の出力には無い）:
-  {method: "sample_mean_per_workflow", sample_runs, sampled_runs, estimated_runs, groups, unestimated_runs}
+  {method: "sample_mean_per_workflow", sample_runs, sampled_runs, estimated_runs, groups, unestimated_runs,
+   budget_runs, zero_groups}
   row = day / repo / visibility / sku / runner_type / charge_class / runner_group /
         minutes / quota_minutes / billable_minutes / gross_usd / discount_usd / net_usd
   金額系と quota_minutes は 0。day は job の started_at の UTC 日。
@@ -65,7 +66,11 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
   初回に十数時間かかる。推定モードは runs 一覧は全ページ取り、jobs は (repo, workflow_id) の組ごとに最大 K run
   だけ取る。抜き取った run のセルフホスト分数（runner_group ごとの run 当たり平均）を、抜き取らなかった完了 run
   へ割り当てる。推定した分は各 run の作成日（UTC）に載せ、抜き取った run は実測値を使う。
-  API 呼び出し数は「リポジトリ一覧 + runs 一覧のページ数 + K x 組数（jobs が 1 ページのとき）」に収まる。
+  API 呼び出し数は「リポジトリ一覧 + runs 一覧のページ数 + 予算 B（jobs が 1 ページのとき）」に収まる。
+  予算 B = sum(min(n, K))（n は組の完了 run 数）で、K x 組数以下。抜き取りは 2 段階で配分する:
+  段階 1 で各組の先頭と末尾の 2 run を試し取りし、両方が 0 分（GitHub ホストだけ）の組は 0 分組として
+  そこで打ち切る。段階 2 で、浮いた予算を 0 分組でない組へ run 数に比例して足す（0 分でない組は下限 min(n, K)
+  を保証し、各組の上限は n）。K <= 2 では浮く予算が無く均等配分と同じになる。同じ入力から同じ配分になる。
   抜き取りは (created_at, id) 順に並べた列から等間隔に選ぶ決定的な方式で、期間の前・中・後に散らす。
   最新の K 件だけを取らないのは、期間の途中でセルフホストへ移した workflow の値を期間全体へ広げないため。
   乱数を使わないのは、中断後の再開でも同じ run を選び直して取得済みの分をキャッシュに当て、前進を単調にするため。
@@ -119,6 +124,8 @@ DEFAULT_PROGRESS_INTERVAL = 30
 DEFAULT_SAMPLE_RUNS = 3
 # 抜き取り数 K の上限。K x 組数が API 呼び出し数の上限になるため、処理量を抑える
 MAX_SAMPLE_RUNS = 20
+# 試し取りの run 数。先頭と末尾の 2 run で、両方が 0 分の組だけを 0 分組として打ち切る（pilot_samples 参照）
+PILOT_RUNS = 2
 ESTIMATE_METHOD = "sample_mean_per_workflow"
 # 5xx の再試行。長い取得が数十分かかる org で、1〜1.5 時間に 1 回返る一時的な 502 のたびに最初からやり直さない
 # ための有界な再試行。上限は暴走防止（回数 10・1 回 60 秒）で、_common._MAX_RETRY_WAIT と揃える
@@ -306,6 +313,84 @@ def plan_samples(listed, k):
         picked = spread_sample([((r[3].get("created_at") or ""), r[0]) for r in g["pool"]], k)
         g["sample"] = {rid for _c, rid in picked}
     return groups
+
+
+def pilot_samples(groups, k):
+    """各組の試し取り（2 段階抜き取りの段階 1）の rid 集合を g["pilot"] に足す。plan_samples の後に呼ぶ純関数。
+
+    試し取りは min(n, PILOT_RUNS, K) run を spread_sample で選ぶ。2 run なら並べた列の先頭と末尾になる。
+    先頭と末尾にする理由は 2 つ。(a) spread_sample は k >= 2 なら必ず先頭と末尾を含むため、試し取りは
+    後で決める最終の抜き取り（allocate_samples）に必ず入れ子になり、取った jobs が無駄にならない。
+    (b) 打ち切りの判定を両端の 2 run が共に 0 分のときに限れる。期間の途中でセルフホストへ移した組は
+    片端が 0 分でないため打ち切られない。1 run だけの判定は K=1 で 0 分でない組を 0 分と誤った例がある。
+    呼び出し元は main の推定モード。pool は完了 run が 1 件以上の組だけなので n = 0 は来ない。
+    """
+    for g in groups.values():
+        picked = spread_sample([((r[3].get("created_at") or ""), r[0]) for r in g["pool"]],
+                               min(len(g["pool"]), PILOT_RUNS, k))
+        g["pilot"] = {rid for _c, rid in picked}
+
+
+def _is_zero_evidence(rid, att, cache_runs):
+    """rid が 0 分の証拠か。取得済み（attempt が足りる）で agg が空の run だけ。skipped・未取得は証拠にしない。"""
+    ent = cache_runs.get(str(rid))
+    return ent is not None and ent["attempt"] >= att and not ent["agg"]
+
+
+def allocate_samples(groups, k, cache_runs, skipped):
+    """試し取りの結果から最終の抜き取り g["sample"] を決める（2 段階抜き取りの段階 2）。cache_runs は変更しない。
+
+    予算 B = sum(min(n, K))（均等配分の jobs 呼び出し数と同じ）を超えない。
+    - 0 分組（試し取りが 2 run 以上で全て 0 分の証拠、かつ残りの run がある組）: 抜き取りを試し取りだけにする。
+    - それ以外（0 分でない組・不明の組）: 下限 min(n, K) を保証する。均等配分より減らさない。
+    - 0 分組で浮いた予算は、0 分組でない組へ run 数 n に比例して足す。各組の上限は n で、溢れた分は
+      残りの組へ配り直す（組数で有界）。整数化は最大剰余法、同点は str(key) 昇順で決める。
+    K <= 2 では試し取りが下限と同じ数になり、浮く予算が無いので均等配分と同じ結果になる。
+    同じ (groups, k, cache_runs, skipped) から必ず同じ結果を出す（中断後の再開で同じ配分を作り直すため）。
+    skipped は判定に使わない（試し取りが不正 job の組は証拠が無く、「不明」として下限を確保する）。
+    呼び出し元は main の推定モード。返り値は {budget, zero_groups, extra}。
+    """
+    budget = zero_groups = saved = 0
+    active = []  # (key, n, floor) 0 分組でない組
+    for key in sorted(groups, key=str):
+        g = groups[key]
+        n = len(g["pool"])
+        floor = min(n, k)
+        budget += floor
+        pilot = g["pilot"]
+        by_rid = {r[0]: r for r in g["pool"]}
+        if (floor > len(pilot) >= 2
+                and all(_is_zero_evidence(rid, by_rid[rid][1], cache_runs) for rid in pilot)):
+            g["sample"] = set(pilot)
+            zero_groups += 1
+            saved += floor - len(pilot)
+        else:
+            active.append((key, n, floor))
+    extra = {key: 0 for key, _n, _f in active}
+    cap = {key: n - floor for key, n, floor in active}
+    weight = {key: n for key, n, _f in active}
+    left = saved
+    live = [key for key, _n, _f in active if cap[key] > 0]
+    while left > 0 and live:
+        total_w = sum(weight[x] for x in live)
+        capped = [x for x in live if left * weight[x] >= cap[x] * total_w]
+        if capped:
+            for x in capped:
+                left -= cap[x]
+                extra[x] = cap[x]
+            live = [x for x in live if x not in capped]
+            continue
+        for x in live:
+            extra[x] = left * weight[x] // total_w
+        rest = left - sum(extra[x] for x in live)
+        for x in sorted(live, key=lambda y: (-(left * weight[y] % total_w), str(y)))[:rest]:
+            extra[x] += 1
+        left = 0
+    for key, n, floor in active:
+        g = groups[key]
+        picked = spread_sample([((r[3].get("created_at") or ""), r[0]) for r in g["pool"]], floor + extra[key])
+        g["sample"] = {rid for _c, rid in picked}
+    return {"budget": budget, "zero_groups": zero_groups, "extra": sum(extra.values())}
 
 
 def estimate_entries(groups, cache_runs, skipped):
@@ -624,7 +709,7 @@ def main(argv=None):
     ap.add_argument("--estimate", action="store_true",
                     help="抜き取り推定モード。(repo, workflow) ごとに最大 K run の jobs だけ取り、平均で残りを推定する")
     ap.add_argument("--sample-runs", default=None,
-                    help="推定モードの抜き取り数 K（1..%d、既定 %d）。--estimate と併用する" % (MAX_SAMPLE_RUNS, DEFAULT_SAMPLE_RUNS))
+                    help="推定モードの抜き取り数 K（1..%d、既定 %d。jobs 呼び出しの予算は sum(min(n, K))）。--estimate と併用する" % (MAX_SAMPLE_RUNS, DEFAULT_SAMPLE_RUNS))
     a = ap.parse_args(argv)
     now = datetime.now(timezone.utc)
     today = now.date()
@@ -650,8 +735,9 @@ def main(argv=None):
             out.append("行数: %d・セルフホスト合計 %.1f 分（除外: GitHub ホスト job %d / 未完了 job %d）" % (
                 len(rows), sum(r["minutes"] for r in rows), stats["hosted"], stats["unfinished"]))
         if est:
-            out.append("推定: %d 組・抜き取り %d run・推定 %d run・推定不能 %d run（K=%d）" % (
-                est["groups"], est["sampled_runs"], est["estimated_runs"], est["unestimated_runs"], est["sample_runs"]))
+            out.append("推定: %d 組（0 分で打ち切り %d 組）・抜き取り %d run（予算 %d）・推定 %d run・推定不能 %d run（K=%d）" % (
+                est["groups"], est["zero_groups"], est["sampled_runs"], est["budget_runs"], est["estimated_runs"],
+                est["unestimated_runs"], est["sample_runs"]))
         if relist["full"] or relist["partial"]:
             out.append("runs 一覧: 全期間 %d リポ / 前回位置から %d リポ%s" % (
                 relist["full"], relist["partial"],
@@ -786,19 +872,18 @@ def main(argv=None):
         listed.sort(key=lambda t: t[0])
 
         groups = plan_samples(listed, sample_k) if sample_k is not None else None
-        sample_ids = set().union(*(g["sample"] for g in groups.values())) if groups else set()
+        alloc = None
+        if groups is not None:
+            pilot_samples(groups, sample_k)
 
         def needs_fetch(rid, att, run):
-            if groups is not None and rid not in sample_ids:
-                return False
             ent = cache["runs"].get(str(rid))
             sk = ls_skipped.get(str(rid))
             if sk is not None and att <= sk["attempt"]:
                 return False
             return (ent is None or att > ent["attempt"]) and run.get("status") == "completed"
 
-        todo = sum(1 for rid, att, _r, run in listed if needs_fetch(rid, att, run))
-        fetched_k = 0
+        # キャッシュ利用・保留の件数は一覧を 1 回だけ走査して数える（取得の段階が複数でも二重に数えない）
         for rid, att, repo, run in listed:
             ent = cache["runs"].get(str(rid))
             if ent is not None and att <= ent["attempt"]:
@@ -812,28 +897,49 @@ def main(argv=None):
             if run.get("status") != "completed":
                 # 再実行中でも、キャッシュ済みの旧 attempt の分は実際に消費された時間なので集計に残す
                 stats["pending"] += 1
-                continue
-            if groups is not None and rid not in sample_ids:
-                continue  # 推定モードで抜き取り外。後段の estimate_entries が扱う
-            pacer.check_budget("jobs")
-            client.check_rate()
-            jobs = client.list_jobs(repo, a.org, rid)
-            pacer.done("jobs")
-            fetched_k += 1
-            try:
-                agg, hosted, unfinished = aggregate_jobs(jobs)
-            except InvalidJob as e:
-                msg = "%s/%s run %d: %s" % (a.org, repo, rid, e)
-                skipped.append(msg)
-                ls_skipped[str(rid)] = {"attempt": att, "msg": msg}
-                pacer.report("jobs 取得", fetched_k, todo, client.total(), checkpoint)
-                continue
-            created = run.get("created_at") if isinstance(run.get("created_at"), str) else ""
-            cache["runs"][str(rid)] = {"repo": repo, "attempt": att, "created_at": created, "agg": agg}
-            stats["fetched"] += 1
-            stats["hosted"] += hosted
-            stats["unfinished"] += unfinished
-            pacer.report("jobs 取得", fetched_k, todo, client.total(), checkpoint)
+
+        progress = {"done": 0, "todo": 0}
+
+        def fetch_pass(ids):
+            """ids（None は全件）に含まれる未取得の完了 run の jobs を取る。"""
+            for rid, att, repo, run in listed:
+                if (ids is not None and rid not in ids) or not needs_fetch(rid, att, run):
+                    continue
+                pacer.check_budget("jobs")
+                client.check_rate()
+                jobs = client.list_jobs(repo, a.org, rid)
+                pacer.done("jobs")
+                progress["done"] += 1
+                try:
+                    agg, hosted, unfinished = aggregate_jobs(jobs)
+                except InvalidJob as e:
+                    msg = "%s/%s run %d: %s" % (a.org, repo, rid, e)
+                    skipped.append(msg)
+                    ls_skipped[str(rid)] = {"attempt": att, "msg": msg}
+                    pacer.report("jobs 取得", progress["done"], progress["todo"], client.total(), checkpoint)
+                    continue
+                created = run.get("created_at") if isinstance(run.get("created_at"), str) else ""
+                cache["runs"][str(rid)] = {"repo": repo, "attempt": att, "created_at": created, "agg": agg}
+                stats["fetched"] += 1
+                stats["hosted"] += hosted
+                stats["unfinished"] += unfinished
+                pacer.report("jobs 取得", progress["done"], progress["todo"], client.total(), checkpoint)
+
+        def count_todo(ids):
+            return sum(1 for rid, att, _r, run in listed
+                       if (ids is None or rid in ids) and needs_fetch(rid, att, run))
+
+        if groups is None:
+            progress["todo"] = count_todo(None)
+            fetch_pass(None)
+        else:
+            pilot_ids = set().union(*(g["pilot"] for g in groups.values())) if groups else set()
+            progress["todo"] = count_todo(pilot_ids)
+            fetch_pass(pilot_ids)
+            alloc = allocate_samples(groups, sample_k, cache["runs"], ls_skipped)
+            sample_ids = set().union(*(g["sample"] for g in groups.values())) if groups else set()
+            progress["todo"] += count_todo(sample_ids)
+            fetch_pass(sample_ids)
         # 一覧に無い run（削除・1,000 件上限の欠落）も、対象リポジトリのキャッシュ済み履歴として残す
         entries = [e for k, e in cache["runs"].items() if e["repo"] in visibility]
         # --since より前に作られた run はこの期間では再参照されないため、キャッシュの無制限な増加を防ぐ
@@ -846,7 +952,8 @@ def main(argv=None):
             est_entries, ec = estimate_entries(groups, cache["runs"], ls_skipped)
             entries = entries + [e for e in est_entries if e["repo"] in visibility]
             est.update({"sample_runs": sample_k, "sampled_runs": ec["sampled"], "estimated_runs": ec["estimated"],
-                        "groups": len(groups), "unestimated_runs": ec["unestimated"]})
+                        "groups": len(groups), "unestimated_runs": ec["unestimated"],
+                        "budget_runs": alloc["budget"], "zero_groups": alloc["zero_groups"]})
         rows = build_rows(entries, visibility, a.since)
         # 次回の一覧の下限を作り直す。今回の対象外（アーカイブ・削除・改名前の名前）の cursor は捨てる
         by_repo = {}
@@ -882,9 +989,10 @@ def main(argv=None):
         }
         if est:
             out_doc["warnings"].append(
-                "推定値を含む: (repo, workflow) %d 組で抜き取った %d run の平均から %d run を推定した（K=%d）。"
-                "正確な値は --estimate なしで取得する" % (
-                    est["groups"], est["sampled_runs"], est["estimated_runs"], est["sample_runs"]))
+                "推定値を含む: (repo, workflow) %d 組（試し取りで 0 分と見なして打ち切った組 %d）で抜き取った %d run"
+                "（予算 %d）の平均から %d run を推定した（K=%d）。正確な値は --estimate なしで取得する" % (
+                    est["groups"], est["zero_groups"], est["sampled_runs"], est["budget_runs"],
+                    est["estimated_runs"], est["sample_runs"]))
             if est["unestimated_runs"]:
                 out_doc["warnings"].append(
                     "推定できず 0 分として数えた run: %d（抜き取りが全て不正 job、または作成日が不正）" % est["unestimated_runs"])
