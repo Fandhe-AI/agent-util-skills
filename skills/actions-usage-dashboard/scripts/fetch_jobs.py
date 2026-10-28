@@ -17,7 +17,7 @@
   {schema_version, source: "jobs", org, since, until, generated_at, warnings, rows[, estimate]}
   estimate は --estimate のときだけ付く（全件取得の出力には無い）:
   {method: "sample_mean_per_workflow", sample_runs, sampled_runs, estimated_runs, groups, unestimated_runs,
-   budget_runs, zero_groups}
+   budget_runs, zero_groups, zero_runs}
   row = day / repo / visibility / sku / runner_type / charge_class / runner_group /
         minutes / quota_minutes / billable_minutes / gross_usd / discount_usd / net_usd
   金額系と quota_minutes は 0。day は job の started_at の UTC 日。
@@ -68,9 +68,9 @@ runs 一覧の縮小（cursor）: キャッシュの "cursor"（{repo: {since, f
   へ割り当てる。推定した分は各 run の作成日（UTC）に載せ、抜き取った run は実測値を使う。
   API 呼び出し数は「リポジトリ一覧 + runs 一覧のページ数 + 予算 B（jobs が 1 ページのとき）」に収まる。
   予算 B = sum(min(n, K))（n は組の完了 run 数）で、K x 組数以下。抜き取りは 2 段階で配分する:
-  段階 1 で各組の先頭と末尾の 2 run を試し取りし、両方が 0 分（GitHub ホストだけ）の組は 0 分組として
-  そこで打ち切る。段階 2 で、浮いた予算を 0 分組でない組へ run 数に比例して足す（0 分でない組は下限 min(n, K)
-  を保証し、各組の上限は n）。K <= 2 では浮く予算が無く均等配分と同じになる。同じ入力から同じ配分になる。
+  段階 1 で各組の先頭・中央・末尾の 3 run を試し取りし、全部が 0 分（GitHub ホストだけ）の組は 0 分組として
+  そこで打ち切る（K >= 4 のときだけ。打ち切った run 数は estimate.zero_runs と警告に出る）。段階 2 で、浮いた予算を 0 分組でない組へ run 数に比例して足す（0 分でない組は下限 min(n, K)
+  を保証し、各組の上限は n）。K <= 3 では浮く予算が無く、どの組も打ち切らず均等配分と同じになる。同じ入力から同じ配分になる。
   抜き取りは (created_at, id) 順に並べた列から等間隔に選ぶ決定的な方式で、期間の前・中・後に散らす。
   最新の K 件だけを取らないのは、期間の途中でセルフホストへ移した workflow の値を期間全体へ広げないため。
   乱数を使わないのは、中断後の再開でも同じ run を選び直して取得済みの分をキャッシュに当て、前進を単調にするため。
@@ -124,8 +124,8 @@ DEFAULT_PROGRESS_INTERVAL = 30
 DEFAULT_SAMPLE_RUNS = 3
 # 抜き取り数 K の上限。K x 組数が API 呼び出し数の上限になるため、処理量を抑える
 MAX_SAMPLE_RUNS = 20
-# 試し取りの run 数。先頭と末尾の 2 run で、両方が 0 分の組だけを 0 分組として打ち切る（pilot_samples 参照）
-PILOT_RUNS = 2
+# 試し取りの run 数。先頭・中央・末尾の 3 run で、全部が 0 分の組だけを 0 分組として打ち切る（pilot_samples 参照）
+PILOT_RUNS = 3
 ESTIMATE_METHOD = "sample_mean_per_workflow"
 # 5xx の再試行。長い取得が数十分かかる org で、1〜1.5 時間に 1 回返る一時的な 502 のたびに最初からやり直さない
 # ための有界な再試行。上限は暴走防止（回数 10・1 回 60 秒）で、_common._MAX_RETRY_WAIT と揃える
@@ -318,11 +318,11 @@ def plan_samples(listed, k):
 def pilot_samples(groups, k):
     """各組の試し取り（2 段階抜き取りの段階 1）の rid 集合を g["pilot"] に足す。plan_samples の後に呼ぶ純関数。
 
-    試し取りは min(n, PILOT_RUNS, K) run を spread_sample で選ぶ。2 run なら並べた列の先頭と末尾になる。
-    先頭と末尾にする理由は 2 つ。(a) spread_sample は k >= 2 なら必ず先頭と末尾を含むため、試し取りは
-    後で決める最終の抜き取り（allocate_samples）に必ず入れ子になり、取った jobs が無駄にならない。
-    (b) 打ち切りの判定を両端の 2 run が共に 0 分のときに限れる。期間の途中でセルフホストへ移した組は
-    片端が 0 分でないため打ち切られない。1 run だけの判定は K=1 で 0 分でない組を 0 分と誤った例がある。
+    試し取りは min(n, PILOT_RUNS, K) run を spread_sample で選ぶ。3 run なら先頭・中央・末尾になる。
+    理由は 2 つ。(a) 中央は最終の格子に入るとは限らないので、試し取りが最終の抜き取りに含まれる
+    （取った jobs が無駄にならない）ことは allocate_samples が保証する。(b) 打ち切りの判定を 3 点が
+    全部 0 分のときに限る。両端 2 点だけだと、両端が 0 分で中間にセルフホスト分がある組を誤って
+    打ち切った（#216 の感度分析で K=3〜10 の反復の 12.5〜14.1%）。1 run だけの判定は K=1 で誤った例がある。
     呼び出し元は main の推定モード。pool は完了 run が 1 件以上の組だけなので n = 0 は来ない。
     """
     for g in groups.values():
@@ -341,16 +341,19 @@ def allocate_samples(groups, k, cache_runs, skipped):
     """試し取りの結果から最終の抜き取り g["sample"] を決める（2 段階抜き取りの段階 2）。cache_runs は変更しない。
 
     予算 B = sum(min(n, K))（均等配分の jobs 呼び出し数と同じ）を超えない。
-    - 0 分組（試し取りが 2 run 以上で全て 0 分の証拠、かつ残りの run がある組）: 抜き取りを試し取りだけにする。
+    - 0 分組（試し取りが 3 run で全て 0 分の証拠、かつ min(n, K) が 3 より大きい組）: 抜き取りを試し取りだけにする。
     - それ以外（0 分でない組・不明の組）: 下限 min(n, K) を保証する。均等配分より減らさない。
     - 0 分組で浮いた予算は、0 分組でない組へ run 数 n に比例して足す。各組の上限は n で、溢れた分は
       残りの組へ配り直す（組数で有界）。整数化は最大剰余法、同点は str(key) 昇順で決める。
-    K <= 2 では試し取りが下限と同じ数になり、浮く予算が無いので均等配分と同じ結果になる。
+    K <= 3 では試し取りが下限と同じ数になり、浮く予算が無いので打ち切らず均等配分と同じ結果になる。
+    0 分組でない組は、格子 spread_sample(m) と試し取りの和集合を取り、m 超なら試し取りでない格子点を
+    中央の試し取りに近い順に 1 点ずつ外して、必ず試し取りを含み大きさ m にする（乱数なし）。
+    打ち切った組の n - 試し取り数 の合計を zero_runs として返す（0 分と推定する run 数。過少推定の目安）。
     同じ (groups, k, cache_runs, skipped) から必ず同じ結果を出す（中断後の再開で同じ配分を作り直すため）。
     skipped は判定に使わない（試し取りが不正 job の組は証拠が無く、「不明」として下限を確保する）。
-    呼び出し元は main の推定モード。返り値は {budget, zero_groups, extra}。
+    呼び出し元は main の推定モード。返り値は {budget, zero_groups, zero_runs, extra}。
     """
-    budget = zero_groups = saved = 0
+    budget = zero_groups = zero_runs = saved = 0
     active = []  # (key, n, floor) 0 分組でない組
     for key in sorted(groups, key=str):
         g = groups[key]
@@ -359,11 +362,12 @@ def allocate_samples(groups, k, cache_runs, skipped):
         budget += floor
         pilot = g["pilot"]
         by_rid = {r[0]: r for r in g["pool"]}
-        if (floor > len(pilot) >= 2
+        if (floor > len(pilot) >= PILOT_RUNS
                 and all(_is_zero_evidence(rid, by_rid[rid][1], cache_runs) for rid in pilot)):
             g["sample"] = set(pilot)
             zero_groups += 1
             saved += floor - len(pilot)
+            zero_runs += n - len(pilot)
         else:
             active.append((key, n, floor))
     extra = {key: 0 for key, _n, _f in active}
@@ -388,9 +392,17 @@ def allocate_samples(groups, k, cache_runs, skipped):
         left = 0
     for key, n, floor in active:
         g = groups[key]
-        picked = spread_sample([((r[3].get("created_at") or ""), r[0]) for r in g["pool"]], floor + extra[key])
-        g["sample"] = {rid for _c, rid in picked}
-    return {"budget": budget, "zero_groups": zero_groups, "extra": sum(extra.values())}
+        m = floor + extra[key]
+        ordered = sorted(((r[3].get("created_at") or ""), r[0]) for r in g["pool"])
+        pos = {rid: i for i, (_c, rid) in enumerate(ordered)}
+        sample = {rid for _c, rid in spread_sample(ordered, m)} | g["pilot"]
+        if len(sample) > m:
+            mid = pos[sorted(g["pilot"], key=pos.get)[len(g["pilot"]) // 2]]
+            spare = sorted((x for x in sample if x not in g["pilot"]), key=lambda x: (abs(pos[x] - mid), pos[x]))
+            for x in spare[:len(sample) - m]:
+                sample.discard(x)
+        g["sample"] = sample
+    return {"budget": budget, "zero_groups": zero_groups, "zero_runs": zero_runs, "extra": sum(extra.values())}
 
 
 def estimate_entries(groups, cache_runs, skipped):
@@ -735,9 +747,9 @@ def main(argv=None):
             out.append("行数: %d・セルフホスト合計 %.1f 分（除外: GitHub ホスト job %d / 未完了 job %d）" % (
                 len(rows), sum(r["minutes"] for r in rows), stats["hosted"], stats["unfinished"]))
         if est:
-            out.append("推定: %d 組（0 分で打ち切り %d 組）・抜き取り %d run（予算 %d）・推定 %d run・推定不能 %d run（K=%d）" % (
-                est["groups"], est["zero_groups"], est["sampled_runs"], est["budget_runs"], est["estimated_runs"],
-                est["unestimated_runs"], est["sample_runs"]))
+            out.append("推定: %d 組（0 分で打ち切り %d 組・%d run）・抜き取り %d run（予算 %d）・推定 %d run・推定不能 %d run（K=%d）" % (
+                est["groups"], est["zero_groups"], est["zero_runs"], est["sampled_runs"], est["budget_runs"],
+                est["estimated_runs"], est["unestimated_runs"], est["sample_runs"]))
         if relist["full"] or relist["partial"]:
             out.append("runs 一覧: 全期間 %d リポ / 前回位置から %d リポ%s" % (
                 relist["full"], relist["partial"],
@@ -953,7 +965,8 @@ def main(argv=None):
             entries = entries + [e for e in est_entries if e["repo"] in visibility]
             est.update({"sample_runs": sample_k, "sampled_runs": ec["sampled"], "estimated_runs": ec["estimated"],
                         "groups": len(groups), "unestimated_runs": ec["unestimated"],
-                        "budget_runs": alloc["budget"], "zero_groups": alloc["zero_groups"]})
+                        "budget_runs": alloc["budget"], "zero_groups": alloc["zero_groups"],
+                        "zero_runs": alloc["zero_runs"]})
         rows = build_rows(entries, visibility, a.since)
         # 次回の一覧の下限を作り直す。今回の対象外（アーカイブ・削除・改名前の名前）の cursor は捨てる
         by_repo = {}
@@ -989,10 +1002,10 @@ def main(argv=None):
         }
         if est:
             out_doc["warnings"].append(
-                "推定値を含む: (repo, workflow) %d 組（試し取りで 0 分と見なして打ち切った組 %d）で抜き取った %d run"
+                "推定値を含む: (repo, workflow) %d 組（試し取りで 0 分と見なして打ち切った組 %d・%d run を 0 分と推定）で抜き取った %d run"
                 "（予算 %d）の平均から %d run を推定した（K=%d）。正確な値は --estimate なしで取得する" % (
-                    est["groups"], est["zero_groups"], est["sampled_runs"], est["budget_runs"],
-                    est["estimated_runs"], est["sample_runs"]))
+                    est["groups"], est["zero_groups"], est["zero_runs"], est["sampled_runs"],
+                    est["budget_runs"], est["estimated_runs"], est["sample_runs"]))
             if est["unestimated_runs"]:
                 out_doc["warnings"].append(
                     "推定できず 0 分として数えた run: %d（抜き取りが全て不正 job、または作成日が不正）" % est["unestimated_runs"])
