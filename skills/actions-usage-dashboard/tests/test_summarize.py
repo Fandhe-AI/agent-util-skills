@@ -255,6 +255,22 @@ class WarningAndMissingBillingTests(Base):
         self.assertIn("残り 約", text)
         self.assertNotIn("下限", text)
 
+    def test_dependabot_free_in_breakdown_not_candidate_nor_classified(self):
+        # Issue #228: dependabot_free は内訳に出すが、移行候補にも分類済みの根拠にも数えない
+        rows = [row("2026-10-01", "dep-only", "dependabot_free", 30),
+                row("2026-10-01", "u", "unknown", 10)]
+        s = self.build(rows, "absent")
+        self.assertEqual(s["breakdown"]["dependabot_free"], {"minutes": 30.0})
+        self.assertEqual(s["candidates"]["top"], [])
+        inc = s["breakdown"]["included"]
+        self.assertTrue(inc["lower_bound"])
+        self.assertFalse(inc["approximate"])
+        self.assertFalse(sm.is_classified(rows, "absent"))
+        text = "\n".join(sm.render_text(s))
+        self.assertIn("Dependabot（無料・含有枠外）: 30.0 分", text)
+        s0 = self.build([row("2026-10-01", "u", "unknown", 10)], "absent")
+        self.assertNotIn("Dependabot", "\n".join(sm.render_text(s0)))
+
     def test_default_mode_with_unknown_is_lower_bound(self):
         for flag in (False, "absent"):
             with self.subTest(flag=flag):
@@ -452,6 +468,7 @@ class CliTests(Base):
             rows.append(row("2026-10-%02d" % (i + 1), "inc-%02d" % i, "included", 5 + i, quota=5 + i))
         rows.append(row("2026-10-20", "u", "unknown", 3))
         rows.append(row("2026-10-20", "p", "public_free", 3, vis="public"))
+        rows.append(row("2026-10-20", "d", "dependabot_free", 4))
         bindir, _ = self.fake_gh(plan="mystery")
         r = self.run_cli(self.files(rows) + ["--group-by", "repo"], bindir)
         self.assertEqual(r.returncode, 0, r.stderr)

@@ -12,6 +12,9 @@
   対象月が取得期間外の取得元は 0 ではなく「不明」として扱う。列名や区分を変える
   ときは両 fetch スクリプトと揃える。
 
+Dependabot の区分: fetch_billing.py --usage-csv だけが dependabot_free を出す（含有枠を消費しない無料分、Issue #228）。
+  内訳には出すが、分類済みの根拠（is_classified）にも移行候補（candidates）にも数えない。
+
 プランの含有分: PLAN_INCLUDED_MINUTES が唯一の定義。--plan 未指定時だけ
   gh api orgs/<org> でプラン名を取り、取れなければ「不明」と警告して続行する。
   プラン名は API 由来の非信頼文字列のため、出力前に safe() で無害化する（テキスト・JSON 共通）。
@@ -56,7 +59,7 @@ SCHEMA_VERSION = 1
 # プランごとの月間含有分（Linux 換算の分）。別名は同じ定数ブロックで持つ。
 PLAN_INCLUDED_MINUTES = {"free": 2000, "team": 3000, "enterprise": 50000}
 PLAN_ALIASES = {"business": "enterprise"}
-CHARGE_CLASSES = {"paid", "included", "public_free", "unknown", "self_hosted"}
+CHARGE_CLASSES = {"paid", "included", "public_free", "dependabot_free", "unknown", "self_hosted"}
 GROUP_KEYS = ("charge_class", "repo", "runner_type", "visibility")
 DEFAULT_TOP = 5
 MAX_WARNING_LEN = 500
@@ -287,13 +290,14 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=Fals
     if not has_billing:
         # billing 未入力では GitHub ホスト分の内訳と枠の残りを計算できない。0 と誤読させず不明にする。
         return {
-            "paid": None, "included": None, "public_free": None, "unknown": None,
+            "paid": None, "included": None, "public_free": None, "dependabot_free": None, "unknown": None,
             "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est, **sh_extra},
         }
     return {
         "paid": {"minutes": _r(s["paid"]["minutes"]), "net_usd": _r(s["paid"]["net_usd"])},
         "included": inc,
         "public_free": {"minutes": _r(s["public_free"]["minutes"])},
+        "dependabot_free": {"minutes": _r(s["dependabot_free"]["minutes"])},
         "self_hosted": {"minutes": _r(s["self_hosted"]["minutes"]), "available": has_jobs, "estimated": est, **sh_extra},
         "unknown": {"minutes": _r(s["unknown"]["minutes"])},
     }
@@ -466,6 +470,8 @@ def _render_tail(s, out):
     out.append("セルフホスト: %s" % (("%.1f 分" % sh["minutes"]) + ("（推定）" if sh["estimated"] else "")
                                  + _est_counts_text(sh.get("estimate_counts"))
                                  if sh["available"] else "データなし"))
+    if bd["dependabot_free"] is not None and bd["dependabot_free"]["minutes"] > 0:
+        out.append("Dependabot（無料・含有枠外）: %.1f 分" % bd["dependabot_free"]["minutes"])
     if bd["unknown"] is not None and bd["unknown"]["minutes"] > 0:
         out.append("区分不明: %.1f 分" % bd["unknown"]["minutes"])
     g = s["group_by"]

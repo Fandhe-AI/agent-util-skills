@@ -910,5 +910,49 @@ class CollisionTests(unittest.TestCase):
             self.assertFalse(os.path.exists(bp))
 
 
+class UsageCsvHintTests(unittest.TestCase):
+    """Issue #228: 使用量 CSV 由来の rows を --refresh-template なしで載せるときだけ案内を出す。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        with open(BILLING, encoding="utf-8") as f:
+            doc = json.load(f)
+        doc["input"] = "usage_csv"
+        self.csv_rows = os.path.join(self.tmp.name, "billing-csv.json")
+        with open(self.csv_rows, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        self.out = os.path.join(self.tmp.name, "out")
+
+    def upd(self, rows, extra=()):
+        a = base(self.out, (rows,)) + ["--update"] + list(extra)
+        for u in ("/_blob/n0", "/_blob/n1"):
+            a += ["--asset-url", u]
+        a += ["--if-version", "billing=3", "--if-version", "billing_meta=4"]
+        return run(a)
+
+    def test_hint_for_csv_update_without_refresh(self):
+        rc, out, err = self.upd(self.csv_rows)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--refresh-template", out)
+        self.assertIn("案内", out)
+
+    def test_no_hint_for_api_rows_or_with_refresh(self):
+        rc, out, err = self.upd(BILLING)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("案内", out)
+        rc, out, err = self.upd(self.csv_rows, ["--refresh-template", "--template-if-version", "2"])
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("案内", out)
+
+    def test_hint_does_not_change_batch(self):
+        rc, _, err = self.upd(self.csv_rows)
+        self.assertEqual(rc, 0, err)
+        b1 = load(self.out, "batch.json")
+        rc, _, err = self.upd(BILLING)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([w["doc_id"] for w in b1], [w["doc_id"] for w in load(self.out, "batch.json")])
+
+
 if __name__ == "__main__":
     unittest.main()

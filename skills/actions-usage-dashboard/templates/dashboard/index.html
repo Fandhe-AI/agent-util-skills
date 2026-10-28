@@ -166,11 +166,12 @@ window.UsageAgg = (function () {
   'use strict';
 
   // 料金区分の固定順（積み上げは先頭が最下段）・表示名・色の参照値。
-  const CLASS_ORDER = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'];
+  const CLASS_ORDER = ['paid', 'included', 'public_free', 'dependabot_free', 'unknown', 'self_hosted'];
   const CLASS_META = {
     paid: { label: '有料', css: 'var(--cds-chart-status-critical)' },
     included: { label: '含有枠内', idx: 0 },
     public_free: { label: '公開リポの無料', idx: 1 },
+    dependabot_free: { label: 'Dependabot の無料', idx: 3 },
     unknown: { label: '区分不明（公開範囲未確定）', css: 'var(--cds-chart-muted)' },
     self_hosted: { label: 'セルフホスト', idx: 2 }
   };
@@ -183,7 +184,7 @@ window.UsageAgg = (function () {
   const MAX_CHART_DAYS = 744;
 
   function facts(billing, jobs) {
-    const CLASSES = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'];
+    const CLASSES = ['paid', 'included', 'public_free', 'dependabot_free', 'unknown', 'self_hosted'];
     const DAY = /^\d{4}-\d{2}-\d{2}$/;
     const MIN_YEAR = 2000;
     const MAX_YEAR = 2099;
@@ -234,7 +235,7 @@ window.UsageAgg = (function () {
   }
 
   function totals(facts) {
-    const CLASSES = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'];
+    const CLASSES = ['paid', 'included', 'public_free', 'dependabot_free', 'unknown', 'self_hosted'];
     const enc = (s) => encodeURIComponent(String(s));
     const acc = new Map();
     (Array.isArray(facts) ? facts : []).forEach((f) => {
@@ -708,7 +709,7 @@ function paintTotals(rows, sel, period, cov, ready, approx) {
   const row = byKey.get(key);
   // 取得済み期間に該当行がないときは未取得ではなく利用ゼロ。取得なし・不明は従来どおり「—」。
   // ゼロ補完は項目ごとに、その項目の取得元（セルフホスト分は jobs、他は billing）の取得状況だけで判定する。
-  const zeroRow = { key: key, total_minutes: 0, quota_minutes: 0, gross_usd: 0, net_usd: 0, paid_minutes: 0, included_minutes: 0, public_free_minutes: 0, unknown_minutes: 0, self_hosted_minutes: 0 };
+  const zeroRow = { key: key, total_minutes: 0, quota_minutes: 0, gross_usd: 0, net_usd: 0, paid_minutes: 0, included_minutes: 0, public_free_minutes: 0, dependabot_free_minutes: 0, unknown_minutes: 0, self_hosted_minutes: 0 };
   page.querySelectorAll('[data-source="totals"]').forEach((el) => {
     const field = el.getAttribute('data-field');
     el.setAttribute('data-where', 'key=' + encodeURIComponent(key));

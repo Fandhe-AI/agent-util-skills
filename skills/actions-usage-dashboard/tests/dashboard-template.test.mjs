@@ -35,7 +35,7 @@ const totalOf = (period, runner = '*', repo = '*') => totalsRows.find((r) => r.k
 const groupsOf = (axis, period = '*', runner = '*', repo = '*') =>
   axisRows.filter((r) => r.period === period && r.runner_type === runner && r.repo === repo && r.axis === axis)
 
-const CLASS_FIELDS = ['paid', 'included', 'public_free', 'unknown', 'self_hosted'].map((c) => `${c}_minutes`)
+const CLASS_FIELDS = ['paid', 'included', 'public_free', 'dependabot_free', 'unknown', 'self_hosted'].map((c) => `${c}_minutes`)
 const sumFields = (row) => CLASS_FIELDS.reduce((s, f) => s + row[f], 0)
 
 test('T1 料金区分の和が総分数に一致する', () => {
@@ -681,4 +681,20 @@ test('推定の件数: ページ配線', () => {
   assert.match(HTML, /<span id="aud-estimate-detail" data-source="jobs_meta" hidden><\/span>/)
   assert.match(HTML, /U\.estimateText\(ann\.estimateCounts\)/)
   assert.match(HTML, /\$\('#aud-estimate-detail'\)\.textContent = /)
+})
+
+test('Issue #228: dependabot_free は unknown に倒れず、枠消費にも下限にも影響しない', () => {
+  const row = (cls, minutes, quota) => ({
+    day: '2026-07-01', repo: 'r', visibility: 'private', sku: 'Actions Linux', runner_type: 'ubuntu',
+    charge_class: cls, minutes, quota_minutes: quota, billable_minutes: 0, gross_usd: 0, discount_usd: 0, net_usd: 0
+  })
+  const rows = [row('included', 10, 10), row('dependabot_free', 5, 0)]
+  const f = plain(U.facts(rows, []))
+  assert.deepEqual(f.map((x) => x.charge_class).sort(), ['dependabot_free', 'included'])
+  const all = plain(U.totals(f)).find((r) => r.key === U.keyOf(['*', '*', '*']))
+  near(all.dependabot_free_minutes, 5)
+  near(all.unknown_minutes, 0)
+  near(all.total_minutes, 15)
+  assert.ok(U.CLASS_ORDER.includes('dependabot_free'))
+  assert.ok(U.CLASS_META.dependabot_free.label)
 })
