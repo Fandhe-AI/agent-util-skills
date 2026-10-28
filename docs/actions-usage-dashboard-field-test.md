@@ -1,60 +1,114 @@
 # actions-usage-dashboard 実 org 実測記録
 
 `skills/actions-usage-dashboard` を管理者権限のある実 org（Team プラン）に通した結果の記録である。
-本リポジトリは PUBLIC のため、org 名・非公開リポジトリ名・金額（USD）・Artifact の URL は書かない。
+本リポジトリは PUBLIC のため、org 名・非公開リポジトリ名・金額（USD）・Artifact の URL・ユーザー ID・blob の id は書かない。請求画面との照合は分数ではなく割合で書く。
 
 ## 概要
 
 | 項目 | 内容 |
 |------|------|
-| 実施日 | 2026-10-23（UTC） |
+| 実施日 | 2026-10-23、2026-10-26〜28（UTC） |
 | 認証 | `gh` の classic token（scope に `admin:org`）。GET のみ使用 |
-| スクリプトの基準 | origin/main `f77fa00` |
-| 結論 | 取得系（billing）と summarize は実データで動作。jobs 取得・Artifact 系・請求画面照合・翌日更新は未検証 |
+| スクリプトの基準 | 2026-10-23 は origin/main `f77fa00`。2026-10-26 以降は実行時点の main。#200（5xx の再試行）と #201（推定モード）は期間中に取り込まれた（各実行のコミットは記録していない） |
+| 結論 | 取得系（billing・jobs）と summarize は実データで動作した。Artifact の作成と 2 回の更新で batch は成功し、画面の軸の切り替え・無料枠トグルも目視で動いた。check 文書は一度も確認できず、付帯情報の表示（#208）・雛形の差し替え（#207）・含有枠の照合（#209）に課題が残る |
+| 完了の判定 | 作成・更新とも、check 文書が確認できず未完了（check 未確認）。それ以外の完了条件（承認・batch 成功・summarize 終了コード 0）は満たした |
 
 ## 作成フロー
 
-- billing 取得（`--since 2026-09`）は成功した。1142 行、期間 2026-09..2026-10
+- billing 取得（`--since 2026-09`）は成功した。1,142 行、期間 2026-09..2026-10（2026-10-23）
 - 既定（`--assume-current-visibility` なし）では全行が `unknown` になり、`summarize --plan team --month 2026-09` の含有枠は下限表示（`lower_bound: true`、quota 0）になった。data-sources.md の記述どおりの挙動である
-- `--assume-current-visibility` 付きの取り直しでは paid 0 / included 64 行 / public_free 1077 行 / unknown 1 行になった
-- Artifact の作成（quickstart、Dashboard 型 publish、アップロード、batch、check 文書）は未検証。理由: 自動運転の実行ではデータ本体を非公開リポジトリ名ごと Artifact へ載せる公開範囲の判断を利用者に確認できないため実施しなかった
-- 軸の切り替え・無料枠トグルの不変条件検査（node:vm 評価）は未実施
+- `--assume-current-visibility` 付きの取り直しでは paid 0 / included 64 行 / public_free 1,077 行 / unknown 1 行になった
+- 2026-10-26〜27 に、公開前に利用者の承認を取ったうえで billing の rows でダッシュボードを作成した。batch は成功した
+- check 文書（`data/users/me` / `check`）は作られず、判定は「未完了（check 未確認）」になった。Issue #206
+- ページの `files/index.html` は作成時にしか書かれず、更新フローでは雛形を差し替えられない。Issue #207
+- 軸の切り替え・無料枠トグルの不変条件検査（node:vm 評価）は未実施。画面での目視の結果は次の「画面の確認」に記す
+
+### 画面の確認
+
+利用者が目視で確認した。セルフホストのタイルに数値が出ていることから、jobs を追加した後の画面と見ている。
+
+- 軸の切り替え（リポ / ランナー種類 / 公開範囲）は動いた
+- 無料枠の「除く」トグルは動いた
+- エラー表示は出なかった
+- セルフホストのタイルに数値が出た
+- 注意欄が出ず、「jobs（セルフホスト分）の取得期間（since / until）が読めず…」の注記が出た。fetch_jobs が出した 3 区間の「1,000 件上限で欠けた可能性」の警告も画面には出ていない
+- ローカルで同じ warnings を雛形の関数に渡すと注意欄が表示される。このため、ページには rows 配列だけが渡り、付帯情報（warnings / since / until / estimate）が落ちていると見ている（未確認）。Issue #208
+- この見立てが正しければ、#202 の「（推定）」表示も雛形を差し替えただけでは出ない
 
 ## 確認フロー
 
-`summarize.py --plan team --month 2026-09 --json` の含有枠（`--assume-current-visibility` 付き）:
+`summarize.py --plan team --month 2026-09 --json` の含有枠（`--assume-current-visibility` 付き、2026-10-23）:
 
 | 項目 | 値 |
 |------|----|
-| 含有分（included_minutes） | 3000 分 |
-| 実分（minutes） | 1018 分 |
-| quota 換算（quota_minutes） | 約 1180.7 分 |
+| 含有分（included_minutes） | 3,000 分 |
+| 実分（minutes） | 1,018 分 |
+| quota 換算（quota_minutes） | 約 1,180.7 分 |
 | 割合（ratio） | 約 39.4 % |
-| 残り（remaining） | 約 1819.3 分 |
+| 残り（remaining） | 約 1,819.3 分 |
 | warnings | 0 件 |
 
-- 請求画面の「N min used / M min included」との照合は未検証。旧 API `orgs/<org>/settings/billing/actions` は 410 Gone で、請求画面の値は API から直接取れない
+- 旧 API `orgs/<org>/settings/billing/actions` は 410 Gone で、請求画面の値は API から直接取れない
 - `organizations/<org>/settings/billing/usage/summary`（public preview）は 200 を返した。値の突き合わせは未実施
-- 含有分 3000 分（team）が請求画面の「M min included」と一致するかは未検証
+- 含有分 3,000 分（team）は、請求画面の「3,000 min included」と一致した（2026-10-27）
+
+### 請求画面との照合
+
+2026-10 の含有枠を、請求画面（Settings → Billing → Actions）の使用量と比べた。
+
+- summarize.py は「消費 X 分以上（下限。区分不明あり）」と出したが、その値が請求画面の使用量を約 0.9% 上回った
+- API を取り直しても同じ値だったため、請求画面の反映遅れではない
+- 原因の候補は次の 3 つで、どれが効いているかは未確認。Issue #209
+  1. `--assume-current-visibility` による公開範囲の誤分類
+  2. 換算式「定価 ÷ Linux 単価」と請求画面の換算の違い（macOS の倍率・安い SKU）
+  3. 端数処理
+- summarize の表示が下限と言えるのは、区分不明だけが差の原因のときに限る
 
 ## 更新フロー
 
-- fetch_jobs の初回実行（`--since 2026-09-01`、`--cache` 指定）は 600 秒の timeout で前景完了せず、結果を得られなかった。API 呼び出し数の初回 / 2 回目の比較は未検証
-- 所感: 大規模 org では fetch_jobs の初回取得が 10 分を超える。`--min-remaining` や期間の短縮を先に使う運用が必要になり得る
-- dataset の version 増加・URL 不変・翌日以降の日の増加は未検証
+- fetch_jobs の初回実行（`--since 2026-09-01`、`--cache` 指定、2026-10-23）は 600 秒の timeout で前景完了せず、結果を得られなかった
+- 全件取得（推定なし）の jobs は、4 週間・約 47,000 run の org で 1 時間に約 2,300 run しか進まず、十数時間かかった。途中で HTTP 502 により 1〜1.5 時間に 1 回、終了コード 1 で中断した。#200 で 5xx の再試行を追加して解消した
+- 推定モード（`--estimate`、K=3）の初回は、148 リポ・API 呼び出し 1,536 回・約 3,000 秒（約 50 分）で終わった。173 組・抜き取り 487 run から 36,453 run を推定した
+- 1,000 件上限で欠けた可能性の警告が 3 区間で出た
+- 1 回目の更新（2026-10-26〜27）では、推定モードの jobs を `--add-dataset jobs` で追加した。batch は成功し、check 文書は無かった
+- dataset の版の増加と URL 不変は、翌日の更新で確認した（次節）。行の最新日が進むことは未確認（jobs の取得期間の終わりは 2 回とも 10-27）
+
+### 翌日の更新
+
+2026-10-28 に、同じ URL へ 2 回目の更新を行った。
+
+- billing は前回と同じ引数で取り直した。終了コード 0 で、区分ごとの分数は前日と同じだった
+- jobs は推定モードを同じキャッシュで再実行した。終了コード 0、約 3,370 秒、API 呼び出し 1,275 回で、5xx の再試行が 3 回あったが中断はしなかった
+- 日付が変わったため runs 一覧は全リポで取り直しになり（前回位置から 0 リポ）、増分の効果はほぼ無かった。取得期間の終わりは前日と同じ 10-27 だった
+- 同じ期間なのに、セルフホストの推定合計が前回から約 8% 減った。抜き取る run が入れ替わったことによるぶれと見ている。data-sources.md の「実測との比較（#199）」で測った模擬の誤差の範囲内である
+- 公開前の承認を改めて取り、2 ファイルをアップロードした。batch は成功し、billing・jobs とも版が 1 から 2 に上がった。画面のセルフホストのタイルが新しい値に変わったことを利用者が確認した
+- check 文書は、更新直後に 2 回読んでも無く、持ち主がページを開いた後に読み直しても無かった（`data/users/me` は空）。Issue #206 にコメント済み
+- 読み直し時に「手元より新しい版が公開されている」と通知された。こちらは publish しておらず、その版の中身は未確認
+- summarize.py は終了コード 0 で終わった
 
 ## トークン節約の確認
+
+2026-10-23 の実行についての記録である。2026-10-26 以降の実行では記録していない。
 
 - Read / `cat` / `jq` した対象: スクリプトの標準出力、`summarize --json` の集計フィールドのみ
 - rows JSON・キャッシュ・index.html・`dataset-*.json`・`dash-*.json` は開いていない
 
 ## 未検証事項と後続手順
 
-1. 対話セッションで SKILL.md の作成フローを実行し、check 文書の成功状態と batch 全件成功を確認する
-2. fetch_jobs を期間を絞って実行し、同じ `--cache` で 2 回目を実行して「API 呼び出し: 計 N」の減少を記録する
-3. 請求画面（Settings → Billing → Actions）の used / included と、summarize の含有枠消費を比べる
-4. UTC で翌日以降に更新フローを実行し、行の最新日が進み URL が変わらないことを確認する
+1. check 文書が作られない原因を調べ、作成・更新フローで成功状態の check 文書を確認する。Issue #206
+2. 更新フローで `files/index.html` を差し替える手段を用意し、#202 以降の雛形をページへ反映する。Issue #207
+3. 付帯情報（warnings / since / until / estimate）がページに届いているかを確かめ、届くようにしたうえで注意欄と「（推定）」表示を画面で確認する。Issue #208
+4. 含有枠が請求画面を約 0.9% 上回る原因を 3 候補から切り分け、「下限」表示の扱いを見直す。Issue #209
+5. 日をおいて更新フローを実行し、行の最新日（jobs の取得期間の終わり）が進むことを確認する
+6. 同じ日（UTC）のうちに同じ `--cache` で fetch_jobs を 2 回実行し、増分による API 呼び出し数の減少を記録する
+7. 軸の切り替え・無料枠トグルの不変条件を node:vm 評価で検査する
+8. `usage/summary` の値と summarize の値を突き合わせる
 
 ## スコープ外として見つけた事項
 
-- 大規模 org で fetch_jobs が 10 分超になる点の改善（進捗表示・上限指定）。対応案: 進捗行の出力と実行時間の目安を SKILL.md に追記する。Issue #139
+- 大規模 org で fetch_jobs が 10 分超になる点の改善（進捗表示・上限指定）。対応案: 進捗行の出力と実行時間の目安を SKILL.md に追記する。Issue #139（#151 で対応済み）
+- 推定の抜き取りを run 数で配分する。Issue #205
+- 作成・更新フローで check 文書が作られない。Issue #206
+- 更新フローでページの雛形（`files/index.html`）を差し替えられない。Issue #207
+- ページに rows 配列だけが渡り、付帯情報（warnings / since / until / estimate）が落ちている疑い（未確認）。Issue #208
+- summarize の含有枠の「下限」が請求画面の使用量を約 0.9% 上回る。Issue #209
