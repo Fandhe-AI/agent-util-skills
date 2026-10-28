@@ -173,10 +173,19 @@ class Pure(unittest.TestCase):
             job(3, ["self-hosted"], None, "2026-10-09T23:00:00+00:00", 0),   # 0 分
             job(4, ["self-hosted"], None, "2026-10-09T23:00:00+00:00", 2),
         ]
-        agg, hosted, unfinished = fj.aggregate_jobs(jobs)
+        agg, hosted, unfinished, selfh = fj.aggregate_jobs(jobs)
         self.assertEqual(agg, [{"day": "2026-10-09", "runner_group": "(unknown)", "minutes": 2.0},
                                {"day": "2026-10-09", "runner_group": "g", "minutes": 91.5}])
         self.assertEqual((hosted, unfinished), (0, 0))
+        self.assertEqual(selfh, 4)  # 重複 id は 1 件、0 分の job も数える
+
+    def test_aggregate_counts_unfinished_selfhosted(self):
+        # #227: agg に載らない未完了・時刻不正のセルフホスト job も self_hosted に数える
+        jobs = [job(1, ["self-hosted"], "g", "2026-10-09T23:00:00+00:00", 0, status="in_progress"),
+                job(2, ["ubuntu-latest"], "GitHub Actions", "2026-10-09T23:00:00+00:00", 3),
+                job(2, ["ubuntu-latest"], "GitHub Actions", "2026-10-09T23:00:00+00:00", 3)]
+        agg, hosted, unfinished, selfh = fj.aggregate_jobs(jobs)
+        self.assertEqual((agg, hosted, unfinished, selfh), ([], 1, 1, 1))
 
     def test_build_rows_columns_and_order(self):
         ents = [{"repo": "b", "agg": [{"day": "2026-10-02", "runner_group": "g", "minutes": 1.0}]},
@@ -283,9 +292,12 @@ def _mk_groups(sizes, k):
     return listed, g
 
 
-def _ent(minutes):
-    return {"repo": "r", "attempt": 1, "created_at": "",
-            "agg": [{"day": D0, "runner_group": "g", "minutes": minutes}] if minutes else []}
+def _ent(minutes, jobs=None):
+    e = {"repo": "r", "attempt": 1, "created_at": "",
+         "agg": [{"day": D0, "runner_group": "g", "minutes": minutes}] if minutes else []}
+    if jobs is not None:
+        e["jobs"] = {"hosted": jobs[0], "self_hosted": jobs[1]}
+    return e
 
 
 class EstimateAllocation(unittest.TestCase):
@@ -299,6 +311,53 @@ class EstimateAllocation(unittest.TestCase):
         self.assertEqual(g[("r", 1)]["pilot"], {1000, 1004, 1008})
         _l, g = _mk_groups({("r", 1): 9}, 1)
         self.assertEqual(g[("r", 1)]["pilot"], g[("r", 1)]["sample"])
+
+    def test_record_selfhosted_outside_pilot_blocks_cut(self):
+        # #227 受入基準: 試し取り 3 run とも 0 分でも、記録上セルフホストの job がある組は打ち切らない
+        k = 4
+        _l, g = _mk_groups({("a", 1): 20}, k)
+        ids = sorted(g[("a", 1)]["pilot"])
+        cache = {str(r): _ent(0, (1, 0)) for r in ids}
+        other = next(r[0] for r in g[("a", 1)]["pool"] if r[0] not in ids)
+        cache[str(other)] = _ent(0, (0, 1))  # 未完了セルフホスト: agg は空だが記録が示す
+        before = json.dumps(cache, sort_keys=True)
+        info = fj.allocate_samples(g, k, cache, {})
+        self.assertEqual(json.dumps(cache, sort_keys=True), before)
+        self.assertEqual(info["zero_groups"], 0)
+        self.assertGreaterEqual(len(g[("a", 1)]["sample"]), k)
+        self.assertTrue(g[("a", 1)]["pilot"] <= g[("a", 1)]["sample"])
+
+    def test_record_hosted_only_cuts(self):
+        k = 4
+        _l, g = _mk_groups({("a", 1): 20}, k)
+        cache = {str(r): _ent(0, (2, 0)) for r in g[("a", 1)]["pilot"]}
+        self.assertEqual(fj.allocate_samples(g, k, cache, {})["zero_groups"], 1)
+
+    def test_record_selfhosted_in_pilot_not_cut(self):
+        k = 4
+        _l, g = _mk_groups({("a", 1): 20}, k)
+        ids = sorted(g[("a", 1)]["pilot"])
+        cache = {str(r): _ent(0, (1, 0)) for r in ids}
+        cache[str(ids[1])] = _ent(0, (0, 1))
+        self.assertEqual(fj.allocate_samples(g, k, cache, {})["zero_groups"], 0)
+
+    def test_record_zero_jobs_is_not_evidence(self):
+        # 意図的な厳格化: job が 0 件の run は 0 分の証拠にしない
+        k = 4
+        _l, g = _mk_groups({("a", 1): 20}, k)
+        cache = {str(r): _ent(0, (0, 0)) for r in g[("a", 1)]["pilot"]}
+        self.assertEqual(fj.allocate_samples(g, k, cache, {})["zero_groups"], 0)
+
+    def test_no_record_fallback_and_nonempty_agg_elsewhere(self):
+        k = 4
+        _l, g = _mk_groups({("a", 1): 20}, k)
+        cache = {str(r): _ent(0) for r in g[("a", 1)]["pilot"]}
+        self.assertEqual(fj.allocate_samples(g, k, cache, {})["zero_groups"], 1)
+        _l, g = _mk_groups({("a", 1): 20}, k)
+        cache = {str(r): _ent(0) for r in g[("a", 1)]["pilot"]}
+        other = next(r[0] for r in g[("a", 1)]["pool"] if r[0] not in g[("a", 1)]["pilot"])
+        cache[str(other)] = _ent(7)
+        self.assertEqual(fj.allocate_samples(g, k, cache, {})["zero_groups"], 0)
 
     def test_zero_group_cut_and_floor(self):
         k = 4
@@ -840,6 +899,41 @@ class Cli(unittest.TestCase):
             self.assertFalse(os.path.exists(self.out))
         self.assertEqual(self.calls(), [])
 
+    def test_bad_job_records_stop(self):
+        os.makedirs(self.cache)
+        p = os.path.join(self.cache, "jobs-cache-%s.json" % ORG)
+        bodies = [json.dumps({"schema_version": 3, "org": ORG, "runs": {}})]
+        for jr in ("x", [], {"hosted": 1}, {"hosted": True, "self_hosted": 0}, {"hosted": 1.5, "self_hosted": 0},
+                   {"hosted": -1, "self_hosted": 0}, {"hosted": 10001, "self_hosted": 0},
+                   {"hosted": "1", "self_hosted": 0}):
+            bodies.append(json.dumps({"schema_version": 2, "org": ORG, "runs": {"1": {
+                "repo": "pub-site", "attempt": 1, "created_at": "", "agg": [], "jobs": jr}}}))
+        for body in bodies:
+            with open(p, "w") as f:
+                f.write(body)
+            r = self.run_cli()
+            self.assertEqual(r.returncode, 1, body)
+            self.assertIn("キャッシュが壊れている", r.stderr)
+            with open(p) as f:
+                self.assertEqual(f.read(), body)
+            self.assertFalse(os.path.exists(self.out))
+
+    def test_v1_cache_migrates_to_v2(self):
+        os.makedirs(self.cache)
+        p = os.path.join(self.cache, "jobs-cache-%s.json" % ORG)
+        with open(p, "w") as f:
+            json.dump({"schema_version": 1, "org": ORG, "runs": {"7777": {
+                "repo": "pub-site", "attempt": 1, "created_at": D0 + "T00:00:00Z", "agg": []}}}, f)
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(p) as f:
+            c = json.load(f)
+        self.assertEqual(c["schema_version"], 2)
+        self.assertIn("7777", c["runs"])
+        self.assertNotIn("jobs", c["runs"]["7777"])
+        with open(self.out) as f:
+            self.assertEqual(json.load(f)["schema_version"], 1)  # 出力文書の版は据え置き
+
     def runs_list_calls(self):
         return [c for c in self.calls() if "actions/runs -f" in c]
 
@@ -1251,6 +1345,37 @@ class EstimateCli(unittest.TestCase):
         self.assertLessEqual(len(r.stdout.splitlines()), 11)
         self.assertNotIn("alloc-repo", r.stdout)
         self.assertFalse(any("alloc-repo" in w for w in doc["warnings"]))
+
+    def test_recorded_selfhosted_outside_pilot_not_cut(self):
+        """Issue #227: 試し取りが 0 分でも、全件取得で残した job 件数の記録がセルフホストを示す組は打ち切らない。"""
+        cfg = self.make_alloc_cfg()
+        wf, n = 4, 20
+        pilot = {0, 10, 19}
+        odd = 5
+        for i in range(n):
+            rid = wf * 1000 + i
+            day = (TODAY - timedelta(days=19) + timedelta(days=i * 19 // n)).isoformat()
+            cfg["runs"]["alloc-repo"].append(run(rid, created=day + "T00:00:00Z", workflow_id=wf))
+            sh = i == odd
+            cfg["jobs"][str(rid)] = [job(rid * 10, ["self-hosted"] if sh else ["ubuntu-latest"],
+                                         "g" if sh else "GitHub Actions", day + "T01:00:00+00:00", 30)]
+        self.sizes[wf] = n
+        self.cfg = cfg
+        self.write_cfg()
+        self.assertEqual(self.run_cli([]).returncode, 0)  # 全件取得で全 run の記録を作る
+        c = self.load_cache_file()
+        self.assertEqual(c["schema_version"], 2)
+        self.assertEqual(c["runs"][str(wf * 1000 + odd)]["jobs"], {"hosted": 0, "self_hosted": 1})
+        self.assertEqual(c["runs"][str(wf * 1000)]["jobs"], {"hosted": 1, "self_hosted": 0})
+        self.assertTrue(pilot)
+        self.reset_calls()
+        r = self.run_cli(["--estimate", "--sample-runs", "4"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = self.load_out()
+        self.assertEqual(doc["estimate"]["zero_groups"], 2)  # wf 1, 2 だけ
+        self.assertGreater(sum(x["minutes"] for x in doc["rows"]), 0)
+        self.assertLessEqual(len(r.stdout.splitlines()), 11)
+        self.assertNotIn("alloc-repo", r.stdout)
 
     def test_allocation_resume_matches_uninterrupted(self):
         self.cfg = self.make_alloc_cfg()
