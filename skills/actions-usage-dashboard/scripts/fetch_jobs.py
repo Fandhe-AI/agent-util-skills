@@ -120,6 +120,10 @@ REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
 RUNS_SEARCH_CAP = 1000
+# 1 日で上限を超えたときの時刻二分の下限（秒）。1 日 = 86,400 秒なので 1 日あたりの検索は高々
+# 約 2 * 86400 / 60 回（各 10 ページ以内）。created_at は秒精度のため、これより細かくしても
+# 同じ秒に 1,000 件を超える run は分けられない
+SUBDAY_MIN_SPAN_SECONDS = 60
 PER_PAGE = 100
 MAX_JOB_PAGES = 100
 DEFAULT_MIN_REMAINING = 200
@@ -597,21 +601,44 @@ class GhClient:
             page += 1
 
     def list_runs(self, repo, org, since, today, truncated):
-        """created>=since の run を全件取る。1,000 件上限を超えるときは期間を二分して取り直す。"""
+        """created>=since の run を全件取る。1,000 件上限を超えるときは期間を二分して取り直す。
+
+        日単位で二分しても 1 日が上限を超えるときは、その日を UTC の時刻範囲（秒単位）で二分する。
+        created の日時範囲は検索構文 `YYYY-MM-DDTHH:MM:SSZ..YYYY-MM-DDTHH:MM:SSZ`。端点の包含を
+        実装依存にしないため、二分した 2 区間は境界の 1 秒を共有する（欠落は出ず、重複は run id の
+        dict で除かれる）。日の終端は翌日 00:00:00Z とし、23:59:59 の run を端点の扱いで落とさない。
+        区間が SUBDAY_MIN_SPAN_SECONDS 以下になっても超えるときだけ truncated に積む。
+        """
         out = {}
+
+        def add(runs):
+            for r in runs:
+                out[_run_key(r)[0]] = r
+
+        def collect_time(a, b):
+            runs, total = self._runs_pages(repo, org, "%s..%s" % (_utc_s(a), _utc_s(b)))
+            if total > RUNS_SEARCH_CAP and (b - a).total_seconds() > SUBDAY_MIN_SPAN_SECONDS:
+                mid = a + (b - a) // 2
+                collect_time(a, mid)
+                collect_time(mid, b)
+                return
+            if total > RUNS_SEARCH_CAP:
+                # 形式は "org/repo <日>" か "org/repo <開始時刻>..<終了時刻>"。cursor は空白区切りの最後の語の先頭 10 文字（日付）で読む
+                truncated.append("%s/%s %s..%s" % (org, repo, _utc_s(a), _utc_s(b)))
+            add(runs)
 
         def collect(lo, hi, spec):
             runs, total = self._runs_pages(repo, org, spec)
             if total > RUNS_SEARCH_CAP:
                 if lo >= hi:
-                    truncated.append("%s/%s %s" % (org, repo, lo.isoformat()))
+                    start = datetime(lo.year, lo.month, lo.day, tzinfo=timezone.utc)
+                    collect_time(start, start + timedelta(days=1))
                 else:
                     mid = lo + (hi - lo) // 2
                     collect(lo, mid, "%s..%s" % (lo.isoformat(), mid.isoformat()))
-                    collect(mid + timedelta(days=1), hi,"%s..%s" % ((mid + timedelta(days=1)).isoformat(), hi.isoformat()))
-                    return
-            for r in runs:
-                out[_run_key(r)[0]] = r
+                    collect(mid + timedelta(days=1), hi, "%s..%s" % ((mid + timedelta(days=1)).isoformat(), hi.isoformat()))
+                return
+            add(runs)
 
         collect(since, today, ">=%s" % since.isoformat())
         return list(out.values())
@@ -630,6 +657,10 @@ class GhClient:
             if len(lst) < PER_PAGE:
                 return jobs
         raise FetchError("jobs のページ数が上限を超えた")
+
+
+def _utc_s(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _pos_int(v):
@@ -1034,7 +1065,7 @@ def main(argv=None):
             for t in ls["truncated"]:
                 if t.startswith("%s/%s " % (a.org, repo)):
                     try:
-                        tdays.append(date.fromisoformat(t.rsplit(" ", 1)[1]))
+                        tdays.append(date.fromisoformat(t.rsplit(" ", 1)[1][:10]))
                     except ValueError:
                         pass
             cache["cursor"][repo] = next_cursor_entry(by_repo.get(repo, []), settled, tdays, since, today)
