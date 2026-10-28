@@ -214,7 +214,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual([w["if_version"] for w in b], [3, 4, 5, 6])
         self.assertTrue(all(w["collection"] == "datasets" for w in b))
         upd = load(self.out, "dataset-billing.update.json")
-        self.assertEqual(set(upd), {"source", "updated"})
+        self.assertEqual(set(upd), {"source", "updated", "description"})
         merged = dict(created)
         merged.update(upd)
         self.assertEqual(merged["title"], created["title"])
@@ -327,7 +327,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(jd["source"], {"kind": "file", "url": "/_blob/n2", "name": "jobs.json"})
         self.assertEqual(load(self.out, "dataset-jobs_meta.json")["source"]["url"], "/_blob/n3")
         self.assertEqual(jd["updated"]["at"], "2026-10-03T12:00:00Z")
-        self.assertEqual(set(load(self.out, "dataset-billing.update.json")), {"source", "updated"})
+        self.assertEqual(set(load(self.out, "dataset-billing.update.json")), {"source", "updated", "description"})
         self.assertFalse(os.path.exists(os.path.join(self.out, "dataset-jobs.update.json")))
 
     def test_migrate_existing_dashboard_with_add_meta(self):
@@ -952,6 +952,68 @@ class UsageCsvHintTests(unittest.TestCase):
         rc, _, err = self.upd(BILLING)
         self.assertEqual(rc, 0, err)
         self.assertEqual([w["doc_id"] for w in b1], [w["doc_id"] for w in load(self.out, "batch.json")])
+
+
+class BillingDescriptionTests(unittest.TestCase):
+    """billing の description は rows の input（usage_csv か否か）で切り替わり、--update でも追従する。"""
+
+    API_DESC = "fetch_billing.py が billing usage API から作った日次の行（料金区分つき）"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        with open(BILLING, encoding="utf-8") as f:
+            doc = json.load(f)
+        doc["input"] = "usage_csv"
+        self.csv_rows = os.path.join(self.tmp.name, "billing-csv.json")
+        with open(self.csv_rows, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        # 固定文字列以外の input は説明文へ入れない（任意文字列の混入防止）。
+        doc["input"] = "evil <script>alert(1)</script>"
+        self.odd_rows = os.path.join(self.tmp.name, "billing-odd.json")
+        with open(self.odd_rows, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        self.out = os.path.join(self.tmp.name, "out")
+
+    def create(self, rows):
+        rc, _, err = run(base(self.out, (rows,)) + urls_for(1))
+        self.assertEqual(rc, 0, err)
+        return load(self.out, "dataset-billing.json")
+
+    def update(self, rows):
+        a = base(self.out, (rows,)) + ["--update", "--asset-url", "/_blob/n0", "--asset-url", "/_blob/n1",
+                                       "--if-version", "billing=3", "--if-version", "billing_meta=4"]
+        rc, _, err = run(a)
+        self.assertEqual(rc, 0, err)
+        return load(self.out, "dataset-billing.update.json")
+
+    def test_create_api_keeps_original_text(self):
+        self.assertEqual(self.create(BILLING)["description"], self.API_DESC)
+
+    def test_create_csv_uses_csv_text(self):
+        d = self.create(self.csv_rows)["description"]
+        self.assertEqual(d, bd.BILLING_DESC_CSV)
+        self.assertIn("使用量 CSV", d)
+        self.assertNotIn("billing usage API", d)
+
+    def test_unknown_input_falls_back_without_echo(self):
+        d = self.create(self.odd_rows)["description"]
+        self.assertEqual(d, self.API_DESC)
+        self.assertNotIn("evil", d)
+
+    def test_update_carries_description(self):
+        self.assertEqual(self.update(BILLING)["description"], self.API_DESC)
+        upd = self.update(self.csv_rows)
+        self.assertEqual(upd["description"], bd.BILLING_DESC_CSV)
+        self.assertEqual(set(upd), {"source", "updated", "description"})
+
+    def test_update_meta_and_jobs_shape_unchanged(self):
+        self.update(self.csv_rows)
+        self.assertEqual(set(load(self.out, "dataset-billing_meta.update.json")), {"source", "updated"})
+        rc, _, err = run(base(self.out, (JOBS,)) + ["--update", "--asset-url", "/_blob/n0",
+                         "--asset-url", "/_blob/n1", "--if-version", "jobs=5", "--if-version", "jobs_meta=6"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(load(self.out, "dataset-jobs.update.json")), {"source", "updated"})
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@
 
 作成は 2 段階: 1 段目（--asset-url なし）はアップロードすべきファイルの一覧を出す。
   一覧は「rows ファイル → その meta ファイル」の順に並ぶ。アップロードで得た /_blob/ の url を
-  この一覧と同じ順・同じ数で --asset-url に渡して再実行すると batch.json が完成する。--update は既存 dataset の source と updated だけを書き換える
+  この一覧と同じ順・同じ数で --asset-url に渡して再実行すると batch.json が完成する。--update は既存 dataset の source と updated（billing は description も）だけを書き換える
   op: update を作る（if_version は --if-version <id>=<N> で受ける）。
   --update --add-dataset <jobs|billing_meta|jobs_meta> は、作成時に無かった dataset を op: set（全体）で足し、
   既存分の update と同じ batch に入れる。「--if-version が無ければ新規」と推測しないのは、
@@ -98,6 +98,10 @@ DATASET_META = {
     "jobs": ("セルフホストの実行時間",
              "fetch_jobs.py が jobs API から作ったセルフホスト分の日次の行"),
 }
+# billing の説明は rows の input で切り替える。判定は検証済みの固定文字列（usage_csv）との一致だけで、
+# rows 由来の文字列を説明文に入れない。
+BILLING_DESC_CSV = ("fetch_billing.py が請求画面の使用量 CSV から作った日次の行"
+                    "（料金区分つき。Dependabot の更新ジョブは dependabot_free）")
 # 雛形の readSel() が読むキーと揃える。
 DEFAULT_PARAMS = {"group_by": "charge_class", "include_free": True, "period": "latest",
                   "runner_type": None, "repo": None}
@@ -264,14 +268,26 @@ def build_source(url, path):
     return src
 
 
-def build_dataset(did, url, path, updated):
-    title, desc = DATASET_META[did]
+def dataset_description(did, usage_csv=False):
+    """dataset の説明文。billing だけ rows の取得元（usage_csv か否か）で切り替える。"""
+    if did == "billing" and usage_csv:
+        return BILLING_DESC_CSV
+    return DATASET_META[did][1]
+
+
+def build_dataset(did, url, path, updated, usage_csv=False):
+    title = DATASET_META[did][0]
+    desc = dataset_description(did, usage_csv)
     return {"title": title, "description": desc, "source": build_source(url, path), "updated": updated}
 
 
-def build_update(url, path, updated):
+def build_update(url, path, updated, description=None):
     # source は merge で kind / name が消えないよう丸ごと送る。触るのは source と updated だけ。
-    return {"source": build_source(url, path), "updated": updated}
+    # billing だけは取得元を後から切り替えられるので、description も同時に送る（jobs と meta は送らない）。
+    doc = {"source": build_source(url, path), "updated": updated}
+    if description is not None:
+        doc["description"] = description
+    return doc
 
 
 def build_index(html):
@@ -459,6 +475,7 @@ def run(a):
     for e in entries:
         assets["meta-%s.json" % e["id"]] = e["meta_rows"]
     by_id = {}
+    csv_billing = any(e.get("usage_csv") for e in entries)
     if not stage1:
         # did（rows と meta の dataset id）→ (アップロード元のパス, url)。uploads と asset_url は同順。
         for (kind, e, path), u in zip(uploads, a.asset_url):
@@ -471,11 +488,13 @@ def run(a):
                 path, u = by_id[did]
                 if did in new_ids:
                     fn = "dataset-%s.json" % did
-                    files[fn] = build_dataset(did, u, path, updated)
+                    files[fn] = build_dataset(did, u, path, updated, csv_billing)
                     batch.append(write_entry("datasets", did, fn, out_dir))
                 else:
                     fn = "dataset-%s.update.json" % did
-                    files[fn] = build_update(u, path, updated)
+                    files[fn] = build_update(
+                        u, path, updated,
+                        dataset_description(did, csv_billing) if did == "billing" else None)
                     batch.append(write_entry("datasets", did, fn, out_dir, "update", if_ver[did]))
         if a.refresh_template:
             # 1 段目でもサイズ超過を検出できるよう、組み立ては段に依らず行う。
@@ -492,7 +511,7 @@ def run(a):
             for did in ALL_IDS:
                 if did in by_id:
                     path, u = by_id[did]
-                    files["dataset-%s.json" % did] = build_dataset(did, u, path, updated)
+                    files["dataset-%s.json" % did] = build_dataset(did, u, path, updated, csv_billing)
             batch.append(write_entry("dash", "meta", "dash-meta.json", out_dir))
             batch.append(write_entry("dash", "params", "dash-params.json", out_dir))
             for did in ALL_IDS:
@@ -535,7 +554,7 @@ def run(a):
             for d in sorted(new_ids):
                 print("%s は新しい dataset として作る（op: set）。既にあれば store が拒否する。"
                       "その場合は --add-dataset を外し --if-version %s=<N> にする。" % (d, d))
-            print("既存 dataset は source と updated だけを書き換える（if_version で版を固定）。")
+            print("既存 dataset は source と updated（billing は description も）だけを書き換える（if_version で版を固定）。")
             if a.refresh_template:
                 print("ページ（files/index.html）をスキル同梱の雛形で置き換える（op: set、if_version で版を固定）。")
         else:
