@@ -179,7 +179,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
   - 推定不能（抜き取りが全て不正 job、または作成日が不正）: 0 分として数えるため過少になる（`unestimated_runs`）
   - 割り当て日は run の作成日（UTC）: 日をまたぐ run は実測と日別の配分がずれる
   - 誤差の大きさと傾向は次の「実測との比較（#199）」に載せた
-- 要約・ダッシュボードの表示: どちらも jobs 文書に `estimate` があるかないかだけを読み、数値・文字列は表示に使わない
+- 要約・ダッシュボードの表示: どちらも `estimate` があるかないかだけを読み、数値・文字列は表示に使わない。ダッシュボードは jobs 文書そのものではなく `jobs_meta` の `estimate` 行（値は固定の `"true"`）で判定する（下の「ページへ渡る値」）
   - `summarize.py`: セルフホスト行に「（推定）」を付け、`--json` の `breakdown.self_hosted.estimated` を true にする（キーは常にあり、推定でなければ false。対象月が jobs の取得期間外なら false）。`estimate` がオブジェクトでなければ終了コード 1。billing 文書の `estimate` は無視する
   - 雛形 `templates/dashboard/index.html`: リード文・セルフホストのタイルに「（推定）」、タイルの注記と総分数の注記・注記行に推定である旨を出す。選択期間に jobs がないとき、jobs 未接続のときは出さない。グループ別の上位行・グラフ・内訳表には推定表示がない
 
@@ -291,3 +291,17 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - [SKILL.md](../SKILL.md)
 - [`fetch_billing.py`](../scripts/fetch_billing.py)
 - [`fetch_jobs.py`](../scripts/fetch_jobs.py)
+
+## ページへ渡る値
+
+出典: claude.ai の Dashboard 型 Artifact の `SKILL.md`（An attached file）と `artifact-type/reference/features.md`（A loader）。2026-10-28 に Artifact の read で確かめた。
+
+- 添付する JSON は「行オブジェクトの配列、または `rows` / `data` / `results` の下にある配列」。`dash.data(id).data` には行の配列だけが届き、セルは文字列として扱うのが安全
+- `dash.data(id).meta` に値が入るのは、query dataset の `dash.loader` が `meta` を返したときだけで、`kind: "file"` の dataset では使えない
+- したがって fetch 出力のトップレベルの `since` / `until` / `warnings` / `estimate` / `generated_at` はそのままではページに届かない
+- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate", "value": "<文字列>"}`
+  - `since` / `until`: 1 行ずつ（billing は `YYYY-MM`、jobs は `YYYY-MM-DD`）
+  - `warning`: `warnings` の文字列要素を先頭から最大 20 件。制御文字を除き 300 字で切る
+  - `estimate`: 文書の `estimate` がオブジェクトのときだけ 1 行（`value` は `"true"`。中身は渡さない）
+- ページは `withMeta` で行配列と meta 行から `{rows, since, until, warnings, estimate?}` を組み直し、既存の `span` / `coverage` / `isEstimate` に渡す。meta が読めない（`missing` / `error`、行なし）ときは取得期間が `unknown` になり、注記を出す（読み込み中は出さない）
+- source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。meta は rows と同じ版固定・同じ更新の扱いで、meta の警告文も rows と同様にダッシュボードを開ける全員が読める

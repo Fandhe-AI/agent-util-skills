@@ -42,6 +42,19 @@ def base(out, rows=(BILLING, JOBS)):
     return a
 
 
+def urls_for(n, prefix="u"):
+    """--asset-url の引数列。rows 1 件につき rows と meta の 2 件が要る。"""
+    a = []
+    for i in range(2 * n):
+        a += ["--asset-url", "/_blob/%s%d" % (prefix, i)]
+    return a
+
+
+# 既存の dataset を更新するときの --if-version（rows と meta の版は別）。
+IFV_BOTH = ["--if-version", "billing=3", "--if-version", "billing_meta=4",
+            "--if-version", "jobs=5", "--if-version", "jobs_meta=6"]
+
+
 def load(d, name):
     with open(os.path.join(d, name), encoding="utf-8") as f:
         return json.load(f)
@@ -56,10 +69,7 @@ class CreateTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def stage2(self, rows=(BILLING, JOBS), extra=()):
-        urls = []
-        for i in range(len(rows)):
-            urls += ["--asset-url", "/_blob/u%d" % i]
-        return run(base(self.out, rows) + urls + list(extra))
+        return run(base(self.out, rows) + urls_for(len(rows)) + list(extra))
 
     def test_t1_batch_shape(self):
         rc, _, err = self.stage2()
@@ -67,7 +77,8 @@ class CreateTests(unittest.TestCase):
         b = load(self.out, "batch.json")
         self.assertEqual([(w["collection"], w["doc_id"]) for w in b],
                          [("dash", "meta"), ("dash", "params"), ("datasets", "billing"),
-                          ("datasets", "jobs"), ("files", "index.html")])
+                          ("datasets", "billing_meta"), ("datasets", "jobs"),
+                          ("datasets", "jobs_meta"), ("files", "index.html")])
         for w in b:
             self.assertEqual(set(w), {"op", "collection", "doc_id", "file_path"})
             self.assertEqual(w["op"], "set")
@@ -81,8 +92,11 @@ class CreateTests(unittest.TestCase):
         rc, _, err = self.stage2(rows=(BILLING,))
         self.assertEqual(rc, 0, err)
         b = load(self.out, "batch.json")
-        self.assertEqual(len(b), 4)
-        self.assertNotIn(("datasets", "jobs"), [(w["collection"], w["doc_id"]) for w in b])
+        self.assertEqual(len(b), 5)
+        ids = [(w["collection"], w["doc_id"]) for w in b]
+        self.assertIn(("datasets", "billing_meta"), ids)
+        self.assertNotIn(("datasets", "jobs"), ids)
+        self.assertNotIn(("datasets", "jobs_meta"), ids)
 
     def test_t3_index_verbatim(self):
         self.stage2()
@@ -95,6 +109,12 @@ class CreateTests(unittest.TestCase):
         d = load(self.out, "dataset-billing.json")
         self.assertEqual(d["source"], {"kind": "file", "url": "/_blob/u0", "name": "billing.json"})
         self.assertEqual(d["updated"], {"at": "2026-10-03T12:00:00Z", "by": "actions-usage-dashboard"})
+        # --asset-url は「rows → その meta」の交互の順に対応する。
+        want = [("billing", "u0", "billing.json"), ("billing_meta", "u1", "meta-billing.json"),
+                ("jobs", "u2", "jobs.json"), ("jobs_meta", "u3", "meta-jobs.json")]
+        for did, u, name in want:
+            self.assertEqual(load(self.out, "dataset-%s.json" % did)["source"],
+                             {"kind": "file", "url": "/_blob/" + u, "name": name}, did)
 
     def test_t5_params(self):
         self.stage2()
@@ -142,7 +162,22 @@ class CreateTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(stale))
         self.assertFalse(os.path.exists(os.path.join(self.out, "dataset-billing.json")))
-        self.assertLess(out.index(os.path.abspath(BILLING)), out.index(os.path.abspath(JOBS)))
+        mb = os.path.join(os.path.realpath(self.out), "meta-billing.json")
+        mj = os.path.join(os.path.realpath(self.out), "meta-jobs.json")
+        order = [out.index(x) for x in (os.path.abspath(BILLING), mb, os.path.abspath(JOBS), mj)]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(load(self.out, "meta-billing.json")[0],
+                         {"source": "billing", "kind": "since", "value": "2026-09"})
+        self.assertTrue(os.path.exists(mj))
+
+    def test_asset_url_count_must_match_uploads(self):
+        for n in (1, 2, 3):
+            a = base(self.out)
+            for i in range(n):
+                a += ["--asset-url", "/_blob/u%d" % i]
+            rc, _, _ = run(a)
+            self.assertEqual(rc, 1, n)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")))
 
     def test_t12_output_small(self):
         rc, out, _ = self.stage2()
@@ -159,7 +194,8 @@ class UpdateTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def upd(self, ifv=("billing=3", "jobs=5"), urls=("/_blob/n0", "/_blob/n1")):
+    def upd(self, ifv=("billing=3", "billing_meta=4", "jobs=5", "jobs_meta=6"),
+            urls=("/_blob/n0", "/_blob/n1", "/_blob/n2", "/_blob/n3")):
         a = base(self.out) + ["--update"]
         for u in urls:
             a += ["--asset-url", u]
@@ -168,13 +204,14 @@ class UpdateTests(unittest.TestCase):
         return run(a)
 
     def test_t8_update_changes_two_fields(self):
-        run(base(self.out) + ["--asset-url", "/_blob/o0", "--asset-url", "/_blob/o1"])
+        run(base(self.out) + urls_for(2, "o"))
         created = load(self.out, "dataset-billing.json")
         rc, _, err = self.upd()
         self.assertEqual(rc, 0, err)
         b = load(self.out, "batch.json")
-        self.assertEqual([w["op"] for w in b], ["update", "update"])
-        self.assertEqual([w["if_version"] for w in b], [3, 5])
+        self.assertEqual([w["op"] for w in b], ["update"] * 4)
+        self.assertEqual([w["doc_id"] for w in b], ["billing", "billing_meta", "jobs", "jobs_meta"])
+        self.assertEqual([w["if_version"] for w in b], [3, 4, 5, 6])
         self.assertTrue(all(w["collection"] == "datasets" for w in b))
         upd = load(self.out, "dataset-billing.update.json")
         self.assertEqual(set(upd), {"source", "updated"})
@@ -189,25 +226,30 @@ class UpdateTests(unittest.TestCase):
     def jobs_only(self, *extra):
         return run(base(self.out, (JOBS,)) + ["--update"] + list(extra))
 
+    JOBS_URLS = ["--asset-url", "/_blob/n0", "--asset-url", "/_blob/n1"]
+
     def test_jobs_only_update(self):
-        rc, out, err = self.jobs_only("--asset-url", "/_blob/n0", "--if-version", "jobs=5")
+        rc, out, err = self.jobs_only(*self.JOBS_URLS, "--if-version", "jobs=5", "--if-version", "jobs_meta=6")
         self.assertEqual(rc, 0, err)
         b = load(self.out, "batch.json")
-        self.assertEqual([(w["op"], w["collection"], w["doc_id"]) for w in b], [("update", "datasets", "jobs")])
-        self.assertEqual(b[0]["if_version"], 5)
+        self.assertEqual([(w["op"], w["collection"], w["doc_id"]) for w in b],
+                         [("update", "datasets", "jobs"), ("update", "datasets", "jobs_meta")])
+        self.assertEqual([w["if_version"] for w in b], [5, 6])
         upd = load(self.out, "dataset-jobs.update.json")
         self.assertEqual(set(upd), {"source", "updated"})
         self.assertEqual(upd["source"]["url"], "/_blob/n0")
-        for n in ("dataset-billing.update.json", "dash-meta.json", "index.json"):
+        self.assertEqual(load(self.out, "dataset-jobs_meta.update.json")["source"]["name"], "meta-jobs.json")
+        for n in ("dataset-billing.update.json", "dataset-billing_meta.update.json", "dash-meta.json", "index.json"):
             self.assertFalse(os.path.exists(os.path.join(self.out, n)), n)
         self.assertNotIn("example-org/", out)
 
     def test_jobs_only_add(self):
-        rc, _, err = self.jobs_only("--asset-url", "/_blob/n0", "--add-dataset", "jobs")
+        rc, _, err = self.jobs_only(*self.JOBS_URLS, "--add-dataset", "jobs")
         self.assertEqual(rc, 0, err)
         b = load(self.out, "batch.json")
-        self.assertEqual([(w["op"], w["doc_id"]) for w in b], [("set", "jobs")])
+        self.assertEqual([(w["op"], w["doc_id"]) for w in b], [("set", "jobs"), ("set", "jobs_meta")])
         self.assertNotIn("if_version", b[0])
+        self.assertNotIn("if_version", b[1])
         self.assertEqual(set(load(self.out, "dataset-jobs.json")), {"title", "description", "source", "updated"})
 
     def test_jobs_only_stage1(self):
@@ -220,11 +262,16 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn("billing.json", out)
 
     def test_jobs_only_invalid(self):
+        u = self.JOBS_URLS
         cases = [
-            ["--asset-url", "/_blob/n0", "--if-version", "billing=3"],
-            ["--asset-url", "/_blob/n0", "--if-version", "jobs=5", "--if-version", "billing=3"],
-            ["--asset-url", "/_blob/n0"],
-            ["--asset-url", "/_blob/n0", "--add-dataset", "jobs", "--if-version", "jobs=1"],
+            u + ["--if-version", "billing=3"],
+            u + ["--if-version", "jobs=5", "--if-version", "jobs_meta=6", "--if-version", "billing=3"],
+            u + ["--if-version", "jobs=5"],
+            u + ["--if-version", "jobs_meta=6"],
+            u,
+            u + ["--add-dataset", "jobs", "--if-version", "jobs=1"],
+            u + ["--add-dataset", "jobs", "--if-version", "jobs_meta=1"],
+            ["--asset-url", "/_blob/n0", "--if-version", "jobs=5", "--if-version", "jobs_meta=6"],
         ]
         for c in cases:
             rc, _, _ = self.jobs_only(*c)
@@ -232,18 +279,19 @@ class UpdateTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")), c)
 
     def test_create_requires_billing(self):
-        rc, _, err = run(base(self.out, (JOBS,)) + ["--asset-url", "/_blob/u0"])
+        rc, _, err = run(base(self.out, (JOBS,)) + urls_for(1))
         self.assertEqual(rc, 1)
         self.assertIn("billing", err)
         for n in ("index.json", "batch.json"):
             self.assertFalse(os.path.exists(os.path.join(self.out, n)), n)
 
     def test_add_dataset_choices_fixed(self):
-        rc, _, _ = self.jobs_only("--add-dataset", "warnings", "--asset-url", "/_blob/n0")
+        rc, _, _ = self.jobs_only("--add-dataset", "warnings", *self.JOBS_URLS)
         self.assertEqual(rc, 2)
         with open(SCRIPT, encoding="utf-8") as f:
             src = f.read()
-        self.assertRegex(src, r'add_argument\("--add-dataset"[^)]*choices=\["jobs"\]')
+        self.assertRegex(src, r'add_argument\("--add-dataset"[^)]*choices=\["jobs", "billing_meta", "jobs_meta"\]')
+        self.assertEqual(bd.ALL_IDS, ("billing", "billing_meta", "jobs", "jobs_meta"))
 
     def test_t9_bad_if_version(self):
         for ifv in [("billing=3",), ("billing=3", "billing=4"), ("billing=x", "jobs=1"),
@@ -259,34 +307,58 @@ class UpdateTests(unittest.TestCase):
         return run(a + list(extra))
 
     def test_add_jobs_to_billing_only_dashboard(self):
-        rc, _, err = run(base(self.out, (BILLING,)) + ["--asset-url", "/_blob/o0"])
+        rc, _, err = run(base(self.out, (BILLING,)) + urls_for(1, "o"))
         self.assertEqual(rc, 0, err)
-        rc, _, err = self.add(["--if-version", "billing=3", "--add-dataset", "jobs"])
+        rc, _, err = self.add(["--if-version", "billing=3", "--if-version", "billing_meta=4",
+                               "--add-dataset", "jobs"], urls=("/_blob/n0", "/_blob/n1", "/_blob/n2", "/_blob/n3"))
         self.assertEqual(rc, 0, err)
         b = load(self.out, "batch.json")
         self.assertEqual([(w["op"], w["collection"], w["doc_id"]) for w in b],
-                         [("update", "datasets", "billing"), ("set", "datasets", "jobs")])
-        self.assertEqual(b[0]["if_version"], 3)
-        self.assertEqual(set(b[1]), {"op", "collection", "doc_id", "file_path"})
+                         [("update", "datasets", "billing"), ("update", "datasets", "billing_meta"),
+                          ("set", "datasets", "jobs"), ("set", "datasets", "jobs_meta")])
+        self.assertEqual([b[0]["if_version"], b[1]["if_version"]], [3, 4])
+        self.assertEqual(set(b[2]), {"op", "collection", "doc_id", "file_path"})
         real = os.path.realpath(self.out)
         for w in b:
             self.assertTrue(os.path.isabs(w["file_path"]))
             self.assertTrue(w["file_path"].startswith(real + os.sep))
         jd = load(self.out, "dataset-jobs.json")
         self.assertEqual(set(jd), {"title", "description", "source", "updated"})
-        self.assertEqual(jd["source"], {"kind": "file", "url": "/_blob/n1", "name": "jobs.json"})
+        self.assertEqual(jd["source"], {"kind": "file", "url": "/_blob/n2", "name": "jobs.json"})
+        self.assertEqual(load(self.out, "dataset-jobs_meta.json")["source"]["url"], "/_blob/n3")
         self.assertEqual(jd["updated"]["at"], "2026-10-03T12:00:00Z")
         self.assertEqual(set(load(self.out, "dataset-billing.update.json")), {"source", "updated"})
         self.assertFalse(os.path.exists(os.path.join(self.out, "dataset-jobs.update.json")))
 
+    def test_migrate_existing_dashboard_with_add_meta(self):
+        """meta なしで作られた既存ダッシュボードの移行: rows は update、meta は set。"""
+        rc, _, err = self.add(["--if-version", "billing=3", "--if-version", "jobs=5",
+                               "--add-dataset", "billing_meta", "--add-dataset", "jobs_meta"],
+                              urls=("/_blob/n0", "/_blob/n1", "/_blob/n2", "/_blob/n3"))
+        self.assertEqual(rc, 0, err)
+        b = load(self.out, "batch.json")
+        self.assertEqual([(w["op"], w["doc_id"], w.get("if_version")) for w in b],
+                         [("update", "billing", 3), ("set", "billing_meta", None),
+                          ("update", "jobs", 5), ("set", "jobs_meta", None)])
+
+    def test_add_meta_without_rows_rejected(self):
+        rc, _, _ = self.add(["--if-version", "billing=3", "--if-version", "billing_meta=4",
+                             "--add-dataset", "jobs_meta"], rows=(BILLING,), urls=("/_blob/n0", "/_blob/n1"))
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")))
+
     def test_add_dataset_invalid(self):
+        two = ("/_blob/n0", "/_blob/n1")
         cases = [
             (["--add-dataset", "jobs"], dict(update=False)),
-            (["--if-version", "billing=1", "--add-dataset", "jobs"], dict(rows=(BILLING,), urls=("/_blob/n0",))),
+            (["--if-version", "billing=1", "--if-version", "billing_meta=2", "--add-dataset", "jobs"],
+             dict(rows=(BILLING,), urls=two)),
             (["--add-dataset", "jobs", "--if-version", "jobs=1", "--if-version", "billing=1"], {}),
-            (["--add-dataset", "jobs", "--add-dataset", "jobs", "--if-version", "billing=1"], {}),
+            (["--add-dataset", "jobs", "--add-dataset", "jobs", "--if-version", "billing=1",
+              "--if-version", "billing_meta=2"], {}),
             (["--add-dataset", "billing", "--if-version", "jobs=1"], {}),
             (["--add-dataset", "jobs"], {}),
+            (["--add-dataset", "jobs", "--if-version", "billing=1"], {}),
         ]
         for extra, kw in cases:
             with tempfile.TemporaryDirectory() as d:
@@ -300,10 +372,14 @@ class UpdateTests(unittest.TestCase):
         for n in ("batch.json", "dataset-jobs.json"):
             with open(os.path.join(self.out, n), "w") as f:
                 f.write("[]")
+        with open(os.path.join(self.out, "dataset-jobs_meta.json"), "w") as f:
+            f.write("[]")
         rc, out, err = self.add(["--add-dataset", "jobs"], urls=())
         self.assertEqual(rc, 0, err)
         self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")))
         self.assertFalse(os.path.exists(os.path.join(self.out, "dataset-jobs.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.out, "dataset-jobs_meta.json")))
+        self.assertIn("meta-jobs.json", out)
         self.assertIn("billing.json", out)
         self.assertIn("jobs.json", out)
         rc, _, _ = self.add(["--add-dataset", "jobs"], rows=(BILLING,), urls=())
@@ -320,7 +396,9 @@ class RefreshTemplateTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def go(self, extra, rows=(BILLING, JOBS), urls=("/_blob/n0", "/_blob/n1"), update=True):
+    FOUR = ("/_blob/n0", "/_blob/n1", "/_blob/n2", "/_blob/n3")
+
+    def go(self, extra, rows=(BILLING, JOBS), urls=FOUR, update=True):
         a = base(self.out, rows) + (["--update"] if update else [])
         for u in urls:
             a += ["--asset-url", u]
@@ -334,12 +412,13 @@ class RefreshTemplateTests(unittest.TestCase):
         return os.path.exists(os.path.join(self.out, n))
 
     def test_refresh_template_batch(self):
-        rc, out, err = self.go(["--if-version", "billing=3", "--if-version", "jobs=5",
-                                "--refresh-template", "--template-if-version", "7"])
+        rc, out, err = self.go(IFV_BOTH + ["--refresh-template", "--template-if-version", "7"])
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.shape(), [
             ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
+            ("update", "datasets", "billing_meta", 4, "dataset-billing_meta.update.json"),
             ("update", "datasets", "jobs", 5, "dataset-jobs.update.json"),
+            ("update", "datasets", "jobs_meta", 6, "dataset-jobs_meta.update.json"),
             ("set", "files", "index.html", 7, "index.json")])
         last = load(self.out, "batch.json")[-1]
         self.assertEqual(set(last), {"op", "collection", "doc_id", "file_path", "if_version"})
@@ -350,31 +429,32 @@ class RefreshTemplateTests(unittest.TestCase):
         self.assertNotIn("<html", out.lower())
 
     def test_refresh_template_jobs_only(self):
-        rc, _, err = self.go(["--if-version", "jobs=5", "--refresh-template", "--template-if-version", "2"],
-                             rows=(JOBS,), urls=("/_blob/n0",))
+        rc, _, err = self.go(["--if-version", "jobs=5", "--if-version", "jobs_meta=6", "--refresh-template",
+                              "--template-if-version", "2"], rows=(JOBS,), urls=("/_blob/n0", "/_blob/n1"))
         self.assertEqual(rc, 0, err)
         self.assertEqual([x[:3] for x in self.shape()],
-                         [("update", "datasets", "jobs"), ("set", "files", "index.html")])
+                         [("update", "datasets", "jobs"), ("update", "datasets", "jobs_meta"),
+                          ("set", "files", "index.html")])
 
     def test_refresh_template_with_add_dataset(self):
-        rc, _, err = self.go(["--if-version", "billing=3", "--add-dataset", "jobs",
+        rc, _, err = self.go(["--if-version", "billing=3", "--if-version", "billing_meta=4", "--add-dataset", "jobs",
                               "--refresh-template", "--template-if-version", "4"])
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.shape(), [
             ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
+            ("update", "datasets", "billing_meta", 4, "dataset-billing_meta.update.json"),
             ("set", "datasets", "jobs", None, "dataset-jobs.json"),
+            ("set", "datasets", "jobs_meta", None, "dataset-jobs_meta.json"),
             ("set", "files", "index.html", 4, "index.json")])
 
     def test_refresh_template_invalid(self):
         cases = [
-            (["--refresh-template"], dict(update=False, urls=("/_blob/n0", "/_blob/n1"))),
+            (["--refresh-template"], dict(update=False)),
             (["--template-if-version", "3"], dict(update=False)),
-            (["--if-version", "billing=3", "--if-version", "jobs=5", "--template-if-version", "3"], {}),
-            (["--if-version", "billing=3", "--if-version", "jobs=5", "--refresh-template"], {}),
-            (["--if-version", "billing=3", "--if-version", "jobs=5", "--refresh-template",
-              "--template-if-version", "0"], {}),
-            (["--if-version", "billing=3", "--if-version", "jobs=5", "--refresh-template",
-              "--template-if-version", "x"], {}),
+            (IFV_BOTH + ["--template-if-version", "3"], {}),
+            (IFV_BOTH + ["--refresh-template"], {}),
+            (IFV_BOTH + ["--refresh-template", "--template-if-version", "0"], {}),
+            (IFV_BOTH + ["--refresh-template", "--template-if-version", "x"], {}),
         ]
         for extra, kw in cases:
             with tempfile.TemporaryDirectory() as d:
@@ -392,8 +472,7 @@ class RefreshTemplateTests(unittest.TestCase):
         with open(big, "w", encoding="utf-8") as f:
             f.write("a" * (256 * 1024 + 1))
         out = os.path.join(self.out, "o")
-        for urls, extra in ((("/_blob/n0", "/_blob/n1"), ["--if-version", "billing=3", "--if-version", "jobs=5",
-                                                         "--template-if-version", "2"]), ((), [])):
+        for urls, extra in ((self.FOUR, IFV_BOTH + ["--template-if-version", "2"]), ((), [])):
             a = base(out) + ["--update", "--refresh-template"] + extra
             for u in urls:
                 a += ["--asset-url", u]
@@ -420,9 +499,7 @@ class RefreshTemplateTests(unittest.TestCase):
         import io
         from unittest import mock
         out = os.path.join(self.out, "o")
-        a = base(out) + ["--update", "--refresh-template", "--template-if-version", "2",
-                         "--if-version", "billing=3", "--if-version", "jobs=5",
-                         "--asset-url", "/_blob/n0", "--asset-url", "/_blob/n1"]
+        a = base(out) + ["--update", "--refresh-template", "--template-if-version", "2"] + IFV_BOTH + urls_for(2, "n")
         buf = io.StringIO()
         with mock.patch.object(bd, "MAX_BATCH_BYTES", 1000), contextlib.redirect_stderr(buf):
             rc = bd.main(a)
@@ -432,14 +509,19 @@ class RefreshTemplateTests(unittest.TestCase):
 
     def test_default_update_batch_unchanged(self):
         cases = [
-            (dict(), ["--if-version", "billing=3", "--if-version", "jobs=5"], [
+            (dict(), IFV_BOTH, [
                 ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
-                ("update", "datasets", "jobs", 5, "dataset-jobs.update.json")]),
-            (dict(rows=(JOBS,), urls=("/_blob/n0",)), ["--if-version", "jobs=5"], [
-                ("update", "datasets", "jobs", 5, "dataset-jobs.update.json")]),
-            (dict(), ["--if-version", "billing=3", "--add-dataset", "jobs"], [
+                ("update", "datasets", "billing_meta", 4, "dataset-billing_meta.update.json"),
+                ("update", "datasets", "jobs", 5, "dataset-jobs.update.json"),
+                ("update", "datasets", "jobs_meta", 6, "dataset-jobs_meta.update.json")]),
+            (dict(rows=(JOBS,), urls=("/_blob/n0", "/_blob/n1")), ["--if-version", "jobs=5", "--if-version", "jobs_meta=6"], [
+                ("update", "datasets", "jobs", 5, "dataset-jobs.update.json"),
+                ("update", "datasets", "jobs_meta", 6, "dataset-jobs_meta.update.json")]),
+            (dict(), ["--if-version", "billing=3", "--if-version", "billing_meta=4", "--add-dataset", "jobs"], [
                 ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
-                ("set", "datasets", "jobs", None, "dataset-jobs.json")]),
+                ("update", "datasets", "billing_meta", 4, "dataset-billing_meta.update.json"),
+                ("set", "datasets", "jobs", None, "dataset-jobs.json"),
+                ("set", "datasets", "jobs_meta", None, "dataset-jobs_meta.json")]),
         ]
         for kw, extra, want in cases:
             with tempfile.TemporaryDirectory() as d:
@@ -478,7 +560,7 @@ class ValidationTests(unittest.TestCase):
         b = self.doc("b.json")
         self.fails(base(self.out, (b, JOBS)) + ["--asset-url", "/_blob/a"])
         for u in ["https://evil.example/x", "/_blob/../x", "/_blob/a?b"]:
-            self.fails(base(self.out, (b,)) + ["--asset-url", u])
+            self.fails(base(self.out, (b,)) + ["--asset-url", u, "--asset-url", "/_blob/ok"])
         self.fails(base(self.out, (self.doc("o.json", org="other-org"),)))
         self.fails(base(self.out, (b, self.doc("b2.json"))))
         self.fails(base(self.out, (JOBS,)))
@@ -499,15 +581,68 @@ class ValidationTests(unittest.TestCase):
         jp = os.path.join(self.d, "jobs-est.json")
         with open(jp, "w") as f:
             json.dump(j, f)
-        rc, _, err = run(base(self.out, (BILLING, jp)) + ["--asset-url", "/_blob/u0", "--asset-url", "/_blob/u1"])
+        rc, _, err = run(base(self.out, (BILLING, jp)) + urls_for(2))
         self.assertEqual(rc, 0, err)
         self.assertTrue(os.path.exists(os.path.join(self.out, "batch.json")))
+        # estimate の中身は渡さず、有無（"true"）だけを meta 行にする。
+        meta = load(self.out, "meta-jobs.json")
+        self.assertIn({"source": "jobs", "kind": "estimate", "value": "true"}, meta)
+        self.assertNotIn("sample_mean_per_workflow", json.dumps(meta))
+        self.assertIn({"source": "jobs", "kind": "warning", "value": "推定値を含む: テスト"}, meta)
 
     def test_t13_no_network_imports(self):
         with open(SCRIPT, encoding="utf-8") as f:
             src = f.read()
         for m in ("subprocess", "urllib", "socket", "http"):
             self.assertIsNone(re.search(r"^\s*(import|from)\s+%s\b" % m, src, re.M), m)
+
+
+class MetaRowsTests(unittest.TestCase):
+    """付帯情報の行（ページの withMeta が読む契約）の生成。"""
+
+    def doc(self, **over):
+        d = {"source": "jobs", "since": "2026-10-01", "until": "2026-10-03"}
+        d.update(over)
+        return d
+
+    def test_since_until_only(self):
+        self.assertEqual(bd.build_meta_rows(self.doc()), [
+            {"source": "jobs", "kind": "since", "value": "2026-10-01"},
+            {"source": "jobs", "kind": "until", "value": "2026-10-03"}])
+
+    def test_warnings_cleaned_and_capped(self):
+        ws = ["a\x1b[31mb", 5, None, "", "x" * 400] + ["w%d" % i for i in range(30)]
+        rows = bd.build_meta_rows(self.doc(warnings=ws))
+        w = [r["value"] for r in rows if r["kind"] == "warning"]
+        self.assertEqual(len(w), 20)
+        self.assertEqual(w[0], "a[31mb")
+        self.assertEqual(w[1], "x" * 300)
+        self.assertEqual(w[2], "w0")
+        for r in rows:
+            self.assertEqual(set(r), {"source", "kind", "value"})
+            self.assertIsInstance(r["value"], str)
+
+    def test_bad_warnings_shape_gives_no_warning_rows(self):
+        for bad in (None, "text", {"a": 1}, 3):
+            rows = bd.build_meta_rows(self.doc(warnings=bad))
+            self.assertEqual([r["kind"] for r in rows], ["since", "until"], bad)
+        rows = bd.build_meta_rows(self.doc())
+        self.assertEqual([r["kind"] for r in rows], ["since", "until"])
+
+    def test_estimate_only_when_dict(self):
+        kinds = lambda d: [r["kind"] for r in bd.build_meta_rows(self.doc(estimate=d))]  # noqa: E731
+        self.assertEqual(kinds({"method": "m"}), ["since", "until", "estimate"])
+        for bad in ([], None, "x", 3, True):
+            self.assertEqual(kinds(bad), ["since", "until"], bad)
+
+    def test_meta_file_is_row_array(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, _, err = run(base(d) + urls_for(2))
+            self.assertEqual(rc, 0, err)
+            for name in ("meta-billing.json", "meta-jobs.json"):
+                rows = load(d, name)
+                self.assertIsInstance(rows, list)
+                self.assertTrue(all(set(r) == {"source", "kind", "value"} for r in rows))
 
 
 class CommonParityTest(unittest.TestCase):
@@ -573,11 +708,25 @@ class CollisionTests(unittest.TestCase):
                 data = f.read()
             with open(rows, "wb") as f:
                 f.write(data)
-            for extra in ([], ["--asset-url", "/_blob/u0"]):
+            for extra in ([], ["--asset-url", "/_blob/u0", "--asset-url", "/_blob/u1"]):
                 rc, _, _ = run(["--org", "example-org", "--out-dir", d, "--rows", rows] + extra)
                 self.assertEqual(rc, 1)
                 with open(rows, "rb") as f:
                     self.assertEqual(f.read(), data)
+
+    def test_rows_colliding_with_meta_output_rejected(self):
+        for name in ("meta-billing.json", "meta-jobs.json", "dataset-jobs_meta.json",
+                     "dataset-billing_meta.update.json"):
+            with tempfile.TemporaryDirectory() as d:
+                rows = os.path.join(d, name)
+                with open(BILLING, "rb") as f:
+                    data = f.read()
+                with open(rows, "wb") as f:
+                    f.write(data)
+                rc, _, _ = run(["--org", "example-org", "--out-dir", d, "--rows", rows])
+                self.assertEqual(rc, 1, name)
+                with open(rows, "rb") as f:
+                    self.assertEqual(f.read(), data, name)
 
     def test_update_stage1_removes_stale_batch(self):
         with tempfile.TemporaryDirectory() as d:
