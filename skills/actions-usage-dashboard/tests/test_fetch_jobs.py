@@ -292,24 +292,24 @@ class EstimateAllocation(unittest.TestCase):
     """2 段階の抜き取り配分（Issue #205）。本番の plan_samples / pilot_samples / allocate_samples を使う。"""
 
     def test_pilot_samples(self):
-        for n, k, want in ((1, 3, 1), (5, 3, 2), (5, 2, 2), (5, 1, 1), (2, 5, 2)):
+        for n, k, want in ((1, 3, 1), (5, 3, 3), (5, 2, 2), (5, 1, 1), (2, 5, 2), (9, 5, 3)):
             _l, g = _mk_groups({("r", 1): n}, k)
             self.assertEqual(len(g[("r", 1)]["pilot"]), want, (n, k))
         _l, g = _mk_groups({("r", 1): 9}, 3)
-        self.assertEqual(g[("r", 1)]["pilot"], {1000, 1008})
+        self.assertEqual(g[("r", 1)]["pilot"], {1000, 1004, 1008})
         _l, g = _mk_groups({("r", 1): 9}, 1)
         self.assertEqual(g[("r", 1)]["pilot"], g[("r", 1)]["sample"])
 
     def test_zero_group_cut_and_floor(self):
         k = 4
-        listed, g = _mk_groups({("a", 1): 20, ("b", 1): 20, ("c", 1): 20, ("d", 1): 30, ("e", 1): 3}, k)
+        listed, g = _mk_groups({("a", 1): 20, ("b", 1): 20, ("c", 1): 20, ("d", 1): 30, ("e", 1): 4}, k)
         cache = {}
-        for key in (("a", 1), ("c", 1), ("d", 1)):  # a: 両端 0 分、c: 片端だけ 0 分、d: 両端とも 0 分でない
+        for key in (("a", 1), ("c", 1), ("d", 1)):  # a: 3 run とも 0 分、c: 末尾だけ 0 分でない、d: 0 分なし
             ids = sorted(g[key]["pilot"])
-            cache[str(ids[0])] = _ent(0)
-            cache[str(ids[1])] = _ent(0 if key == ("a", 1) else 5)
-        cache[str(sorted(g[("c", 1)]["pilot"])[0])] = _ent(0)
-        # b は試し取りが skipped、e は n=3 で試し取り 2 run が 0 分（残り 1 run があり floor 3 > pilot 2）
+            cache[str(ids[0])] = _ent(0 if key != ("d", 1) else 5)
+            cache[str(ids[1])] = _ent(0 if key != ("d", 1) else 5)
+            cache[str(ids[2])] = _ent(0 if key == ("a", 1) else 5)
+        # b は試し取りが skipped、e は n=4 で試し取り 3 run が 0 分（残り 1 run があり floor 4 > pilot 3）
         skipped = {str(r): {"attempt": 1} for r in g[("b", 1)]["pilot"]}
         for r in g[("e", 1)]["pilot"]:
             cache[str(r)] = _ent(0)
@@ -322,9 +322,10 @@ class EstimateAllocation(unittest.TestCase):
         for key in (("b", 1), ("c", 1), ("d", 1)):
             self.assertGreaterEqual(len(g[key]["sample"]), min(len(g[key]["pool"]), k))
             self.assertTrue(g[key]["pilot"] <= g[key]["sample"])
-        # 浮いた予算 (4-2) + (3-2) = 3 は run 数 20:20:30 で b/c/d へ比例（最大剰余で d が +2 ではなく配分）
-        self.assertEqual(info["extra"], 3)
-        self.assertEqual(sum(len(x["sample"]) for x in g.values()), info["budget"] - 3 + 3)
+        # 浮いた予算 (4-3) + (4-3) = 2 は run 数 20:20:30 で b/c/d へ比例。打ち切った run は (20-3) + (4-3)
+        self.assertEqual(info["extra"], 2)
+        self.assertEqual(info["zero_runs"], 18)
+        self.assertEqual(sum(len(x["sample"]) for x in g.values()), info["budget"])
         # 試し取りが未取得なら打ち切らない
         _l, g2 = _mk_groups({("a", 1): 20}, k)
         fj.allocate_samples(g2, k, {}, {})
@@ -341,17 +342,17 @@ class EstimateAllocation(unittest.TestCase):
         self.assertLessEqual(sum(len(x["sample"]) for x in g.values()), budget)
         for key, n in sizes.items():
             self.assertLessEqual(len(g[key]["sample"]), n)
-        self.assertEqual(len(g[("z", 1)]["sample"]), 2)
-        # 浮いた 3 run は 6:30:90 に比例し、大きい組が最も多く受け取る
+        self.assertEqual(len(g[("z", 1)]["sample"]), 3)
+        # 浮いた 2 run は 6:30:90 に比例し、大きい組が最も多く受け取る
         gain = {key: len(g[key]["sample"]) - min(n, k) for key, n in sizes.items() if key != ("z", 1)}
-        self.assertEqual(sum(gain.values()), 3)
+        self.assertEqual(sum(gain.values()), 2)
         self.assertGreaterEqual(gain[("l", 1)], gain[("m", 1)])
         # 全組が上限に達する場合は余りを使わない（上限 n=5 の組だけ・K=5）
         _l, g3 = _mk_groups({("z", 1): 8, ("t", 1): 6}, 6)
         c3 = {str(r): _ent(0) for r in g3[("z", 1)]["pilot"]}
         fj.allocate_samples(g3, 6, c3, {})
         self.assertEqual(len(g3[("t", 1)]["sample"]), 6)
-        self.assertEqual(len(g3[("z", 1)]["sample"]), 2)
+        self.assertEqual(len(g3[("z", 1)]["sample"]), 3)
 
     def test_deterministic_and_nested(self):
         k = 4
@@ -372,8 +373,8 @@ class EstimateAllocation(unittest.TestCase):
                 self.assertTrue(x["pilot"] <= x["sample"])
         self.assertEqual(outs[0], outs[1])
 
-    def test_k_le_2_matches_uniform(self):
-        for k in (1, 2):
+    def test_k_le_3_matches_uniform(self):
+        for k in (1, 2, 3):
             sizes = {("a", 1): 12, ("b", 2): 40, ("c", 3): 1}
             listed, g = _mk_groups(sizes, k)
             uni = fj.plan_samples(listed, k)
@@ -422,7 +423,7 @@ class EstimateAllocation(unittest.TestCase):
         return est + got
 
     def test_total_error_smaller_with_same_calls(self):
-        k = 3
+        k = 5
         errs_old, errs_new = [], []
         for seed in range(15):
             listed, truth = self._population(seed)
@@ -444,6 +445,48 @@ class EstimateAllocation(unittest.TestCase):
             errs_new.append(abs(self._total(gn, cn, truth) - actual))
         self.assertLess(sum(errs_new) / len(errs_new), sum(errs_old) / len(errs_old),
                         (errs_old, errs_new))
+
+
+    def test_ends_zero_middle_positive_not_cut(self):
+        """Issue #218: 両端 0 分・中間 > 0 分の組を 0 分として打ち切らない。3 run とも 0 分の組は打ち切る。"""
+        for k in (4, 5):
+            listed, g = _mk_groups({("mid", 1): 20, ("zero", 1): 20}, k)
+            cache = {}
+            ids = sorted(g[("mid", 1)]["pilot"])
+            cache[str(ids[0])] = _ent(0)
+            cache[str(ids[1])] = _ent(7)  # 中央の試し取りだけセルフホスト分あり
+            cache[str(ids[2])] = _ent(0)
+            cache.update({str(r): _ent(0) for r in g[("zero", 1)]["pilot"]})
+            info = fj.allocate_samples(g, k, cache, {})
+            self.assertEqual(info["zero_groups"], 1, k)
+            self.assertEqual(info["zero_runs"], 17, k)
+            self.assertGreaterEqual(len(g[("mid", 1)]["sample"]), k)
+            self.assertEqual(g[("zero", 1)]["sample"], g[("zero", 1)]["pilot"])
+            full = {str(r): _ent(0) for r in g[("mid", 1)]["sample"]}
+            full[str(ids[1])] = _ent(7)
+            ent, _c = fj.estimate_entries(g, dict(cache, **full), {})
+            self.assertGreater(sum(a["minutes"] for e in ent for a in e["agg"]), 0, k)
+
+    def test_nested_and_budget_sweep(self):
+        """試し取りは最終の抜き取りに含まれ、大きさは floor + extra、合計は予算以下で、同じ入力は同じ結果。"""
+        for n in range(4, 31):
+            for k in range(3, min(n, 20) + 1):
+                sizes = {("z", 1): n, ("p", 1): n + 7, ("q", 2): 50}
+                listed, g = _mk_groups(sizes, k)
+                cache = {str(r): _ent(0) for r in g[("z", 1)]["pilot"]}
+                info = fj.allocate_samples(g, k, cache, {})
+                first = {key: set(x["sample"]) for key, x in g.items()}
+                info2 = fj.allocate_samples(g, k, cache, {})
+                self.assertEqual(info, info2)
+                self.assertEqual(first, {key: set(x["sample"]) for key, x in g.items()})
+                for key, x in g.items():
+                    self.assertTrue(x["pilot"] <= x["sample"], (n, k, key))
+                    self.assertLessEqual(len(x["sample"]), len(x["pool"]), (n, k, key))
+                    if key != ("z", 1) or k == 3:  # 打ち切った 0 分組は下限の対象外（K=3 は打ち切らない）
+                        self.assertGreaterEqual(len(x["sample"]), min(len(x["pool"]), k), (n, k, key))
+                self.assertLessEqual(sum(len(x["sample"]) for x in g.values()), info["budget"], (n, k))
+                extra_total = sum(len(g[key]["sample"]) - min(sz, k) for key, sz in sizes.items() if key != ("z", 1))
+                self.assertEqual(extra_total, info["extra"], (n, k))
 
 
 class Cli(unittest.TestCase):
@@ -1098,7 +1141,8 @@ class EstimateCli(unittest.TestCase):
         doc = self.load_out()
         self.assertEqual(doc["estimate"], {"method": "sample_mean_per_workflow", "sample_runs": 3,
                                            "sampled_runs": 12, "estimated_runs": 24, "groups": 4,
-                                           "unestimated_runs": 0, "budget_runs": 12, "zero_groups": 0})
+                                           "unestimated_runs": 0, "budget_runs": 12, "zero_groups": 0,
+                                           "zero_runs": 0})
         self.assertTrue(any(w.startswith("推定値を含む") for w in doc["warnings"]))
         self.assertLessEqual(len(r.stdout.splitlines()), 11)
         self.assertIn("推定:", r.stdout)
@@ -1154,7 +1198,7 @@ class EstimateCli(unittest.TestCase):
         return cfg
 
     def test_allocation_jobs_calls_bounded_and_zero_cut(self):
-        # Issue #205: 0 分の組は試し取りの 2 run で打ち切り、浮いた分を run 数の多い組へ回す
+        # Issue #205: 0 分の組は試し取りの 3 run（先頭・中央・末尾）で打ち切り、浮いた分を run 数の多い組へ回す
         self.cfg = self.make_alloc_cfg()
         self.write_cfg()
         r = self.run_cli(["--estimate", "--sample-runs", "4"])
@@ -1164,14 +1208,46 @@ class EstimateCli(unittest.TestCase):
         doc = self.load_out()
         self.assertEqual(doc["estimate"]["budget_runs"], budget)
         self.assertEqual(doc["estimate"]["zero_groups"], 2)
+        self.assertEqual(doc["estimate"]["zero_runs"], 12)
         cache = self.load_cache_file()
         fetched = {int(k) for k in cache["runs"]}
         for wf in (1, 2):
-            self.assertEqual(fetched & set(self.ids[wf]), {self.ids[wf][0], self.ids[wf][-1]})
+            ids = self.ids[wf]
+            self.assertEqual(fetched & set(ids), {ids[0], ids[4], ids[-1]})
         self.assertGreater(len(fetched & set(self.ids[3])), 4)
         self.assertEqual(len(jobs_calls), len(fetched))
         self.assertLessEqual(len(jobs_calls), budget)
         self.assertLessEqual(len(jobs_calls), 4 * len(self.sizes))
+        self.assertLessEqual(len(r.stdout.splitlines()), 11)
+        self.assertNotIn("alloc-repo", r.stdout)
+        self.assertFalse(any("alloc-repo" in w for w in doc["warnings"]))
+
+    def test_ends_hosted_middle_selfhosted_not_cut(self):
+        """Issue #218: 両端と中央の試し取りに 0 分でない run があれば、打ち切らずセルフホスト分を出す。"""
+        cfg = self.make_alloc_cfg()
+        wf, n = 4, 20
+        self.ids[wf] = []
+        for i in range(n):
+            rid = wf * 1000 + i
+            day = (TODAY - timedelta(days=19) + timedelta(days=i * 19 // n)).isoformat()
+            cfg["runs"]["alloc-repo"].append(run(rid, created=day + "T00:00:00Z", workflow_id=wf))
+            labels, grp = (["self-hosted"], "g") if 0 < i < n - 1 else (["ubuntu-latest"], "GitHub Actions")
+            cfg["jobs"][str(rid)] = [job(rid * 10, labels, grp, day + "T01:00:00+00:00", 5)]
+            self.ids[wf].append(rid)
+        self.sizes[wf] = n
+        self.cfg = cfg
+        self.write_cfg()
+        r = self.run_cli(["--estimate", "--sample-runs", "4"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = self.load_out()
+        est = doc["estimate"]
+        budget = sum(min(m, 4) for m in self.sizes.values())
+        jobs_calls = [c for c in self.calls() if "/jobs" in c]
+        self.assertEqual(est["budget_runs"], budget)
+        self.assertLessEqual(len(jobs_calls), budget)
+        self.assertEqual(est["zero_groups"], 2)  # wf 1, 2 だけ（wf 4 は中央がセルフホストで打ち切らない）
+        self.assertEqual(est["zero_runs"], 12)
+        self.assertGreater(sum(x["minutes"] for x in doc["rows"]), 40 * 5)
         self.assertLessEqual(len(r.stdout.splitlines()), 11)
         self.assertNotIn("alloc-repo", r.stdout)
         self.assertFalse(any("alloc-repo" in w for w in doc["warnings"]))
