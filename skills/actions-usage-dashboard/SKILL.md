@@ -102,10 +102,6 @@ fetch_jobs.py（セルフホスト分）の所要時間の目安。実測では�
 7. 書き込み: `batch.json` を Read し、`ArtifactData batch` の `writes` へ渡す。既存 dataset は source と updated だけが書き換わり、`--add-dataset` の dataset は全体を新規作成する（op: set。同じ batch に並ぶ）。`dash/params` などは変わらない。雛形を差し替えた場合は batch の末尾に `files/index.html` の op: set が並ぶ。版固定のエントリがある batch は全件か無しかで適用され、1 件でも版が合わなければ datasets も書かれない。jobs だけの更新では billing dataset は前回の内容と更新時刻のまま残る
 8. check 文書の確認と `summarize.py`: 作成フローの手順 9〜10 と同じ。jobs だけで summarize を実行すると billing の内訳が不明という警告が出る。必要なら前回の billing の rows を併せて渡す
 
-### 雛形の差し替え
-
-雛形（`templates/dashboard/index.html`）を直しても、datasets の更新だけでは既存ダッシュボードのページは変わらない（ページ本体は作成時にだけ書かれる）。新しい表示を既存ダッシュボードに反映したいときだけ `--refresh-template` を付ける。既定の更新はページに触れない。
-
 作成時に無かった jobs は、更新フローで `--add-dataset jobs` を付けて足す（billing も更新するなら同じ batch に入る）。
 
 `--add-dataset` が受け付けるのは `jobs` だけで、`warnings` など任意の dataset の追加には対応しない。理由は次のとおり。
@@ -113,6 +109,10 @@ fetch_jobs.py（セルフホスト分）の所要時間の目安。実測では�
 - 雛形は `warnings` dataset を文字列の配列として読む。一方、build_dashboard が検証する rows は fetch 出力の形（`{schema_version, source, org, rows, ...}`）で形が合わず、その配列を作るスクリプトも無い
 - fetch 出力の `warnings` は billing / jobs の dataset から雛形が既に表示するため、別 dataset にする必要が無い
 - dataset id は雛形・スクリプト・テストで固定の契約で、増やすには全部を変える必要がある。検証していない JSON を store へ送る経路も開く
+
+### 雛形の差し替え
+
+雛形（`templates/dashboard/index.html`）を直しても、datasets の更新だけでは既存ダッシュボードのページは変わらない（ページ本体は作成時にだけ書かれる）。新しい表示を既存ダッシュボードに反映したいときだけ `--refresh-template` を付ける。既定の更新はページに触れない。
 
 ## 検証
 
