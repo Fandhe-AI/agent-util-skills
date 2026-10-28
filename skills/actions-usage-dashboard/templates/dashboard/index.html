@@ -3,13 +3,15 @@
 
   役割: build_dashboard.py（呼び出し元）がこのファイルを無加工で埋め込み、datasets/billing
   （必須）と datasets/jobs（任意）、dash/params の既定値を添える。billing / jobs は行オブジェクトの配列だけが届く
-  （Dashboard 型の添付ファイルは行の配列しか渡さない）。fetch 出力の since / until / warnings / estimate は
+  （Dashboard 型の添付ファイルは行の配列しか渡さない）。fetch 出力の since / until / warnings / estimate /
+  assume_current_visibility は
   datasets/billing_meta と datasets/jobs_meta の {source, kind, value} 行（値は文字列）で届き、
   withMeta がページ内で文書の形に組み直す。ページは数値を持たず、
   集計は usage-agg ブロックの自己完結関数（dash.calc に直接渡す）が行う。
   契約: dataset id = billing / jobs / billing_meta / jobs_meta。params = group_by / include_free / period /
   runner_type / repo / plan_included_minutes。jobs_meta の estimate 行（fetch_jobs.py --estimate が付ける）は
-  あるかないかだけを読み、中身は表示しない。詳細は references/data-sources.md と
+  あるかないかだけを読み、中身は表示しない。billing_meta の assume_current_visibility 行（値 "true" のときだけ
+  build_dashboard.py が付ける）は quotaApprox が含有枠の消費を概算と表示する根拠になる。詳細は references/data-sources.md と
   tests/dashboard-template.test.mjs（集計関数の回帰テスト）を参照。
 -->
 <style>
@@ -452,7 +454,7 @@ window.UsageAgg = (function () {
 
   // dash.data() が渡す形（行オブジェクトの配列。添付ファイルは行だけが届く）と、付帯情報の
   // meta 行（{source, kind, value}。値は文字列）から、span / coverage / isEstimate が読む文書の形
-  // {rows, since, until, warnings, estimate?} を組み直す。従来の文書形（配列でないオブジェクト）はそのまま返す。
+  // {rows, since, until, warnings, estimate?, assume_current_visibility?} を組み直す。従来の文書形（配列でないオブジェクト）はそのまま返す。
   // meta 行が配列でなければ since / until を付けず、coverage は 'unknown' に倒れる（黙って full にしない）。
   function withMeta(data, metaRows, source) {
     if (data !== null && typeof data === 'object' && !Array.isArray(data)) return data;
@@ -464,8 +466,20 @@ window.UsageAgg = (function () {
       if ((m.kind === 'since' || m.kind === 'until') && doc[m.kind] === undefined) doc[m.kind] = m.value;
       else if (m.kind === 'warning' && doc.warnings.length < 20) doc.warnings.push(m.value);
       else if (m.kind === 'estimate') doc.estimate = {};
+      else if (m.kind === 'assume_current_visibility' && source === 'billing' && m.value === 'true') doc.assume_current_visibility = true;
     });
     return doc;
+  }
+
+  // 含有枠の消費（quota_minutes）を下限ではなく概算と表示するか。summarize.py の is_classified と同じ規則で、
+  // 選択期間ではなく文書全体で判定する。billing 文書（withMeta の戻り値）が assume_current_visibility を
+  // 記録している、または included / public_free の分数か quota が 1 行でも正なら、現在の公開範囲と
+  // 定価 ÷ Linux 単価の換算に依存する値で上振れもあり得るため概算（references/data-sources.md「含有枠の消費の確度」）。
+  // 下限と言えるのは quota が構造上 0 の既定モードだけ。
+  function quotaApprox(billingDoc, factRows) {
+    if (billingDoc !== null && typeof billingDoc === 'object' && billingDoc.assume_current_visibility === true) return true;
+    return (Array.isArray(factRows) ? factRows : []).some((f) => f.quota_minutes > 0
+      || ((f.charge_class === 'included' || f.charge_class === 'public_free') && f.minutes > 0));
   }
 
   // 取得元ごとの文書を作る。status が ok の dataset だけを文書にし、それ以外は null。
@@ -531,6 +545,7 @@ window.UsageAgg = (function () {
     span: span,
     isEstimate: isEstimate,
     withMeta: withMeta,
+    quotaApprox: quotaApprox,
     docsOf: docsOf,
     annotate: annotate,
     coverage: coverage,
@@ -649,7 +664,7 @@ function paintControls(sel, facts, sources) {
   $('#aud-incl').checked = sel.include_free;
 }
 
-function paintTotals(rows, sel, period, cov, ready) {
+function paintTotals(rows, sel, period, cov, ready, approx) {
   const byKey = new Map((rows || []).map((r) => [r.key, r]));
   const key = U.keyOf([period, sel.runner_type || '*', sel.repo || '*']);
   const row = byKey.get(key);
@@ -666,8 +681,7 @@ function paintTotals(rows, sel, period, cov, ready) {
     const r = row || (zeroOk ? zeroRow : null);
     if (r && !src.some((k) => cov[k] === 'none')) {
       text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(r[field]) : fmtMin(r[field]);
-      // 区分不明の利用がある範囲では含有枠の消費は下限値になる。
-      if (field === 'quota_minutes' && r.unknown_minutes > 0) text += ' 以上';
+      if (field === 'quota_minutes') text += quotaMark(r.unknown_minutes > 0, approx);
     }
     el.textContent = text;
   });
@@ -675,17 +689,19 @@ function paintTotals(rows, sel, period, cov, ready) {
   page.querySelectorAll('.aud-paid').forEach((el) => el.classList.toggle('aud-alert', alert));
   $('#aud-tile-paid').classList.toggle('aud-tile-alert', alert);
   $('#aud-tile-net').classList.toggle('aud-tile-alert', alert);
-  const lowerBound = !!row && row.unknown_minutes > 0;
+  const hasUnknown = !!row && row.unknown_minutes > 0;
+  const lowerBound = hasUnknown && !approx;
   const qnote = document.getElementById('aud-quota-note');
-  if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : '定価を Linux 単価で割った分';
+  if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : (approx ? '現在の公開範囲での概算（定価を Linux 単価で割った分）' : '定価を Linux 単価で割った分');
   let remaining;
   if (cov.billing === 'none' || cov.billing === 'partial' || cov.billing === 'unknown') remaining = '不明（選択月の billing を取得しきれていない）';
   else if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
+  else if (hasUnknown) remaining = '不明（区分不明の利用があり、消費は概算）';
   else if (sel.plan === null) remaining = 'プラン未指定のため不明';
   else if (period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
   // 行がない単月は、billing 取得済み（上の分岐を通過）かつ準備完了のときだけ消費 0 として全量を残量にする。
   else if (!row && !ready) remaining = '不明（集計を取得できていない）';
-  else remaining = fmtMin(Math.max(sel.plan - (row || zeroRow).quota_minutes, 0)) + ' 分';
+  else remaining = (approx ? '約 ' : '') + fmtMin(Math.max(sel.plan - (row || zeroRow).quota_minutes, 0)) + ' 分';
   $('#aud-remaining').textContent = remaining;
 }
 
@@ -701,6 +717,48 @@ function paintWarnings(warnings) {
     return li;
   }));
   el.hidden = items.length === 0;
+}
+
+// 含有枠の消費の数値に付ける印（タイル・表・凡例・ツールチップで共通）。概算なら区分不明の有無にかかわらず
+// 「（概算）」（公開範囲と換算式による誤差は区分不明と独立）。概算でなく区分不明があれば「 以上」
+// （区分不明の分は quota に入らないため、既定モードでは下限になる）。どちらでもなければ印なし。
+function quotaMark(hasUnknown, approx) {
+  if (approx) return '（概算）';
+  return hasUnknown ? ' 以上' : '';
+}
+
+// 凡例とツールチップの文言。印は chartModel が確度を反映して g.mark に入れたものを使う。
+function legendLabel(axis, g) {
+  return labelOf(axis, g.id) + ' ' + fmtMin(g.total) + g.mark;
+}
+function tipRowLabel(axis, g, v) {
+  return labelOf(axis, g.id) + ' ' + fmtMin(v) + g.mark;
+}
+function tipTotalLabel(groups, total) {
+  const mark = groups.some((g) => g.lower) ? '以上' : (groups.some((g) => g.mark === '（概算）') ? '（概算）' : '');
+  return '合計 ' + fmtMin(total) + ' 分' + mark;
+}
+
+// グラフのモデルを作り、群ごとの印（g.mark）を確度で決め、概算なら下限の印（g.lower / lowerBound）を落とす。
+// drawChart / drawLegend は g.mark と g.lower で文言を作るため、描画より前にここで確定させる（描画後に
+// 落とすと凡例・ツールチップに「以上」が残り、タイル・表の「（概算）」と食い違う。#209）。印は枠消費の
+// グラフ（無料枠を除く）のときだけ付ける。unknownInQuota は確度に関係なく
+// 「枠消費のグラフに区分不明の行がある（その分は quota に入らない）」かを残す。
+function chartModel(factRows, sel, sources, approx) {
+  const model = U.daily(factRows, Object.assign({}, sel, { sources: sources }));
+  const quota = model.metric === 'quota_minutes';
+  model.unknownInQuota = model.lowerBound;
+  model.groups.forEach((g) => { g.mark = quota ? quotaMark(g.lower, approx) : ''; });
+  if (approx) {
+    model.groups.forEach((g) => { g.lower = false; });
+    model.lowerBound = false;
+  }
+  return model;
+}
+
+// グラフ下の注記。区分不明の分が枠消費のグラフから抜けているときだけ出し、文言は確度で変える。
+function lowerNote(model, approx) {
+  return { hidden: !model.unknownInQuota, text: approx ? APPROX_NOTE : LOWER_NOTE };
 }
 
 function drawMessage(host, text) {
@@ -765,9 +823,9 @@ function drawChart(host, model, colors, axis, latestDay) {
       total += v;
       const r = tip.append('div').attr('class', 'aud-tip-row');
       r.append('span').attr('class', 'aud-swatch').style('background', colors.get(g.id));
-      r.append('span').text(labelOf(axis, g.id) + ' ' + fmtMin(v) + (g.lower ? ' 以上' : ''));
+      r.append('span').text(tipRowLabel(axis, g, v));
     });
-    tip.append('div').text('合計 ' + fmtMin(total) + (visible.some((g) => g.lower) ? ' 分以上' : ' 分'));
+    tip.append('div').text(tipTotalLabel(visible, total));
     tip.attr('hidden', null);
     const tw = tip.node().offsetWidth;
     const cx = x(day) + x.bandwidth() / 2;
@@ -789,10 +847,10 @@ function drawLegend(host, model, colors, axis) {
     });
   btns.selectAll('*').remove();
   btns.append('span').attr('class', 'aud-swatch').style('background', (g) => colors.get(g.id));
-  btns.append('span').text((g) => labelOf(axis, g.id) + ' ' + fmtMin(g.total) + (g.lower ? ' 以上' : ''));
+  btns.append('span').text((g) => legendLabel(axis, g));
 }
 
-function paintTable(rows, sel, period) {
+function paintTable(rows, sel, period, approx) {
   const metric = sel.include_free ? 'minutes' : 'quota_minutes';
   $('#aud-th-minutes').textContent = sel.include_free ? '分数' : '分数（枠の消費のみ）';
   $('#aud-th-minutes').parentNode.setAttribute('data-field', metric);
@@ -818,7 +876,7 @@ function paintTable(rows, sel, period) {
   d3.select(document.getElementById('aud-tbody')).selectAll('tr').data(shown, (r) => r.key).join('tr')
     .attr('data-key', (r) => r.key)
     .each(function (r) {
-      const lb = r.unknown_minutes > 0 ? ' 以上' : '';
+      const lb = quotaMark(r.unknown_minutes > 0, approx);
       const cells = [
         { text: labelOf(sel.group_by, r.group) },
         { text: fmtMin(r[metric]) + (metric === 'quota_minutes' ? lb : '') },
@@ -830,6 +888,9 @@ function paintTable(rows, sel, period) {
     }).order();
   $('#aud-table-empty').hidden = shown.length > 0;
 }
+
+const LOWER_NOTE = '区分不明の利用があるため、グラフの枠消費は下限値（「以上」）になる。';
+const APPROX_NOTE = '区分不明の利用があるため、グラフの枠消費にはその分が含まれない（概算）。';
 
 function render() {
   const sel = readSel();
@@ -855,7 +916,9 @@ function render() {
   const today = new Date().toISOString().slice(0, 10);
   const ann = U.annotate(input, period, today);
   const cov = ann.cov;
-  paintTotals(ready ? t.data : [], sel, period, cov, ready);
+  // 含有枠の消費の確度（下限か概算か）。タイル・表・凡例・ツールチップ・注記で同じ値を使う。
+  const approx = U.quotaApprox(ann.docs.billing, facts);
+  paintTotals(ready ? t.data : [], sel, period, cov, ready, approx);
   $('#aud-nojobs').hidden = cov.jobsConnected;
   // 推定は jobs_meta の estimate 行（annotate が判定）。選択期間に jobs がない（不明表示）ときは推定と書かない。
   const est = ann.estimate;
@@ -878,17 +941,19 @@ function render() {
   const legend = document.getElementById('aud-legend');
   const lowerEl = $('#aud-lower');
   if (ready) {
-    const model = U.daily(facts, Object.assign({}, sel, { sources: srcs }));
+    const model = chartModel(facts, sel, srcs, approx);
     const colors = colorMap(model.axis, model.groups);
     drawChart(chart, model, colors, model.axis, latest);
     drawLegend(legend, model, colors, model.axis);
-    lowerEl.hidden = !model.lowerBound;
+    const note = lowerNote(model, approx);
+    lowerEl.textContent = note.text;
+    lowerEl.hidden = note.hidden;
   } else {
     lowerEl.hidden = true;
     drawMessage(chart, '—');
     d3.select(legend).selectAll('*').remove();
   }
-  paintTable(ready ? a.data : [], sel, period);
+  paintTable(ready ? a.data : [], sel, period, approx);
 }
 
 function change(patch) {

@@ -1,6 +1,6 @@
 <!-- source: skills/actions-usage-dashboard/scripts（fetch_billing.py / fetch_jobs.py の実装）と .agents/skills/github-docs/references/rest-api/（billing/usage.md・overview/rate-limits.md・overview/permissions.md）。公式: https://docs.github.com/en/rest/billing/usage 、https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens 、https://docs.github.com/en/billing/reference/billing-reports 、https://docs.github.com/en/billing/concepts/product-billing/github-actions 、https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs 、https://docs.github.com/en/rest/orgs/orgs -->
-<!-- 最終確認日: 2026-10-24 -->
-<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる）・run の再実行期間（初回実行から 30 日）・orgs/<org> でプランを含む全詳細を見る条件（owner。classic は admin:org、GitHub App は Organization plan 権限） / ⚠️ 未確認: billing usage の保持期間（本体ページに記載なし）、orgs/<org> の fine-grained PAT 用の権限、Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか -->
+<!-- 最終確認日: 2026-10-28 -->
+<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる）・run の再実行期間（初回実行から 30 日）・orgs/<org> でプランを含む全詳細を見る条件（owner。classic は admin:org、GitHub App は Organization plan 権限） / ⚠️ 未確認: billing usage の保持期間（本体ページに記載なし）、orgs/<org> の fine-grained PAT 用の権限、Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか、含有枠の消費の換算（定価 ÷ Linux 単価）が請求画面の換算と一致するか（公式は倍率を明記せず、SKU ごとの分単価だけを載せる） -->
 
 # データ源と換算式
 
@@ -90,6 +90,32 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - `billable_minutes` は paid 行の分数だけで、ほかの行は 0
 - 含有枠の上限（請求画面の「N min included」）は契約プランで決まる値で、API の出力にもスクリプトにも含まれない。全 org 共通の数字として扱わない
 
+## 含有枠の消費の確度
+
+`summarize.py` は含有枠の消費を、次の条件で「下限」「概算」「確定」に分けて表示する。
+
+| 条件 | 表示 | `breakdown.included` のキー | 残量・割合 |
+|---|---|---|---|
+| `assume_current_visibility` が真、または included / public_free 行・quota > 0 がある | 約 X 分（概算）。「下限」「以上」は書かない | `approximate: true`、`lower_bound: false` | unknown があれば不明、なければ「約」付きの概算値 |
+| 上記以外で unknown がある | X 分以上（下限。区分不明あり） | `lower_bound: true`、`approximate: false` | 不明 |
+| 上記以外（unknown なし・分類なし） | 確定値 | どちらも false | 確定値 |
+
+- 「下限」が成り立つのは、quota が構造上 0 の既定モード（非有料分がすべて unknown）で、unknown 分だけ少なく数えている場合に限る
+- `--assume-current-visibility` で分類した quota は、現在の公開範囲と「定価 ÷ Linux 単価」の換算に依存する。上振れも下振れもあり得るため概算とし、下限とは言わない
+- `fetch_billing.py` は出力のトップレベルに `assume_current_visibility`（真偽値）を記録する。旧形式の文書（キーなし）は行の内容で判定し、included / public_free 行があれば概算に倒す。値が真偽値以外なら `summarize.py` は止まる
+- フラグが偽なのに分類済みの行がある矛盾した文書も、安全側の概算にする
+- 分類済みかどうかは、`summarize.py`（`is_classified`）も雛形（`quotaApprox`）も入力の文書全体で判定する（対象月・選択期間では変えない）。旧形式の文書で、対象月が unknown だけでも別の月に分類済みの行があれば概算にする。分類済みの行は分数か quota が正のものだけを数える
+- 雛形 `templates/dashboard/index.html` も同じ規則を適用する。`assume_current_visibility` は billing_meta の `assume_current_visibility` 行（`value` が `"true"`）で受け取る（「ページへ渡る値」節）。概算のときは、区分不明の有無にかかわらず枠消費の値（タイル・表、無料枠を除いたグラフの凡例・ツールチップ）に「（概算）」を付け、「以上」は付けない。区分不明があるときのグラフ下の注記も概算の文言にする。下限のときは区分不明を含む値に「以上」を付ける。残量は区分不明があれば不明、なければ概算のとき「約」を付ける。この行を持たない meta で作られたダッシュボードは、次の更新で meta が作り直されるまで行の内容だけで判定する
+
+上振れ・下振れの要因（含有枠の消費が請求画面と一致しない理由）:
+
+- 利用時は公開・現在は非公開のリポジトリは、現在値で included に数えるため上振れする。逆に利用時は非公開・現在は公開なら public_free になり下振れする
+- 換算式が請求画面の換算と一致するかは未確認である。公式の Actions 課金ページ（確認日 2026-10-28）は SKU ごとの分単価を載せるが、含有分の消費の倍率は明記していない。arm64 の SKU が含有分を消費するかも記載がない。larger runner は含有分を使わず常に課金されると記載がある
+- 端数は行ごとに 6 桁で丸める。請求画面の丸め方は未確認である
+- 区分不明（削除済み・権限不足のリポジトリ）の分は quota に入らず、下振れする
+
+実 org での確認（#138）では、フラグ付きの概算値が請求画面の使用量を約 0.9% 上回った。上の要因のどれが効いたかは未検証（再測が必要）である。
+
 ## 請求画面と数字が合わない理由
 
 - 当日分（UTC）は集計中で、あとから増える
@@ -97,6 +123,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
   - 参考: 公式に更新時間が書かれているのは artifact storage の「6〜12 時間以内」だけで、minutes には当てはまらない
   - 参考: 詳細な利用レポートは Web UI 専用で、REST API は集計済みの情報だけを返す
 - 公開範囲は取得時点の値しか取れない。期間中に公開・非公開を切り替えたリポジトリは、過去月の included / public_free が実態とずれる。誤分類で quota が消えたり過大になったりするのを避けるため、既定では非有料分を `unknown` にして quota に数えない。切り替えが無いと保証できる場合だけ `--assume-current-visibility` を付ける。`public` は `public_free`、`private` / `internal` は `included` に確定する
+- 含有枠の消費を下限と言える条件と上振れの要因は「含有枠の消費の確度」を参照する
 - 削除済みのリポジトリや権限不足で公開範囲を引けないリポジトリは、オプションを付けても `unknown` のままになる
 - 有料分は公開範囲ではなく `netAmount` から判定するため、この影響を受けない
 
@@ -342,7 +369,7 @@ K=1・2 は新旧が同一のため、以下の表は K=3・5・10 だけを載�
 
 ## 出典
 
-確認日は 2026-10-24。
+確認日は 2026-10-24（Actions 課金ページの含有分・larger runner の記述のみ 2026-10-28）。
 
 - https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens : `orgs/<org>/repos` は Repository "Metadata"（read）、runs / jobs は Repository "Actions"（read）。`organizations/<org>/settings/billing/usage` は Organization "Administration"（read）。`GET /orgs/{org}` は載っていない
 - https://docs.github.com/en/rest/billing/usage : 呼び出せるのは organization の administrator。billing manager の記載は無い。fine-grained token は "Administration" organization（read）で対応と記載。「過去 24 か月のみ」の注記は ai_credit / premium_request / usage/summary にあり、`/settings/billing/usage` 本体には保持期間の記載が無い（未確認）
@@ -350,7 +377,7 @@ K=1・2 は新旧が同一のため、以下の表は K=3・5・10 だけを載�
 - https://docs.github.com/en/rest/orgs/orgs : `GET /orgs/{org}` の全詳細は org owner のみ。OAuth app token と classic PAT は `admin:org`、GitHub App は Organization plan 権限
 - 使用状況レポートのチュートリアル（公式。URL は特定できておらず 2026-10-24 は未再確認）: 課金系エンドポイントは fine-grained token 非対応とする記述（上の rest/billing/usage と食い違う）
 - https://docs.github.com/en/billing/reference/billing-reports : 利用はすべて UTC で記録される。集計レポートは最大 1 年・詳細レポートは最大 31 日（Web UI のレポート期間で、API の保持期間ではない）。詳細レポートは Web UI 専用で、REST API は集計済みの情報だけを返す
-- https://docs.github.com/en/billing/concepts/product-billing/github-actions : artifact storage の使用量は 6〜12 時間以内に更新される（minutes の記載ではない）
+- https://docs.github.com/en/billing/concepts/product-billing/github-actions : 含有分の消費の倍率は記載なし（SKU ごとの分単価のみ）。larger runner は常に課金される。arm64 が含有分を消費するかは記載なし。artifact storage の使用量は 6〜12 時間以内に更新される（minutes の記載ではない）
 - 未確認: Actions の分数について請求画面と API の更新間隔・時差（https://docs.github.com/en/billing/how-tos/products/view-productlicense-use を含め、上記のどのページにも記載が無い）
 
 ## 関連
@@ -365,10 +392,11 @@ K=1・2 は新旧が同一のため、以下の表は K=3・5・10 だけを載�
 
 - 添付する JSON は「行オブジェクトの配列、または `rows` / `data` / `results` の下にある配列」。`dash.data(id).data` には行の配列だけが届き、セルは文字列として扱うのが安全
 - `dash.data(id).meta` に値が入るのは、query dataset の `dash.loader` が `meta` を返したときだけで、`kind: "file"` の dataset では使えない
-- したがって fetch 出力のトップレベルの `since` / `until` / `warnings` / `estimate` / `generated_at` はそのままではページに届かない
-- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate", "value": "<文字列>"}`
+- したがって fetch 出力のトップレベルの `since` / `until` / `warnings` / `estimate` / `assume_current_visibility` / `generated_at` はそのままではページに届かない
+- そこで source ごとに付帯情報の dataset を 1 つ対応させる（`billing` ↔ `billing_meta`、`jobs` ↔ `jobs_meta`）。build_dashboard が検証済みの rows 文書から `meta-<source>.json` を作る。行は `{"source": "billing"|"jobs", "kind": "since"|"until"|"warning"|"estimate"|"assume_current_visibility", "value": "<文字列>"}`
   - `since` / `until`: 1 行ずつ（billing は `YYYY-MM`、jobs は `YYYY-MM-DD`）
   - `warning`: `warnings` の文字列要素を先頭から最大 20 件。制御文字を除き 300 字で切る
   - `estimate`: 文書の `estimate` がオブジェクトのときだけ 1 行（`value` は `"true"`。中身は渡さない）
-- ページは `withMeta` で行配列と meta 行から `{rows, since, until, warnings, estimate?}` を組み直し、既存の `span` / `coverage` / `isEstimate` に渡す。meta が読めない（`missing` / `error`、行なし）ときは取得期間が `unknown` になり、注記を出す（読み込み中は出さない）
+  - `assume_current_visibility`: billing 文書の `assume_current_visibility` が `true` のときだけ 1 行（`value` は `"true"`）。偽・欠落なら行を作らない。真偽値以外なら build_dashboard は止まる（`summarize.py` と同じ）
+- ページは `withMeta` で行配列と meta 行から `{rows, since, until, warnings, estimate?, assume_current_visibility?}` を組み直し、既存の `span` / `coverage` / `isEstimate` と `quotaApprox` に渡す。meta が読めない（`missing` / `error`、行なし）ときは取得期間が `unknown` になり、注記を出す（読み込み中は出さない）
 - source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。meta は rows と同じ版固定・同じ更新の扱いで、meta の警告文も rows と同様にダッシュボードを開ける全員が読める

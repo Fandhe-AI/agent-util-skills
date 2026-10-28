@@ -556,6 +556,12 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.out, "batch.json")))
         self.assertFalse(os.path.exists(os.path.join(self.out, "index.json")))
 
+    def test_assume_current_visibility_must_be_bool(self):
+        """summarize.py と同じく真偽値以外は止める（#209）。"""
+        for bad in ("true", 1, None, [True]):
+            self.fails(["--org", "example-org", "--out-dir", self.out,
+                        "--rows", self.doc("b.json", assume_current_visibility=bad)])
+
     def test_t11_invalid(self):
         b = self.doc("b.json")
         self.fails(base(self.out, (b, JOBS)) + ["--asset-url", "/_blob/a"])
@@ -634,6 +640,30 @@ class MetaRowsTests(unittest.TestCase):
         self.assertEqual(kinds({"method": "m"}), ["since", "until", "estimate"])
         for bad in ([], None, "x", 3, True):
             self.assertEqual(kinds(bad), ["since", "until"], bad)
+
+    def test_assume_current_visibility_only_when_true_on_billing(self):
+        """#209: 雛形が概算と表示する根拠を billing_meta で渡す。真のときだけ、billing のときだけ。"""
+        rows = bd.build_meta_rows(self.doc(source="billing", assume_current_visibility=True))
+        self.assertIn({"source": "billing", "kind": "assume_current_visibility", "value": "true"}, rows)
+        for flag in (False, None, "true", 1):
+            kinds = [r["kind"] for r in bd.build_meta_rows(self.doc(source="billing", assume_current_visibility=flag))]
+            self.assertEqual(kinds, ["since", "until"], flag)
+        kinds = [r["kind"] for r in bd.build_meta_rows(self.doc(assume_current_visibility=True))]
+        self.assertEqual(kinds, ["since", "until"])  # jobs 文書には付けない
+
+    def test_assume_current_visibility_reaches_meta_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(BILLING, encoding="utf-8") as f:
+                doc = json.load(f)
+            doc["assume_current_visibility"] = True
+            p = os.path.join(d, "b.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            out = os.path.join(d, "o")
+            rc, _, err = run(base(out, rows=(p,)) + urls_for(1))
+            self.assertEqual(rc, 0, err)
+            self.assertIn({"source": "billing", "kind": "assume_current_visibility", "value": "true"},
+                          load(out, "meta-billing.json"))
 
     def test_meta_file_is_row_array(self):
         with tempfile.TemporaryDirectory() as d:

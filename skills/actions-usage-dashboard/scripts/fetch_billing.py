@@ -13,6 +13,8 @@
 
 出力スキーマ:
   {schema_version, source: "billing", org, since, until, generated_at,
+   assume_current_visibility: bool（--assume-current-visibility を付けたか。summarize.py が
+   含有枠の消費を「下限」と言える条件の判定に使う）,
    linux_price_per_minute: {YYYY-MM: 単価}, rows: [...]}
   row = day / repo / visibility / sku / runner_type / charge_class / minutes /
         quota_minutes / billable_minutes / gross_usd / discount_usd / net_usd
@@ -310,6 +312,7 @@ def main(argv=None):
             "schema_version": SCHEMA_VERSION, "source": "billing", "org": a.org,
             "since": a.since, "until": until,
             "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "assume_current_visibility": bool(a.assume_current_visibility),
             "linux_price_per_minute": price_map, "rows": rows,
         })
     except FetchError as e:

@@ -13,10 +13,11 @@
   fetch_jobs.py（source: jobs）の rows JSON（schema_version 1）。
   出力は Dashboard 型の store のパス（dash/meta・dash/params・datasets/<id>・files/index.html）。
 
-付帯情報（since / until / warnings / estimate）の渡し方: Dashboard 型の添付ファイルはページへ行オブジェクトの
+付帯情報（since / until / warnings / estimate / assume_current_visibility）の渡し方: Dashboard 型の添付ファイルはページへ行オブジェクトの
   配列だけを渡し、fetch 出力のトップレベルの値は届かない。そこで rows の dataset 1 つにつき、付帯情報の
   dataset を 1 つ対応させる（billing と billing_meta、jobs と jobs_meta）。meta は
-  {source, kind, value} の行（値はすべて文字列。kind は since / until / warning / estimate）で、
+  {source, kind, value} の行（値はすべて文字列。kind は since / until / warning / estimate /
+  assume_current_visibility）で、
   検証済みの rows 文書から本スクリプトが --out-dir/meta-<source>.json として作る。
   source ごとに分けるのは、jobs だけの更新で billing の取得期間が消えないようにするため。
 
@@ -171,6 +172,9 @@ def load_rows_doc(path, org):
         raise BuildError("rows に since / until が無い: %s" % base)
     if not isinstance(doc.get("rows"), list):
         raise BuildError("rows の rows が配列ではない: %s" % base)
+    if "assume_current_visibility" in doc and not isinstance(doc["assume_current_visibility"], bool):
+        # summarize.py と同じく真偽値以外は止める（ページの概算判定を黙って既定モードに倒さない）。
+        raise BuildError("rows の assume_current_visibility が真偽値ではない: %s" % base)
     ga = doc.get("generated_at")
     return {"id": doc["source"], "path": ap,
             "generated_at": ga if isinstance(ga, str) and ISO_RE.match(ga) else None,
@@ -182,6 +186,8 @@ def build_meta_rows(doc):
 
     ページ（雛形の withMeta）が読む契約。warnings は非信頼の文字列なので、制御文字を除き
     300 字・20 件で切る（雛形側でも同じ上限を重ねる）。estimate は中身を渡さず有無だけ（"true"）。
+    assume_current_visibility は billing 文書で真のときだけ "true" の行を足す（雛形の quotaApprox が
+    含有枠の消費を下限ではなく概算と表示する根拠。偽・欠落なら行を作らず、雛形は行の内容で判定する）。
     """
     src = doc["source"]
 
@@ -197,6 +203,8 @@ def build_meta_rows(doc):
             rows.append({"source": src, "kind": "warning", "value": t})
     if isinstance(doc.get("estimate"), dict):
         rows.append({"source": src, "kind": "estimate", "value": "true"})
+    if src == "billing" and doc.get("assume_current_visibility") is True:
+        rows.append({"source": src, "kind": "assume_current_visibility", "value": "true"})
     return rows
 
 

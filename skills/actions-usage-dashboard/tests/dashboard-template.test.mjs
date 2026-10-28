@@ -458,3 +458,175 @@ test('ページ側の配線: render は annotate の結果で注意欄・推定�
     assert.match(HTML, new RegExp(`id="${id}"[^>]*data-source="billing_meta jobs_meta"|data-source="billing_meta jobs_meta"[^>]*id="${id}"`))
   }
 })
+
+// ---- 含有枠の消費の確度（#209）: 下限（「以上」）か概算（「（概算）」）か ----
+// 既定モード（--assume-current-visibility なし）の billing: 非有料分はすべて unknown で quota は構造上 0。
+const defaultModeBilling = [
+  { day: '2026-10-01', repo: 'priv-api', visibility: 'unknown', runner_type: 'linux', charge_class: 'paid', minutes: 100, quota_minutes: 0, billable_minutes: 100, gross_usd: 0.8, net_usd: 0.8 },
+  { day: '2026-10-02', repo: 'priv-api', visibility: 'unknown', runner_type: 'linux', charge_class: 'unknown', minutes: 500, quota_minutes: 0, billable_minutes: 0, gross_usd: 4, net_usd: 0 }
+]
+const defaultFacts = plain(U.facts(defaultModeBilling, []))
+
+test('quotaApprox は summarize.py の is_classified と同じ規則で文書全体から判定する', () => {
+  assert.equal(U.quotaApprox(null, defaultFacts), false, '既定モードは下限')
+  assert.equal(U.quotaApprox({ rows: [], assume_current_visibility: true }, defaultFacts), true, 'フラグが真なら概算')
+  assert.equal(U.quotaApprox({ rows: [], assume_current_visibility: 'true' }, defaultFacts), false, '真偽値の真だけを読む')
+  assert.equal(U.quotaApprox(null, facts), true, 'included 行がある旧形式の文書は概算')
+  const zeroIncluded = plain(U.facts([{ day: '2026-10-01', charge_class: 'included', minutes: 0, quota_minutes: 0 }], []))
+  assert.equal(U.quotaApprox(null, zeroIncluded), false, '分数 0 の included 行だけでは分類済みにしない')
+  const pub = plain(U.facts([{ day: '2026-10-01', charge_class: 'public_free', minutes: 3, quota_minutes: 0 }], []))
+  assert.equal(U.quotaApprox(null, pub), true)
+  assert.equal(U.quotaApprox(null, undefined), false)
+})
+
+test('withMeta / annotate: billing_meta の assume_current_visibility 行（"true"）だけがフラグになる', () => {
+  const flagRow = mrow('billing', 'assume_current_visibility', 'true')
+  assert.equal(U.withMeta([], [flagRow], 'billing').assume_current_visibility, true)
+  for (const bad of [mrow('billing', 'assume_current_visibility', 'false'), mrow('billing', 'assume_current_visibility', '1'),
+    { source: 'billing', kind: 'assume_current_visibility', value: true }]) {
+    assert.equal(U.withMeta([], [bad], 'billing').assume_current_visibility, undefined, JSON.stringify(bad))
+  }
+  assert.equal(U.withMeta([], [mrow('jobs', 'assume_current_visibility', 'true')], 'jobs').assume_current_visibility, undefined,
+    'jobs には付けない')
+  const ann = U.annotate(runtimeInput({ billing: ok(defaultModeBilling), billing_meta: ok([...billingMeta, flagRow]) }), '2026-10', '2026-10-03')
+  assert.equal(U.quotaApprox(ann.docs.billing, defaultFacts), true, 'meta 経由のフラグで既定モードの行でも概算になる')
+  const plainAnn = U.annotate(runtimeInput({ billing: ok(defaultModeBilling) }), '2026-10', '2026-10-03')
+  assert.equal(U.quotaApprox(plainAnn.docs.billing, defaultFacts), false)
+})
+
+// ページ側の小関数を取り出し、U・labelOf・フォーマッタだけを与えて凡例・ツールチップ・注記の文言を確かめる。
+const pageFn = (name) => {
+  const m = HTML.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n\\}\\n`))
+  assert.ok(m, `${name} が見つかること`)
+  return m[0]
+}
+const pageConst = (name) => {
+  const m = HTML.match(new RegExp(`const ${name} = '[^'\\n]*';`))
+  assert.ok(m, `${name} が見つかること`)
+  return m[0]
+}
+const chartTexts = (factRows, sel, approx) => {
+  const src = ['labelOf', 'quotaMark', 'legendLabel', 'tipRowLabel', 'tipTotalLabel', 'chartModel', 'lowerNote'].map(pageFn).join('\n')
+    + pageConst('LOWER_NOTE') + pageConst('APPROX_NOTE')
+  const code = `${src}
+    const model = chartModel(factRows, sel, [], approx);
+    const day = model.days[model.days.length - 1];
+    const out = {
+      legend: model.groups.map((g) => legendLabel(sel.group_by, g)),
+      tipRows: model.groups.map((g) => tipRowLabel(sel.group_by, g, model.values[g.id][day] || 0)),
+      tipTotal: tipTotalLabel(model.groups, 0),
+      note: lowerNote(model, approx)
+    };
+    out`
+  return plain(runInNewContext(code, { U, factRows, sel, approx, fmtMin: (v) => String(v) }))
+}
+const quotaSel = { period: '*', group_by: 'charge_class', include_free: false }
+
+test('凡例・ツールチップ: 下限のときだけ「以上」、概算では「以上」を出さず「（概算）」を付ける', () => {
+  const lower = chartTexts(defaultFacts, quotaSel, false)
+  assert.ok(lower.legend.some((t) => t.endsWith(' 以上')), JSON.stringify(lower.legend))
+  assert.ok(lower.tipRows.some((t) => t.endsWith(' 以上')), JSON.stringify(lower.tipRows))
+  assert.match(lower.tipTotal, / 分以上$/)
+  assert.deepEqual(lower.note, { hidden: false, text: '区分不明の利用があるため、グラフの枠消費は下限値（「以上」）になる。' })
+
+  for (const [name, rows] of [['フラグ由来の概算', defaultFacts], ['分類済みの行がある概算', facts]]) {
+    const ap = chartTexts(rows, quotaSel, true)
+    const all = [...ap.legend, ...ap.tipRows, ap.tipTotal]
+    assert.ok(all.every((t) => !t.includes('以上')), `${name}: ${JSON.stringify(all)}`)
+    assert.ok(all.every((t) => t.endsWith('（概算）')), `${name}: ${JSON.stringify(all)}`)
+    assert.match(ap.tipTotal, / 分（概算）$/)
+    assert.equal(ap.note.hidden, false, name)
+    assert.match(ap.note.text, /（概算）。$/)
+    assert.doesNotMatch(ap.note.text, /下限|以上/)
+  }
+})
+
+test('注記は枠消費のグラフに区分不明の行があるときだけ出す（軸・無料枠トグルに従う）', () => {
+  for (const approx of [false, true]) {
+    assert.equal(chartTexts(defaultFacts, { ...quotaSel, include_free: true }, approx).note.hidden, true, '無料枠込みは分数そのもの')
+    assert.equal(chartTexts(defaultFacts, { ...quotaSel, group_by: 'repo' }, approx).note.hidden, false, 'リポジトリ軸でも区分不明を拾う')
+  }
+  const noUnknown = plain(U.facts(defaultModeBilling.filter((r) => r.charge_class !== 'unknown'), []))
+  assert.equal(chartTexts(noUnknown, quotaSel, false).note.hidden, true)
+})
+
+test('凡例・ツールチップ: 区分不明がなくても概算なら「（概算）」、無料枠込みのグラフには印を付けない', () => {
+  const noUnknown = plain(U.facts(defaultModeBilling.filter((r) => r.charge_class !== 'unknown'), []))
+  const ap = chartTexts(noUnknown, quotaSel, true)
+  assert.ok([...ap.legend, ...ap.tipRows].every((t) => t.endsWith('（概算）')), JSON.stringify(ap))
+  assert.match(ap.tipTotal, / 分（概算）$/)
+  assert.equal(ap.note.hidden, true, '区分不明がなければグラフ下の注記は出さない')
+  const exact = chartTexts(noUnknown, quotaSel, false)
+  assert.ok([...exact.legend, ...exact.tipRows].every((t) => !/以上|概算/.test(t)), JSON.stringify(exact))
+  assert.match(exact.tipTotal, / 分$/)
+  for (const approx of [false, true]) {
+    const free = chartTexts(defaultFacts, { ...quotaSel, include_free: true }, approx)
+    assert.ok([...free.legend, ...free.tipRows, free.tipTotal].every((t) => !/以上|概算/.test(t)), JSON.stringify(free))
+  }
+})
+
+// paintTotals を取り出し、枠消費のタイル・注記・残量の文言を捕まえる。
+const paintQuota = (row, approx) => {
+  const tile = { textContent: '', setAttribute() {}, getAttribute: () => 'quota_minutes' }
+  const qnote = { textContent: '' }
+  const remaining = { textContent: '' }
+  const el = { textContent: '', classList: { toggle() {} } }
+  const box = {
+    U,
+    page: { querySelectorAll: (q) => (q === '[data-source="totals"]' ? [tile] : []) },
+    $: (id) => (id === '#aud-remaining' ? remaining : el),
+    document: { getElementById: (id) => (id === 'aud-quota-note' ? qnote : null) },
+    fmtMin: (v) => String(v),
+    fmtUsd: (v) => '$' + v
+  }
+  const rows = [{ key: U.keyOf(['2026-10', '*', '*']), quota_minutes: 800, unknown_minutes: row.unknown_minutes, paid_minutes: 0 }]
+  runInNewContext(`${pageFn('quotaMark')}\n${pageFn('paintTotals')}\npaintTotals(rows, sel, '2026-10', cov, true, approx)`,
+    { ...box, rows, sel: selOf(), cov: covFull, approx })
+  return { tile: tile.textContent, qnote: qnote.textContent, remaining: remaining.textContent }
+}
+
+test('タイル: 下限なら「以上」、概算なら区分不明の有無にかかわらず「（概算）」。残量は区分不明があれば不明、概算なら「約」', () => {
+  const lower = paintQuota({ unknown_minutes: 50 }, false)
+  assert.equal(lower.tile, '800 以上')
+  assert.match(lower.qnote, /下限値/)
+  assert.equal(lower.remaining, '不明（区分不明の利用があり、消費は下限値）')
+  const ap = paintQuota({ unknown_minutes: 50 }, true)
+  assert.equal(ap.tile, '800（概算）')
+  assert.match(ap.qnote, /概算/)
+  assert.doesNotMatch(ap.qnote, /下限/)
+  assert.equal(ap.remaining, '不明（区分不明の利用があり、消費は概算）')
+  const none = paintQuota({ unknown_minutes: 0 }, true)
+  assert.equal(none.tile, '800（概算）')
+  assert.equal(none.remaining, '約 2200 分')
+  const exact = paintQuota({ unknown_minutes: 0 }, false)
+  assert.equal(exact.tile, '800')
+  assert.equal(exact.remaining, '2200 分')
+})
+
+test('表とタイルは同じ quotaMark を使う', () => {
+  const mark = runInNewContext(`${pageFn('quotaMark')}\nquotaMark`, {})
+  assert.equal(mark(false, false), '')
+  assert.equal(mark(false, true), '（概算）')
+  assert.equal(mark(true, false), ' 以上')
+  assert.equal(mark(true, true), '（概算）')
+  assert.match(pageFn('paintTable'), /const lb = quotaMark\(r\.unknown_minutes > 0, approx\)/)
+  assert.match(pageFn('paintTotals'), /quotaMark\(r\.unknown_minutes > 0, approx\)/)
+})
+
+test('ページ側の配線: 確度は描画より前に確定し、凡例・ツールチップはその値で文言を作る', () => {
+  const render = pageFn('render')
+  assert.match(render, /const approx = U\.quotaApprox\(ann\.docs\.billing, facts\)/)
+  const iModel = render.indexOf('chartModel(facts, sel, srcs, approx)')
+  assert.ok(iModel >= 0, 'render は chartModel でモデルを作る')
+  assert.ok(iModel < render.indexOf('drawChart(chart'), 'chartModel は drawChart より前')
+  assert.ok(iModel < render.indexOf('drawLegend(legend'), 'chartModel は drawLegend より前')
+  assert.doesNotMatch(render, /g\.lower = false/, 'render は描画後に g.lower を書き換えない')
+  assert.match(render, /paintTotals\([^)]*, approx\)/)
+  assert.match(render, /paintTable\([^)]*, approx\)/)
+  const legendFn = pageFn('drawLegend')
+  const chartFn = pageFn('drawChart')
+  assert.match(legendFn, /legendLabel\(axis, g\)/)
+  assert.match(chartFn, /tipRowLabel\(axis, g, v\)/)
+  assert.match(chartFn, /tipTotalLabel\(visible, total\)/)
+  for (const body of [legendFn, chartFn]) assert.doesNotMatch(body, /以上/)
+})
