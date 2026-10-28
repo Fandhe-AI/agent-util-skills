@@ -1,6 +1,6 @@
-<!-- source: skills/actions-usage-dashboard/scripts（fetch_billing.py / fetch_jobs.py の実装）と .agents/skills/github-docs/references/rest-api/（billing/usage.md・overview/rate-limits.md・overview/permissions.md）。公式: https://docs.github.com/en/rest/billing/usage 、https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens 、https://docs.github.com/en/billing/reference/billing-reports 、https://docs.github.com/en/billing/concepts/product-billing/github-actions 、https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs 、https://docs.github.com/en/rest/orgs/orgs -->
+<!-- source: skills/actions-usage-dashboard/scripts（fetch_billing.py / fetch_jobs.py の実装）と .agents/skills/github-docs/references/rest-api/（billing/usage.md・overview/rate-limits.md・overview/permissions.md）。公式: https://docs.github.com/en/rest/billing/usage 、https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens 、https://docs.github.com/en/billing/reference/billing-reports 、https://docs.github.com/en/billing/reference/product-and-sku-names 、https://docs.github.com/en/billing/reference/actions-runner-pricing 、https://docs.github.com/en/billing/concepts/product-billing/github-actions 、https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs 、https://docs.github.com/en/rest/orgs/orgs -->
 <!-- 最終確認日: 2026-10-28 -->
-<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる）・run の再実行期間（初回実行から 30 日）・orgs/<org> でプランを含む全詳細を見る条件（owner。classic は admin:org、GitHub App は Organization plan 権限） / ⚠️ 未確認: billing usage の保持期間（本体ページに記載なし）、orgs/<org> の fine-grained PAT 用の権限、Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか、含有枠の消費の換算（定価 ÷ Linux 単価）の公式な明記（docs.github.com は倍率を明記せず SKU ごとの分単価だけを載せる。github.blog の FAQ と #221 の実測は定価換算を支持する）、arm64・slim・GPU の SKU が含有分を消費するか、削除済みリポジトリの区分不明分を請求画面が含有枠に数えるか（#221）、実 org の使用量 CSV での列名・表記（#228。公式のフィールド表の名前で実装し、実データでは未確認） -->
+<!-- 取得状況: ✅ 実装と公式文書（docs.github.com）で確認済み: fine-grained token の権限名（実機は未検証。動作確認済みの経路は classic token の admin:org のみで、org 設定の書き込みを含む広いスコープ。使い終えたら失効させる）・run の再実行期間（初回実行から 30 日）・orgs/<org> でプランを含む全詳細を見る条件（owner。classic は admin:org、GitHub App は Organization plan 権限） / ⚠️ 未確認: billing usage の保持期間（本体ページに記載なし）、orgs/<org> の fine-grained PAT 用の権限、Actions の分数について請求画面と API の更新間隔・時差の公式記載（docs.github.com に見つからなかった）、billing manager が billing usage API を呼べるか、含有枠の消費の換算（定価 ÷ Linux 単価）の公式な明記（docs.github.com は倍率を明記せず SKU ごとの分単価だけを載せる。github.blog の FAQ と #221 の実測は定価換算を支持する）、arm64・slim・GPU の SKU が含有分を消費するか、削除済みリポジトリの区分不明分を請求画面が含有枠に数えるか（#221）、使用量 CSV のセルフホスト SKU の名前の一覧（公式の SKU 一覧に無い。実 CSV で `actions_self_hosted_linux` を観測しただけ）、larger runner など写像表に無い SKU の API 表記、`actions_macos` と API の `Actions macOS 3-core` の単価の一致（実データでの照合は未実施） / 実 org の使用量 CSV での確認済み: 公式のフィールド表の列名で読み込めること、SKU 表記が API と違うこと、セルフホストの SKU 行があること、username が `dependabot[bot]` の行の多くが通常のワークフローであること（#228 の後続） -->
 
 # データ源と換算式
 
@@ -15,7 +15,7 @@
 | 使用量 CSV（請求画面の詳細レポート） | [`fetch_billing.py --usage-csv`](../scripts/fetch_billing.py) | GitHub ホストランナー（billing usage API の代わり。Dependabot を見分けられる） |
 | Actions runs / jobs API | [`fetch_jobs.py`](../scripts/fetch_jobs.py) | セルフホストランナー |
 
-2 つの対象は互いに重ならない。billing usage API にセルフホストは含まれず、jobs 側は GitHub ホストの job を行にしない。
+2 つの対象は互いに重ならない。billing usage API はセルフホストの明細を返さず（`fetch_billing.py` の API 経路は SKU による除外をしていない。API が返さないことに依存している）、jobs 側は GitHub ホストの job を行にしない。使用量 CSV にはセルフホストの SKU の行があるため、`--usage-csv` 経路だけが読み込み時に除く（「使用量 CSV」節）。
 
 料金区分 `charge_class` は次の 6 値である。
 
@@ -24,7 +24,7 @@
 | `paid` | 金額が発生した分 | billing |
 | `included` | 含有枠で賄われた分（非公開・internal リポジトリ） | billing |
 | `public_free` | 公開リポジトリの無料分 | billing |
-| `dependabot_free` | Dependabot が起動したジョブの非有料分。含有枠を消費しない（公開範囲に依らない） | billing（`--usage-csv` だけ） |
+| `dependabot_free` | Dependabot の更新ジョブ（workflow_path が `dynamic/dependabot/`）の非有料分。含有枠を消費しない（公開範囲に依らない）。Dependabot の PR が起動した通常のワークフローは含まない | billing（`--usage-csv` だけ） |
 | `unknown` | 利用日時点の公開範囲を確認できない非有料分（既定の非有料分） | billing |
 | `self_hosted` | セルフホストランナー。GitHub への支払いなし | jobs |
 
@@ -62,29 +62,52 @@
 ## 使用量 CSV（`--usage-csv`）
 
 billing usage API の明細には、起動した利用者もワークフローも無く、Dependabot の分を見分けられない。
-請求画面からダウンロードする**詳細の**使用量レポート（CSV）には `username` と `workflow_path` があり、見分けられる（#221 の切り分けで確認、#228 で取り込み）。
+請求画面からダウンロードする**詳細の**使用量レポート（CSV）には `username` と `workflow_path` があり、`workflow_path` で見分けられる（#221 の切り分けで確認、#228 で取り込み）。
 `fetch_billing.py --usage-csv <path>` は、billing usage API を呼ばずにこの CSV から同じ形（`schema_version 1`・`source: "billing"`）の rows を作る。公開範囲だけは CSV に無いため、従来どおり `orgs/<org>/repos` を gh で取る（`--assume-current-visibility` の扱いも同じ）。
 
 | CSV の列 | 出力列・用途 | 扱い |
 |---|---|---|
 | `date` | `day` | UTC の日に直す |
 | `product` / `unit_type` | （取り込み条件） | 大小文字を無視して `actions` かつ `minutes` だけ |
-| `sku` | `sku` / `runner_type` | API 経路と同じ |
+| `sku` | `sku` / `runner_type` | 下の写像表で API の表記にそろえてから、API 経路と同じ規則で `runner_type` を決める。セルフホストの SKU の行は除く |
 | `quantity` | `minutes` | 区分ごとに分ける |
 | `applied_cost_per_quantity` | （出力しない） | API の `pricePerUnit` に相当。有料分数の換算と Linux 単価の決定に使う |
 | `gross_amount` / `discount_amount` / `net_amount` | `gross_usd` / `discount_usd` / `net_usd` | API 経路と同じ（`discount_amount` は任意） |
 | `repository` | `repo` | 先頭の `<org>/` を外す。空なら `(unattributed)` |
-| `organization` | （取り込み条件） | 列があり、空でなく `--org` と違う行は捨てて件数を warning にする（org 名は出さない） |
-| `username` / `workflow_path` | （判定にだけ使う） | 下の Dependabot の判定。**値は出力のどこにも書かない** |
+| `organization` | （取り込み条件・必須） | Actions の分の行で、空か `--org` と違う（大小文字は無視）ものがあれば止める。行の出どころを確かめられないため、捨てて続けない（エラー文は行番号だけで、org 名は出さない） |
+| `username` / `workflow_path` | （判定と件数にだけ使う） | 下の Dependabot の判定。**値は出力のどこにも書かない** |
 
 - 列名は公式文書（https://docs.github.com/en/billing/reference/billing-reports ）のフィールド表の名前で、前後の空白と大小文字だけを吸収する。別名表は持たず、違えば推測で合わせず止める
-- 必須列が無い、集計レポート（`username` / `workflow_path` が無い）、数値が空・非数・非有限・負、ファイルが通常ファイルでない、`MAX_CSV_BYTES`（64 MB）または `MAX_CSV_ROWS`（100 万行）を超える、のいずれかは何も書かず終了コード 1 で止まる。エラー文は行番号と列名だけを出し、セルの値は出さない
-- Dependabot の判定: `username` が `dependabot[bot]` に完全一致、または `workflow_path` が `dynamic/dependabot/` で始まる。判定した明細は、`netAmount` が正の部分（有料分）を `paid` に残し、残りの非有料分を `dependabot_free` にする（`quota_minutes` と `billable_minutes` は 0）
-- 判定の記録は件数と分数だけ。出力のトップレベルに `"input": "usage_csv"` と `"dependabot": {rule, items, by_username, by_workflow_path_only, minutes}` を書き、`warnings` に「Dependabot のジョブを N 明細・m 分と判定し…」を入れる。N が 0 でも書く（判定が動いたことを示す）
+- 必須列（`organization` を含む）が無い、集計レポート（`username` / `workflow_path` が無い）、`organization` が空か `--org` と違う Actions の行がある、数値が空・非数・非有限・負、集計後の値（分数の合計・quota など）が有限でない、ファイルが通常ファイルでない、`MAX_CSV_BYTES`（64 MB）または `MAX_CSV_ROWS`（100 万行）を超える、のいずれかは何も書かず終了コード 1 で止まる。エラー文は行番号と列名だけを出し、セルの値は出さない。出力の JSON は `allow_nan=False` で書き、`Infinity` / `NaN` を書かない
+- Dependabot の判定: `workflow_path` が `dynamic/dependabot/` で始まる行だけ（Dependabot の更新ジョブ）。判定した明細は、`netAmount` が正の部分（有料分）を `paid` に残し、残りの非有料分を `dependabot_free` にする（`quota_minutes` と `billable_minutes` は 0）
+- `username` が `dependabot[bot]` でも `workflow_path` が通常のワークフロー（`.github/workflows/*.yml`）の行は、Dependabot の PR が起動した通常の CI で、課金される。公式文書が含有分に数えないと書くのは Dependabot ジョブ（更新ジョブ・Dependabot graph jobs。出典は「含有枠の消費の確度」節）で、Dependabot の PR が起動したワークフローまで無料とは書いていない。この行は通常の行として公開範囲どおりに分類し、件数と分数だけを記録する。`workflow_path` が空で `username` だけが一致する行も、根拠が無いので無料扱いしない。#231 の時点では `username` の一致でも無料扱いしており、実 org の CSV で Dependabot と判定した分の大半がこの通常の CI だった
+- 判定の記録は件数と分数だけ。出力のトップレベルに `"input": "usage_csv"` と `"dependabot": {rule, items, minutes, pr_workflow_items, pr_workflow_minutes}`（`pr_workflow_*` は Dependabot の PR が起動した通常のワークフロー）を書き、`warnings` に「Dependabot の更新ジョブを N 明細・m 分と判定し…通常のワークフロー K 明細・k 分（無料扱いしない）…」を入れる。N が 0 でも書く（判定が動いたことを示す）
+
+セルフホストの SKU の除外:
+
+- `sku` を正規化（小文字化・`_` と `-` を空白に）して空白を詰めた名前が `selfhosted` を含む行（実 CSV で `actions_self_hosted_linux` を観測。公式の SKU 一覧 https://docs.github.com/en/billing/reference/product-and-sku-names には無いため、固定の一覧ではなく名前の一致で判定する）を、Dependabot の判定より前に除く。billing usage API はセルフホストの明細を返さないため、除くと API 経路と同じく GitHub ホストだけになる。残すと `runner_type` が名前の `linux` から `ubuntu` になり、セルフホスト分（`fetch_jobs.py` の rows）と二重に数える
+- Dependabot の更新ジョブがセルフホストで動いた行も同じく除く。Dependabot の件数・分数には入れず、セルフホスト側の内数として数える
+- 記録は件数と分数だけ。出力のトップレベルに `"self_hosted_excluded": {items, minutes, dependabot_items, with_amount_items}` を書き、1 件以上なら `warnings` に件数・分数を入れる。`gross_amount` か `net_amount` が正の行（`with_amount_items`）があれば、その金額を rows に入れていない旨を別の warning にする（件数だけで、金額は出さない）。セルフホストの課金は延期されており（出典は github.blog の changelog）、始まれば金額付きの行が出うる
+- セルフホストの行の日付も「CSV が覆う日」に数える（その日の GitHub ホストの利用が 0 であることは事実）
+
+SKU の写像（CSV の表記 → API の表記）:
+
+| CSV の `sku` | 出力の `sku` | `runner_type` |
+|---|---|---|
+| `actions_linux` | `Actions Linux` | `ubuntu` |
+| `actions_linux_slim` | `Actions Linux Slim` | `ubuntu` |
+| `actions_linux_arm` | `Actions Linux ARM` | `ubuntu-arm` |
+| `actions_windows` | `Actions Windows` | `windows` |
+| `actions_macos` | `Actions macOS 3-core` | `macos` |
+
+- 照合は前後の空白を除いた小文字で行う。写像の値は実 org の billing usage API の出力で観測した表記である。公式の SKU 一覧（product-and-sku-names）の説明文（`Actions Linux runners` など）は API の表記と一致しないため、根拠にしない
+- `actions_macos` は公式の SKU 単価表（https://docs.github.com/en/billing/reference/actions-runner-pricing ）で「macOS 3-core or 4-core（M1 or Intel）」の単一 SKU・単一単価で、コア数は SKU として分かれていない。`Actions macOS 3-core` はこの単一 SKU に API が付ける表示名として採り、実際のコア数を表すものではない。API の `Actions macOS 3-core` と CSV の `actions_macos` の単価が一致するかの実データでの照合は**未実施**
+- 写像に無い SKU（larger runner・`actions_windows_arm` など、API の表記を確かめていないもの）は、API 経路の未知 SKU と同じく名前のまま通し、`runner_type` は名前のキーワードで決める（該当なしは `other`）。黙って通さず、`warnings` に明細数と SKU 名（識別子の形の名前だけ、最大 10 種。ほかは種類数）を出す。表記が分かれば写像表（`fetch_billing.py` の `CSV_SKU_TO_API`）に足す
+- Linux 単価の決定（「有料分と含有枠の換算式」節）は写像後の `sku` で行う。写像の前後とも正規化後は `actions linux` になる
 - 詳細レポートの期間は最大 31 日。CSV の日付範囲が `--since` の月初から `--until` の月末（当月は今日）までを覆わないと、warning で「範囲外の日は 0 ではなく未取得」と知らせる
 - CSV 経路は API 経路の代わりで、同じ期間の API の rows と一緒に summarize.py へ渡すと「同じ source の重複」で止まる。期間をまたいだ併用はしない
 - CSV のダウンロードには請求画面を見られる権限が要る（billing usage API の権限は要らない）。CSV は非公開リポジトリ名・利用者名・金額を含むため、作業ツリーの外に置いてコミットしない
-- 実 org の CSV での列名・表記・請求画面との再照合は**未確認**（合成データでの回帰テストだけ）
+- 実 org の CSV で、公式のフィールド表の列名で読み込めることは確認した。そのとき見つかった SKU 表記の違い・セルフホストの行・Dependabot の判定の誤りは本節の規則で直した。修正後の実データでの再実行と請求画面との再照合は**未確認**（修正は合成データでの回帰テストだけ）
 
 ## 有料分と含有枠の換算式
 
@@ -141,7 +164,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - 利用時は公開・現在は非公開のリポジトリは、現在値で included に数えるため上振れする。逆に利用時は非公開・現在は公開なら public_free になり下振れする
 - 換算式（定価 ÷ Linux 単価）について、docs.github.com に倍率の明記は無い。公式の Actions 課金ページ（確認日 2026-10-28）は SKU ごとの分単価だけを載せる。ただし github.blog の FAQ（標準ランナーは定価で含有分を消費する）と #221 の実測が定価換算を支持する。arm64・slim・GPU の SKU が含有分を消費するかは記載がない。larger runner は含有分を使わず常に課金されると記載がある
 - 端数は行ごとに 6 桁で丸める。billing usage API の `quantity` は job ごとに分へ切り上げ済みの値で、スキルは丸め直さない。#221 では端数の寄与は請求画面の表示丸めの範囲内だった
-- Dependabot が起動したジョブ（Dependabot graph jobs を含む）は、公式には含有分に数えない。billing usage API の行は通常のジョブと同じ形で見分けられないため、API 経路ではスキルは included に数え、上振れする。`--usage-csv` 経路では username / workflow_path から判定して `dependabot_free` に分け、含有枠の消費から除く（#228。実 org の CSV での確認は未実施）
+- Dependabot が起動したジョブ（Dependabot graph jobs を含む）は、公式には含有分に数えない。billing usage API の行は通常のジョブと同じ形で見分けられないため、API 経路ではスキルは included に数え、上振れする。`--usage-csv` 経路では workflow_path から Dependabot の更新ジョブを判定して `dependabot_free` に分け、含有枠の消費から除く（#228。Dependabot の PR が起動した通常のワークフローは課金されるため除かない。修正後の実 org の CSV での確認は未実施）
 - 区分不明（削除済み・権限不足のリポジトリ）の分は quota に入らない。請求画面がこの分を含有枠に数えていれば下振れする（削除済みリポジトリの分を数えるかは未確定。#221）
 
 実 org での確認（#138）では、フラグ付きの概算値が請求画面の使用量を約 0.9% 上回った。要因の切り分けは次の「請求画面との差の切り分け（#221）」に記す。
@@ -155,7 +178,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 | 換算式（定価 ÷ Linux 単価） | 0% | 実測と整合 | 定価換算のときだけ差が Linux の整数分になった。旧来の固定倍率（macOS 10 倍）では、実在する行の組み合わせで差を説明できない |
 | 端数処理 | 0%（表示丸めの範囲内） | 実測と整合 | job ごとに分へ切り上げた集計が billing usage の quantity と 23 セル中 22 セルで一致した。切り上げは API の時点で済んでおり、スキルは丸め直さない |
 | 公開範囲の誤分類 | 測れない | — | team プランでは audit log API が使えない。events は公開から非公開への変更を記録しない。含有枠の大半を占めるリポは期間中に作られたもので、そこに公開期間があれば差はずっと大きくなるため、誤分類があっても小さなセルに限られる |
-| Dependabot ジョブを含有枠に数えている（スキル側の上振れ） | +1.9% | 確定 | 公式は Dependabot ジョブ（Dependabot graph jobs を含む）を含有分に数えない。請求画面の使用量 CSV で、含有枠に当たるリポの該当行は username が `dependabot[bot]`、workflow_path が `dynamic/dependabot/...` だった。billing usage API の行にはこの 2 列が無く、API 経路では見分けられない。#228 で CSV 経路（`--usage-csv`）を追加した（実データでの +1.9% の解消は未検証） |
+| Dependabot ジョブを含有枠に数えている（スキル側の上振れ） | +1.9% | 確定 | 公式は Dependabot ジョブ（Dependabot graph jobs を含む）を含有分に数えない。請求画面の使用量 CSV で、含有枠に当たるリポの該当行は username が `dependabot[bot]`、workflow_path が `dynamic/dependabot/...` だった。billing usage API の行にはこの 2 列が無く、API 経路では見分けられない。#228 で CSV 経路（`--usage-csv`）を追加した（実データでの +1.9% の解消は未検証）。その後、判定を workflow_path の前置一致だけにした（username だけが一致する行は Dependabot の PR が起動した通常の CI で課金される）。この +1.9% の再測は未実施 |
 | 削除済みリポジトリの区分不明分を数えていない（スキル側の下振れ） | −0.9% | 推定（未確定） | 公開範囲を引けず unknown になる。この分は使用量 CSV にも通常の行として載っていたが、CSV には公開範囲の列が無い。請求画面が含有枠に数えたかは、差が閉じることからの逆算で推定した。今は公開で、使った時点では非公開だったリポの分とも区別できない |
 | 合計 | +0.9% | — | 観測値と一致。残差は約 0.006% で、請求画面の表示丸めの内側 |
 
@@ -177,7 +200,8 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 
 出典（確認日 2026-10-28）:
 
-- https://docs.github.com/en/billing/reference/actions-runner-pricing : SKU ごとの分単価（単価比は Linux を 1 として slim 0.33・arm64 0.83・Windows 1.67・macOS 10.33）。job ごとに分へ切り上げ。larger runner は含有分を使えない
+- https://docs.github.com/en/billing/reference/actions-runner-pricing : SKU ごとの分単価（単価比は Linux を 1 として slim 0.33・arm64 0.83・Windows 1.67・macOS 10.33）。job ごとに分へ切り上げ。larger runner は含有分を使えない。`actions_macos` は「macOS 3-core or 4-core（M1 or Intel）」の単一 SKU
+- https://docs.github.com/en/billing/reference/product-and-sku-names : REST API で使う SKU 識別子の一覧（`actions_linux` など）。セルフホストの SKU は載っていない。各 SKU の説明文は billing usage API の `sku` の表記と一致しない
 - https://docs.github.com/en/billing/concepts/product-billing/github-actions : 倍率（multiplier）の記載なし。larger runner は常に課金。公開リポ・Pages・Dependabot での標準ランナー利用は無料
 - https://github.blog/changelog/2025-12-16-coming-soon-simpler-pricing-and-a-better-experience-for-github-actions/ : 標準ランナーは定価（list price）で含有分を消費するとの FAQ の記述。延期された self-hosted 課金の FAQ の中にあり、docs.github.com には同じ記述が無い
 - https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-on-actions : Dependabot ジョブは含有分に数えない
