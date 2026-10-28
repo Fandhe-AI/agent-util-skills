@@ -2,7 +2,8 @@
 """build_dashboard.py の回帰テスト。
 
 役割: batch.json の形（ArtifactData batch の writes）、index.json の 256 KB 検査、
---update が dataset の source と updated だけを変えること（jobs だけの更新を含む）、--add-dataset による新 dataset の set、入力検証の fail-closed を固定する。
+--update が dataset の source と updated だけを変えること（jobs だけの更新を含む）、--add-dataset による新 dataset の set、入力検証の fail-closed、--refresh-template によるページ（files/index.html）の差し替えと
+差し替えなしの更新が従来と同じ batch を出すことを固定する。
 CI（ci.yml の skill-tests ジョブ）で `python3 -I -B -m unittest discover` により直接実行される。
 
 fixture は既存の合成データ（org は example-org）。本リポは PUBLIC のため実在の値を入れない。
@@ -307,6 +308,146 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("jobs.json", out)
         rc, _, _ = self.add(["--add-dataset", "jobs"], rows=(BILLING,), urls=())
         self.assertEqual(rc, 1)
+
+
+class RefreshTemplateTests(unittest.TestCase):
+    """--update --refresh-template（Issue #207）。既定の更新の batch は変わらないことも固定する。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def go(self, extra, rows=(BILLING, JOBS), urls=("/_blob/n0", "/_blob/n1"), update=True):
+        a = base(self.out, rows) + (["--update"] if update else [])
+        for u in urls:
+            a += ["--asset-url", u]
+        return run(a + list(extra))
+
+    def shape(self):
+        return [(w["op"], w["collection"], w["doc_id"], w.get("if_version"),
+                 os.path.basename(w["file_path"])) for w in load(self.out, "batch.json")]
+
+    def exists(self, n):
+        return os.path.exists(os.path.join(self.out, n))
+
+    def test_refresh_template_batch(self):
+        rc, out, err = self.go(["--if-version", "billing=3", "--if-version", "jobs=5",
+                                "--refresh-template", "--template-if-version", "7"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.shape(), [
+            ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
+            ("update", "datasets", "jobs", 5, "dataset-jobs.update.json"),
+            ("set", "files", "index.html", 7, "index.json")])
+        last = load(self.out, "batch.json")[-1]
+        self.assertEqual(set(last), {"op", "collection", "doc_id", "file_path", "if_version"})
+        self.assertTrue(last["file_path"].startswith(os.path.realpath(self.out) + os.sep))
+        with open(TEMPLATE, encoding="utf-8") as f:
+            self.assertEqual(load(self.out, "index.json"), {"text": f.read()})
+        self.assertLessEqual(len(out.splitlines()), 8)
+        self.assertNotIn("<html", out.lower())
+
+    def test_refresh_template_jobs_only(self):
+        rc, _, err = self.go(["--if-version", "jobs=5", "--refresh-template", "--template-if-version", "2"],
+                             rows=(JOBS,), urls=("/_blob/n0",))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([x[:3] for x in self.shape()],
+                         [("update", "datasets", "jobs"), ("set", "files", "index.html")])
+
+    def test_refresh_template_with_add_dataset(self):
+        rc, _, err = self.go(["--if-version", "billing=3", "--add-dataset", "jobs",
+                              "--refresh-template", "--template-if-version", "4"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.shape(), [
+            ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
+            ("set", "datasets", "jobs", None, "dataset-jobs.json"),
+            ("set", "files", "index.html", 4, "index.json")])
+
+    def test_refresh_template_invalid(self):
+        cases = [
+            (["--refresh-template"], dict(update=False, urls=("/_blob/n0", "/_blob/n1"))),
+            (["--template-if-version", "3"], dict(update=False)),
+            (["--if-version", "billing=3", "--if-version", "jobs=5", "--template-if-version", "3"], {}),
+            (["--if-version", "billing=3", "--if-version", "jobs=5", "--refresh-template"], {}),
+            (["--if-version", "billing=3", "--if-version", "jobs=5", "--refresh-template",
+              "--template-if-version", "0"], {}),
+            (["--if-version", "billing=3", "--if-version", "jobs=5", "--refresh-template",
+              "--template-if-version", "x"], {}),
+        ]
+        for extra, kw in cases:
+            with tempfile.TemporaryDirectory() as d:
+                self.out = d
+                rc, _, _ = self.go(extra, **kw)
+                self.assertIn(rc, (1, 2), extra)
+                self.assertFalse(self.exists("batch.json"), extra)
+                self.assertFalse(self.exists("index.json"), extra)
+
+    def test_refresh_template_oversize(self):
+        import contextlib
+        import io
+        from unittest import mock
+        big = os.path.join(self.out, "big.html")
+        with open(big, "w", encoding="utf-8") as f:
+            f.write("a" * (256 * 1024 + 1))
+        out = os.path.join(self.out, "o")
+        for urls, extra in ((("/_blob/n0", "/_blob/n1"), ["--if-version", "billing=3", "--if-version", "jobs=5",
+                                                         "--template-if-version", "2"]), ((), [])):
+            a = base(out) + ["--update", "--refresh-template"] + extra
+            for u in urls:
+                a += ["--asset-url", u]
+            buf = io.StringIO()
+            with mock.patch.object(bd, "TEMPLATE_PATH", big), contextlib.redirect_stderr(buf):
+                rc = bd.main(a)
+            self.assertEqual(rc, 1)
+            self.assertIn("256 KB", buf.getvalue())
+            for n in ("batch.json", "index.json", "dataset-billing.update.json", "dataset-jobs.update.json"):
+                self.assertFalse(os.path.exists(os.path.join(out, n)), n)
+
+    def test_refresh_template_stage1(self):
+        for n in ("batch.json", "index.json"):
+            with open(os.path.join(self.out, n), "w") as f:
+                f.write("[]")
+        rc, out, err = self.go(["--refresh-template"], urls=())
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(self.exists("batch.json"))
+        self.assertTrue(self.exists("index.json"))
+        self.assertIn("--template-if-version", out)
+
+    def test_refresh_template_total_size(self):
+        import contextlib
+        import io
+        from unittest import mock
+        out = os.path.join(self.out, "o")
+        a = base(out) + ["--update", "--refresh-template", "--template-if-version", "2",
+                         "--if-version", "billing=3", "--if-version", "jobs=5",
+                         "--asset-url", "/_blob/n0", "--asset-url", "/_blob/n1"]
+        buf = io.StringIO()
+        with mock.patch.object(bd, "MAX_BATCH_BYTES", 1000), contextlib.redirect_stderr(buf):
+            rc = bd.main(a)
+        self.assertEqual(rc, 1)
+        self.assertIn("1 MiB", buf.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(out, "batch.json")))
+
+    def test_default_update_batch_unchanged(self):
+        cases = [
+            (dict(), ["--if-version", "billing=3", "--if-version", "jobs=5"], [
+                ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
+                ("update", "datasets", "jobs", 5, "dataset-jobs.update.json")]),
+            (dict(rows=(JOBS,), urls=("/_blob/n0",)), ["--if-version", "jobs=5"], [
+                ("update", "datasets", "jobs", 5, "dataset-jobs.update.json")]),
+            (dict(), ["--if-version", "billing=3", "--add-dataset", "jobs"], [
+                ("update", "datasets", "billing", 3, "dataset-billing.update.json"),
+                ("set", "datasets", "jobs", None, "dataset-jobs.json")]),
+        ]
+        for kw, extra, want in cases:
+            with tempfile.TemporaryDirectory() as d:
+                self.out = d
+                rc, _, err = self.go(extra, **kw)
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(self.shape(), want)
+                self.assertFalse(self.exists("index.json"))
 
 
 class ValidationTests(unittest.TestCase):
