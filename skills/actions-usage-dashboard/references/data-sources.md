@@ -104,7 +104,7 @@ Windows や macOS のように単価が高い SKU は、定価を Linux 単価�
 - `--assume-current-visibility` で分類した quota は、現在の公開範囲と「定価 ÷ Linux 単価」の換算に依存する。上振れも下振れもあり得るため概算とし、下限とは言わない
 - `fetch_billing.py` は出力のトップレベルに `assume_current_visibility`（真偽値）を記録する。旧形式の文書（キーなし）は行の内容で判定し、included / public_free 行があれば概算に倒す。値が真偽値以外なら `summarize.py` は止まる
 - フラグが偽なのに分類済みの行がある矛盾した文書も、安全側の概算にする
-- 雛形 `templates/dashboard/index.html` は本規則をまだ反映していない（unknown > 0 だけで下限と出す）
+- 雛形 `templates/dashboard/index.html` も同じ規則を適用する。billing 文書の `assume_current_visibility` が真、または included / public_free 行・quota > 0 の行があれば、下限（「以上」）ではなく「（概算）」と表示し、残量は区分不明があれば不明とする。判定は文書全体で行う（選択期間では変えない）
 
 上振れ・下振れの要因（含有枠の消費が請求画面と一致しない理由）:
 

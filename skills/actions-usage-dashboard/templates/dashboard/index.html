@@ -579,7 +579,7 @@ function paintControls(sel, facts, sources) {
   $('#aud-incl').checked = sel.include_free;
 }
 
-function paintTotals(rows, sel, period, cov, ready) {
+function paintTotals(rows, sel, period, cov, ready, approx) {
   const byKey = new Map((rows || []).map((r) => [r.key, r]));
   const key = U.keyOf([period, sel.runner_type || '*', sel.repo || '*']);
   const row = byKey.get(key);
@@ -597,7 +597,8 @@ function paintTotals(rows, sel, period, cov, ready) {
     if (r && !src.some((k) => cov[k] === 'none')) {
       text = field === 'net_usd' || field === 'gross_usd' ? fmtUsd(r[field]) : fmtMin(r[field]);
       // 区分不明の利用がある範囲では含有枠の消費は下限値になる。
-      if (field === 'quota_minutes' && r.unknown_minutes > 0) text += ' 以上';
+      // 分類済みの枠消費（現在の公開範囲に基づく）は上振れもあり得るため、下限ではなく概算と表示する。
+      if (field === 'quota_minutes' && r.unknown_minutes > 0) text += approx ? '（概算）' : ' 以上';
     }
     el.textContent = text;
   });
@@ -605,12 +606,14 @@ function paintTotals(rows, sel, period, cov, ready) {
   page.querySelectorAll('.aud-paid').forEach((el) => el.classList.toggle('aud-alert', alert));
   $('#aud-tile-paid').classList.toggle('aud-tile-alert', alert);
   $('#aud-tile-net').classList.toggle('aud-tile-alert', alert);
-  const lowerBound = !!row && row.unknown_minutes > 0;
+  const hasUnknown = !!row && row.unknown_minutes > 0;
+  const lowerBound = hasUnknown && !approx;
   const qnote = document.getElementById('aud-quota-note');
-  if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : '定価を Linux 単価で割った分';
+  if (qnote) qnote.textContent = lowerBound ? '区分不明の利用があるため下限値' : (approx ? '現在の公開範囲での概算（定価を Linux 単価で割った分）' : '定価を Linux 単価で割った分');
   let remaining;
   if (cov.billing === 'none' || cov.billing === 'partial' || cov.billing === 'unknown') remaining = '不明（選択月の billing を取得しきれていない）';
   else if (lowerBound) remaining = '不明（区分不明の利用があり、消費は下限値）';
+  else if (hasUnknown) remaining = '不明（区分不明の利用があり、消費は概算）';
   else if (sel.plan === null) remaining = 'プラン未指定のため不明';
   else if (period === '*' || sel.runner_type || sel.repo) remaining = '月全体を選んだときだけ表示';
   // 行がない単月は、billing 取得済み（上の分岐を通過）かつ準備完了のときだけ消費 0 として全量を残量にする。
@@ -730,7 +733,7 @@ function drawLegend(host, model, colors, axis) {
   btns.append('span').text((g) => labelOf(axis, g.id) + ' ' + fmtMin(g.total) + (g.lower ? ' 以上' : ''));
 }
 
-function paintTable(rows, sel, period) {
+function paintTable(rows, sel, period, approx) {
   const metric = sel.include_free ? 'minutes' : 'quota_minutes';
   $('#aud-th-minutes').textContent = sel.include_free ? '分数' : '分数（枠の消費のみ）';
   $('#aud-th-minutes').parentNode.setAttribute('data-field', metric);
@@ -756,7 +759,7 @@ function paintTable(rows, sel, period) {
   d3.select(document.getElementById('aud-tbody')).selectAll('tr').data(shown, (r) => r.key).join('tr')
     .attr('data-key', (r) => r.key)
     .each(function (r) {
-      const lb = r.unknown_minutes > 0 ? ' 以上' : '';
+      const lb = r.unknown_minutes > 0 ? (approx ? '（概算）' : ' 以上') : '';
       const cells = [
         { text: labelOf(sel.group_by, r.group) },
         { text: fmtMin(r[metric]) + (metric === 'quota_minutes' ? lb : '') },
@@ -768,6 +771,8 @@ function paintTable(rows, sel, period) {
     }).order();
   $('#aud-table-empty').hidden = shown.length > 0;
 }
+
+const LOWER_NOTE = '区分不明の利用があるため、グラフの枠消費は下限値（「以上」）になる。';
 
 function render() {
   const sel = readSel();
@@ -791,7 +796,12 @@ function render() {
     jobs: jobsD.status === 'ok' ? U.coverage(jobsD.data, period, today, billD.status === 'ok' ? billD.data : null) : 'none',
     jobsConnected: jobsD.status === 'ok'
   };
-  paintTotals(ready ? t.data : [], sel, period, cov, ready);
+  // 含有枠の消費を「下限」と言えるのは quota が構造上 0 の既定モードだけ（summarize.py と同じ規則。
+  // references/data-sources.md「含有枠の消費の確度」）。--assume-current-visibility で分類した行がある、または
+  // billing 文書がその旨を記録しているときは、上振れもあり得るため概算と表示する。
+  const approx = (billD.status === 'ok' && !!billD.data && billD.data.assume_current_visibility === true)
+    || facts.some((r) => r.charge_class === 'included' || r.charge_class === 'public_free' || r.quota_minutes > 0);
+  paintTotals(ready ? t.data : [], sel, period, cov, ready, approx);
   $('#aud-nojobs').hidden = jobsD.status === 'ok';
   // 推定は jobs 文書全体の属性。選択期間に jobs がない（不明表示）ときは推定と書かない。
   const est = jobsD.status === 'ok' && U.isEstimate(jobsD.data) && cov.jobs !== 'none';
@@ -823,13 +833,18 @@ function render() {
     const colors = colorMap(model.axis, model.groups);
     drawChart(chart, model, colors, model.axis, latest);
     drawLegend(legend, model, colors, model.axis);
-    lowerEl.hidden = !model.lowerBound;
+    if (approx) {
+      model.groups.forEach((g) => { g.lower = false; });
+      model.lowerBound = false;
+    }
+    lowerEl.textContent = approx ? '区分不明の利用があるため、グラフの枠消費にはその分が含まれない（概算）。' : LOWER_NOTE;
+    lowerEl.hidden = approx ? !model.groups.some((g) => g.id === 'unknown' && (model.values.unknown && Object.keys(model.values.unknown).length)) : !model.lowerBound;
   } else {
     lowerEl.hidden = true;
     drawMessage(chart, '—');
     d3.select(legend).selectAll('*').remove();
   }
-  paintTable(ready ? a.data : [], sel, period);
+  paintTable(ready ? a.data : [], sel, period, approx);
 }
 
 function change(patch) {
