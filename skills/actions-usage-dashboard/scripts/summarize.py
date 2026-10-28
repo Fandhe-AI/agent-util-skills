@@ -407,6 +407,12 @@ def render_text(s):
             inc["ratio"] * 100, inc["remaining"])
         if inc["over"] > 0:
             txt += "、超過 %.1f 分" % inc["over"]
+    elif inc["approximate"]:
+        # 含有分（プランの上限）が不明でも、消費値の確度は上限の有無と独立に表示する。
+        txt = "含有枠: 消費 約 %.1f 分（概算）（実 %.1f 分）/ 含有分不明" % (inc["quota_minutes"], inc["minutes"])
+    elif inc["lower_bound"]:
+        txt = "含有枠: 消費 %.1f 分以上（下限。区分不明あり）（実 %.1f 分）/ 含有分不明" % (
+            inc["quota_minutes"], inc["minutes"])
     else:
         txt = "含有枠: 消費 %.1f 分（実 %.1f 分）/ 含有分不明" % (inc["quota_minutes"], inc["minutes"])
     out.append(txt)

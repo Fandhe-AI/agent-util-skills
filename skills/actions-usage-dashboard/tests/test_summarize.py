@@ -304,6 +304,18 @@ class WarningAndMissingBillingTests(Base):
         self.assertTrue(sm.is_classified([row("2026-10-01", "p", "public_free", 1, vis="public")], None))
         self.assertFalse(sm.is_classified([row("2026-10-01", "p", "included", 0)], None))
 
+    def test_unknown_plan_keeps_precision_marks(self):
+        """含有分（プラン上限）が不明でも、消費値の確度（概算・下限）は表示する。"""
+        for plan in ("mystery-plan",):
+            with self.subTest(plan=plan):
+                text = "\n".join(sm.render_text(self.build(NO_UNKNOWN, True, plan=plan)))
+                self.assertIn("消費 約 800.0 分（概算）", text)
+                self.assertIn("含有分不明", text)
+                text = "\n".join(sm.render_text(self.build(DEFAULT_MODE, False, plan=plan)))
+                self.assertIn("消費 0.0 分以上（下限。区分不明あり）", text)
+                text = "\n".join(sm.render_text(self.build([row("2026-10-01", "r", "paid", 10, usd=0.08)], False, plan=plan)))
+                self.assertIn("消費 0.0 分（実 0.0 分）/ 含有分不明", text)
+
     def test_flag_true_without_unknown_over_quota(self):
         rows = [row("2026-10-01", "r", "included", 2500, quota=2500)]
         s = self.build(rows, True, plan="free")
