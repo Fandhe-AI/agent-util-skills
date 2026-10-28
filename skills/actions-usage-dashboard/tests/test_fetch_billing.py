@@ -396,7 +396,13 @@ PATH_DEP = "dynamic/dependabot/updates-synth"
 TODAY = datetime(2026, 7, 31, tzinfo=timezone.utc).date()
 
 
-def crow(date, repo, qty, price, gross, net, user=USER_ALICE, path=PATH_CI, sku="Actions Linux",
+# CSV の SKU 表記から billing usage API の表記への対応（テスト側で独立に持つ。fb の写像表をそのまま使わない）
+API_SKU = {"actions_linux": "Actions Linux", "actions_linux_slim": "Actions Linux Slim",
+           "actions_linux_arm": "Actions Linux ARM", "actions_windows": "Actions Windows",
+           "actions_macos": "Actions macOS 3-core"}
+
+
+def crow(date, repo, qty, price, gross, net, user=USER_ALICE, path=PATH_CI, sku="actions_linux",
          product="Actions", unit="Minutes", org=ORG, discount=None):
     d = gross - net if discount is None else discount
     return [date, product, sku, str(qty), unit, str(price), str(gross), str(d), str(net), org, repo, "", user, path]
@@ -414,7 +420,8 @@ def api_payload(rows):
     """CSV 行（crow）と同じ明細を API の usageItems にしたもの（等価性の検証用）。"""
     items = []
     for r in rows:
-        items.append({"date": r[0] + "T00:00:00Z", "product": r[1], "sku": r[2], "quantity": float(r[3]),
+        items.append({"date": r[0] + "T00:00:00Z", "product": r[1], "sku": API_SKU.get(r[2], r[2]),
+                      "quantity": float(r[3]),
                       "unitType": r[4], "pricePerUnit": float(r[5]), "grossAmount": float(r[6]),
                       "discountAmount": float(r[7]), "netAmount": float(r[8]), "repositoryName": r[10]})
     return {"usageItems": items}
@@ -447,17 +454,36 @@ class UsageCsvLoadTest(unittest.TestCase):
         self.assertIn("CSV 行 2", str(cm.exception))
         self.assertNotIn("priv-api", str(cm.exception))
 
-    def test_dependabot_by_username_and_path(self):
+    def test_dependabot_username_only_stays_billable(self):
+        # Dependabot の PR が起動した通常の CI（username だけ一致）は課金対象。無料扱いせず件数だけ記録する
         rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]"),
-                crow("2026-07-01", "priv-api", 20, 0.008, 0.16, 0.0, user=USER_ALICE, path=PATH_DEP),
-                crow("2026-07-01", "priv-api", 30, 0.008, 0.24, 0.0)]
+                crow("2026-07-01", "priv-api", 3, 0.008, 0.024, 0.0, user="dependabot[bot]", path="")]
         payloads, st = self.load(rows)
-        flags = [i["dependabot"] for i in payloads["2026-07"]["usageItems"]]
-        self.assertEqual(flags, [True, True, False])
-        self.assertEqual((st["items"], st["by_username"], st["by_path_only"], st["minutes"]), (2, 1, 1, 30.0))
+        self.assertEqual([i["dependabot"] for i in payloads["2026-07"]["usageItems"]], [False, False])
+        self.assertEqual((st["items"], st["minutes"]), (0, 0.0))
+        self.assertEqual((st["pr_items"], st["pr_minutes"]), (2, 13.0))
+        r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
+        self.assertEqual([(x["charge_class"], x["minutes"], x["quota_minutes"]) for x in r],
+                         [("included", 13.0, 13.0)])
+
+    def test_dependabot_username_and_path_excluded_from_quota(self):
+        payloads, st = self.load([crow("2026-07-01", "priv-api", 20, 0.008, 0.16, 0.0,
+                                       user="dependabot[bot]", path=PATH_DEP)])
+        self.assertEqual([i["dependabot"] for i in payloads["2026-07"]["usageItems"]], [True])
+        self.assertEqual((st["items"], st["minutes"], st["pr_items"]), (1, 20.0, 0))
+        r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
+        self.assertEqual([(x["charge_class"], x["quota_minutes"]) for x in r], [("dependabot_free", 0.0)])
+
+    def test_dependabot_path_only_excluded_from_quota(self):
+        payloads, st = self.load([crow("2026-07-01", "priv-api", 30, 0.008, 0.24, 0.0,
+                                       user=USER_ALICE, path=PATH_DEP)])
+        self.assertEqual([i["dependabot"] for i in payloads["2026-07"]["usageItems"]], [True])
+        self.assertEqual((st["items"], st["minutes"], st["pr_items"]), (1, 30.0, 0))
+        r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
+        self.assertEqual([x["charge_class"] for x in r], ["dependabot_free"])
 
     def test_dependabot_free_rows_and_default_mode(self):
-        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]"),
+        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]", path=PATH_DEP),
                 crow("2026-07-01", "priv-api", 30, 0.008, 0.24, 0.0)]
         payloads, _ = self.load(rows)
         # 既定モード（公開範囲を確定しない）でも Dependabot 分は dependabot_free、残りは unknown
@@ -478,13 +504,13 @@ class UsageCsvLoadTest(unittest.TestCase):
         self.assertEqual(len(idx), len(r))  # (day, repo, sku, charge_class) が一意
 
     def test_dependabot_public_repo_still_dependabot_free(self):
-        payloads, _ = self.load([crow("2026-07-01", "pub-site", 10, 0.008, 0.08, 0.0, user="dependabot[bot]")])
+        payloads, _ = self.load([crow("2026-07-01", "pub-site", 10, 0.008, 0.08, 0.0, user="dependabot[bot]", path=PATH_DEP)])
         r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
         self.assertEqual([x["charge_class"] for x in r], ["dependabot_free"])
 
     def test_dependabot_paid_part_stays_paid(self):
         # net 0.3 / 0.008 = 37.5 分は有料のまま。残り 62.5 分だけが dependabot_free
-        payloads, _ = self.load([crow("2026-07-01", "priv-api", 100, 0.008, 0.8, 0.3, user="dependabot[bot]")])
+        payloads, _ = self.load([crow("2026-07-01", "priv-api", 100, 0.008, 0.8, 0.3, user="dependabot[bot]", path=PATH_DEP)])
         r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
         idx = index(r)
         self.assertAlmostEqual(idx[("2026-07-01", "priv-api", "Actions Linux", "paid")]["minutes"], 37.5)
@@ -495,7 +521,7 @@ class UsageCsvLoadTest(unittest.TestCase):
         self.assertAlmostEqual(sum(x["minutes"] for x in r), 100)
 
     def test_mixed_unit_sums_back(self):
-        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]"),
+        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]", path=PATH_DEP),
                 crow("2026-07-01", "priv-api", 40, 0.008, 0.32, 0.0),
                 crow("2026-07-01", "priv-api", 50, 0.008, 0.4, 0.16)]
         payloads, _ = self.load(rows)
@@ -516,13 +542,14 @@ class UsageCsvLoadTest(unittest.TestCase):
                              fb.build_rows({"2026-07": api_payload(rows)}, VISIBILITY, ORG, flag))
 
     def test_warnings_count_and_zero_case(self):
-        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]"),
+        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]", path=PATH_DEP),
+                crow("2026-07-02", "priv-api", 7, 0.008, 0.056, 0.0, user="dependabot[bot]"),
                 crow("2026-07-31", "priv-api", 5, 0.008, 0.04, 0.0)]
         _, st = self.load(rows)
         w = fb.csv_warnings(st, ["2026-07"], TODAY)
         self.assertEqual(len(w), 1)
         self.assertIn("1 明細・10.0 分", w[0])
-        self.assertIn("username 一致 1 / workflow_path のみ 0", w[0])
+        self.assertIn("Dependabot の PR が起動した通常のワークフロー 1 明細・7.0 分（無料扱いしない）", w[0])
         _, st = self.load([crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0),
                            crow("2026-07-31", "priv-api", 5, 0.008, 0.04, 0.0)])
         w = fb.csv_warnings(st, ["2026-07"], TODAY)
@@ -530,11 +557,13 @@ class UsageCsvLoadTest(unittest.TestCase):
 
     def test_sensitive_values_not_in_warnings_or_rows(self):
         rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]", path=PATH_DEP),
-                crow("2026-07-02", "priv-api", 10, 0.008, 0.08, 0.0, org="other-synth")]
+                crow("2026-07-02", "priv-api", 10, 0.008, 0.08, 0.0, user="dependabot[bot]"),
+                crow("2026-07-03", "priv-api", 10, 0.0, 0.0, 0.0, user="dependabot[bot]",
+                     path=PATH_DEP, sku="actions_self_hosted_linux")]
         payloads, st = self.load(rows)
         blob = json.dumps([fb.build_rows(payloads, VISIBILITY, ORG, True),
                            fb.csv_warnings(st, ["2026-07"], TODAY)], ensure_ascii=False)
-        for secret in (USER_ALICE, PATH_CI, PATH_DEP, "other-synth", "dependabot[bot]"):
+        for secret in (USER_ALICE, PATH_CI, PATH_DEP, "dependabot[bot]"):
             self.assertNotIn(secret, blob)
 
     def test_rejected_inputs(self):
@@ -570,18 +599,39 @@ class UsageCsvLoadTest(unittest.TestCase):
         payloads, _ = self.load([crow("2026-07-01", "priv-api", 1, 0.008, 0.008, 0.0)], bom=True)
         self.assertEqual(len(payloads["2026-07"]["usageItems"]), 1)
 
-    def test_drops_other_org_period_and_non_actions(self):
+    def test_drops_period_and_non_actions(self):
         rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0),
-                crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, org="other-synth"),
                 crow("2026-06-30", "priv-api", 10, 0.008, 0.08, 0.0),
                 crow("2026-07-01", "priv-api", 3, 0.0, 0.0, 0.0, unit="GigabyteHours"),
-                crow("2026-07-01", "priv-api", 7, 0.04, 0.28, 0.0, product="Copilot")]
+                crow("2026-07-01", "priv-api", 7, 0.04, 0.28, 0.0, product="Copilot", org="")]
         payloads, st = self.load(rows)
         self.assertEqual(len(payloads["2026-07"]["usageItems"]), 1)
-        self.assertEqual((st["other_org"], st["out_of_period"]), (1, 1))
+        self.assertEqual(st["out_of_period"], 1)
         w = fb.csv_warnings(st, ["2026-07"], TODAY)
-        self.assertTrue(any("他の org の行 1 件" in x for x in w))
         self.assertTrue(any("対象期間外の明細 1 件" in x for x in w))
+
+    def test_other_or_empty_org_rejected(self):
+        # 出どころを確かめられない行は捨てずに止める（org 名・セル値はエラー文に出さない）
+        for bad, word in (("other-synth", "一致しない"), ("", "空")):
+            with self.subTest(org=bad):
+                with self.assertRaises(fb.FetchError) as cm:
+                    self.load([crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0),
+                               crow("2026-07-02", "priv-api", 10, 0.008, 0.08, 0.0, org=bad)])
+                msg = str(cm.exception)
+                self.assertIn("CSV 行 3", msg)
+                self.assertIn(word, msg)
+                self.assertNotIn("other-synth", msg)
+                self.assertNotIn("priv-api", msg)
+        # 大小文字の違いは同じ org として扱う
+        payloads, _ = self.load([crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, org=ORG.upper())])
+        self.assertEqual(len(payloads["2026-07"]["usageItems"]), 1)
+
+    def test_missing_organization_column_rejected(self):
+        keep = [i for i, h in enumerate(CSV_HEADER) if h != "organization"]
+        full = crow("2026-07-01", "priv-api", 1, 0.008, 0.008, 0.0)
+        with self.assertRaises(fb.FetchError) as cm:
+            self.load([[full[i] for i in keep]], header=[CSV_HEADER[i] for i in keep])
+        self.assertIn("organization", str(cm.exception))
 
     def test_date_range_warning(self):
         _, st = self.load([crow("2026-07-10", "priv-api", 1, 0.008, 0.008, 0.0)])
@@ -604,6 +654,117 @@ class UsageCsvLoadTest(unittest.TestCase):
     def test_non_regular_file(self):
         with self.assertRaises(fb.FetchError):
             fb.load_usage_csv(self._tmp.name, ORG, ["2026-07"])
+
+
+class UsageCsvSkuTest(unittest.TestCase):
+    """使用量 CSV のセルフホスト SKU の除外と、SKU 表記の API への写像を固定する（合成データのみ）。
+
+    billing usage API はセルフホストの明細を返さず（fetch_billing.py は SKU で除外していない）、
+    セルフホスト分は fetch_jobs.py の rows が担当する。CSV にはセルフホストの SKU 行があるため、
+    CSV 経路だけが読み込み時に除く。SKU 表記は API と同じにそろえ、経路で結果を変えない。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = os.path.join(self._tmp.name, "usage.csv")
+
+    def load(self, rows, months=("2026-07",)):
+        write_csv(self.path, rows)
+        return fb.load_usage_csv(self.path, ORG, list(months))
+
+    def test_self_hosted_sku_rows_excluded(self):
+        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0),
+                crow("2026-07-01", "priv-api", 300, 0.0, 0.0, 0.0, sku="actions_self_hosted_linux"),
+                crow("2026-07-02", "priv-api", 50, 0.0, 0.0, 0.0, sku="actions_self_hosted_windows")]
+        payloads, st = self.load(rows)
+        self.assertEqual([i["sku"] for i in payloads["2026-07"]["usageItems"]], ["Actions Linux"])
+        self.assertEqual(st["self_hosted"], {"items": 2, "minutes": 350.0, "dependabot_items": 0,
+                                             "with_amount_items": 0})
+        # セルフホストしか無い日も CSV が覆う日として数える（GitHub ホストの利用 0 は事実）
+        self.assertIn(fb.date(2026, 7, 2), st["dates"])
+        r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
+        self.assertEqual([(x["charge_class"], x["minutes"], x["runner_type"]) for x in r],
+                         [("included", 10.0, "ubuntu")])
+        w = fb.csv_warnings(st, ["2026-07"], TODAY)
+        self.assertTrue(any("セルフホストの SKU の明細 2 件・350.0 分を除いた" in x for x in w), w)
+
+    def test_self_hosted_dependabot_rows_excluded(self):
+        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0),
+                crow("2026-07-01", "priv-api", 6, 0.0, 0.0, 0.0, user="dependabot[bot]", path=PATH_DEP,
+                     sku="actions_self_hosted_linux")]
+        payloads, st = self.load(rows)
+        self.assertEqual(len(payloads["2026-07"]["usageItems"]), 1)
+        # Dependabot の集計にはセルフホスト分を混ぜない。セルフホスト側の内数として数える
+        self.assertEqual((st["items"], st["minutes"]), (0, 0.0))
+        self.assertEqual(st["self_hosted"]["dependabot_items"], 1)
+        r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
+        self.assertNotIn("dependabot_free", {x["charge_class"] for x in r})
+        self.assertAlmostEqual(sum(x["minutes"] for x in r), 10.0)
+
+    def test_self_hosted_with_amount_is_reported(self):
+        _, st = self.load([crow("2026-07-01", "priv-api", 10, 0.002, 0.02, 0.02, sku="actions_self_hosted_linux")])
+        self.assertEqual(st["self_hosted"]["with_amount_items"], 1)
+        w = fb.csv_warnings(st, ["2026-07"], TODAY)
+        self.assertTrue(any("金額が付いた明細 1 件" in x for x in w), w)
+
+    def test_sku_mapped_to_api_notation(self):
+        rows = [crow("2026-07-01", "priv-api", 10, 0.008, 0.08, 0.0, sku="actions_linux"),
+                crow("2026-07-01", "priv-api", 10, 0.064, 0.64, 0.0, sku="actions_macos"),
+                crow("2026-07-01", "priv-api", 10, 0.016, 0.16, 0.0, sku="actions_windows"),
+                crow("2026-07-01", "priv-api", 10, 0.002, 0.02, 0.0, sku="actions_linux_slim"),
+                crow("2026-07-01", "priv-api", 10, 0.005, 0.05, 0.0, sku=" ACTIONS_LINUX_ARM ")]
+        payloads, st = self.load(rows)
+        self.assertEqual([i["sku"] for i in payloads["2026-07"]["usageItems"]],
+                         ["Actions Linux", "Actions macOS 3-core", "Actions Windows",
+                          "Actions Linux Slim", "Actions Linux ARM"])
+        self.assertEqual(st["unmapped"], {"items": 0, "skus": []})
+        rows[-1][2] = "actions_linux_arm"
+        for flag in (False, True):
+            csv_rows, csv_price = fb.build_rows(payloads, VISIBILITY, ORG, flag)
+            api_rows, api_price = fb.build_rows({"2026-07": api_payload(rows)}, VISIBILITY, ORG, flag)
+            self.assertEqual(csv_rows, api_rows)
+            self.assertEqual(csv_price, {"2026-07": 0.008})
+        rt = {x["sku"]: x["runner_type"] for x in csv_rows}
+        self.assertEqual(rt, {"Actions Linux": "ubuntu", "Actions macOS 3-core": "macos",
+                              "Actions Windows": "windows", "Actions Linux Slim": "ubuntu",
+                              "Actions Linux ARM": "ubuntu-arm"})
+        self.assertEqual([x for x in fb.csv_warnings(st, ["2026-07"], TODAY) if "写像" in x or "セルフホスト" in x], [])
+
+    def test_unmapped_sku_kept_and_reported(self):
+        # 写像に無い SKU は API 経路の未知 SKU と同じく名前のまま残し（runner_type はキーワード照合）、
+        # 黙って通さず件数と SKU 名を warning に出す。識別子の形でない名前は件数だけにする
+        odd = "x\x1b[31m" + "y" * 80
+        rows = [crow("2026-07-01", "priv-api", 10, 0.022, 0.22, 0.22, sku="actions_linux_4_core"),
+                crow("2026-07-01", "priv-api", 5, 0.01, 0.05, 0.0, sku="actions_windows_arm"),
+                crow("2026-07-02", "priv-api", 5, 0.01, 0.05, 0.0, sku="actions_windows_arm"),
+                crow("2026-07-02", "priv-api", 1, 0.01, 0.01, 0.0, sku=odd),
+                crow("2026-07-02", "priv-api", 1, 0.008, 0.008, 0.0)]
+        payloads, st = self.load(rows)
+        skus = [i["sku"] for i in payloads["2026-07"]["usageItems"]]
+        self.assertEqual(skus[:3], ["actions_linux_4_core", "actions_windows_arm", "actions_windows_arm"])
+        self.assertEqual(st["unmapped"]["items"], 4)
+        r, _ = fb.build_rows(payloads, VISIBILITY, ORG, True)
+        rt = {x["sku"]: x["runner_type"] for x in r}
+        self.assertEqual(rt["actions_linux_4_core"], "ubuntu")
+        self.assertEqual(rt["actions_windows_arm"], "windows")
+        w = [x for x in fb.csv_warnings(st, ["2026-07"], TODAY) if "写像" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("4 件", w[0])
+        self.assertIn("actions_linux_4_core", w[0])
+        self.assertIn("actions_windows_arm", w[0])
+        self.assertIn("他 1 種", w[0])
+        self.assertNotIn("\x1b", w[0])
+
+    def test_non_finite_totals_rejected(self):
+        big = "1e308"
+        r1 = crow("2026-07-01", "priv-api", 1, 0.008, 0.008, 0.0)
+        r1[3] = big
+        r2 = list(r1)
+        payloads, _ = self.load([r1, r2])
+        with self.assertRaises(fb.FetchError) as cm:
+            fb.build_rows(payloads, VISIBILITY, ORG, True)
+        self.assertIn("有限", str(cm.exception))
 
 
 class UsageCsvCliTest(CliStubTest):
@@ -631,8 +792,8 @@ class UsageCsvCliTest(CliStubTest):
         data = json.loads(raw)
         self.assertEqual(data["input"], "usage_csv")
         self.assertEqual(data["source"], "billing")
-        self.assertEqual(data["dependabot"], {"rule": fb.DEPENDABOT_RULE, "items": 1, "by_username": 1,
-                                              "by_workflow_path_only": 0, "minutes": 10.0})
+        self.assertEqual(data["dependabot"], {"rule": fb.DEPENDABOT_RULE, "items": 1, "minutes": 10.0,
+                                              "pr_workflow_items": 0, "pr_workflow_minutes": 0.0})
         self.assertTrue(any("Dependabot" in w for w in data["warnings"]))
         self.assertIn("dependabot_free", {x["charge_class"] for x in data["rows"]})
         self.assertLessEqual(len(r.stdout.splitlines()), 10)
@@ -640,6 +801,25 @@ class UsageCsvCliTest(CliStubTest):
         for secret in (USER_ALICE, PATH_CI, PATH_DEP):
             for text in (raw, r.stdout, r.stderr):
                 self.assertNotIn(secret, text)
+
+    def test_self_hosted_and_sku_end_to_end(self):
+        write_csv(self.csv, [
+            crow("2026-07-01", "priv-api", 90, 0.008, 0.72, 0.0),
+            crow("2026-07-01", "priv-api", 3000, 0.0, 0.0, 0.0, sku="actions_self_hosted_linux"),
+            crow("2026-07-01", "priv-api", 6, 0.0, 0.0, 0.0, user="dependabot[bot]", path=PATH_DEP,
+                 sku="actions_self_hosted_linux"),
+            crow("2026-07-31", "pub-site", 20, 0.008, 0.16, 0.0)])
+        r = self.cli("--assume-current-visibility")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.out, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual({x["sku"] for x in data["rows"]}, {"Actions Linux"})
+        self.assertAlmostEqual(sum(x["minutes"] for x in data["rows"] if x["charge_class"] == "included"), 90)
+        self.assertEqual(data["self_hosted_excluded"], {"items": 2, "minutes": 3006.0, "dependabot_items": 1,
+                                                        "with_amount_items": 0})
+        self.assertEqual(data["dependabot"]["items"], 0)
+        self.assertTrue(any("セルフホストの SKU の明細 2 件・3006.0 分を除いた" in w for w in data["warnings"]))
+        self.assertNotIn("self-hosted", {x["runner_type"] for x in data["rows"]})
 
     def test_api_path_records_input_api(self):
         r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-07", "--out", self.out)
@@ -676,7 +856,7 @@ class UsageCsvCliTest(CliStubTest):
         write_csv(self.csv, [
             crow("2026-07-01", "priv-api", 1, 0.008, 0.008, 0.0),
             crow("2026-06-15", "priv-api", 1, 0.008, 0.008, 0.0, product="Packages"),
-            crow("2026-06-16", "priv-api", 1, 0.008, 0.008, 0.0, org="other-org")])
+            crow("2026-06-16", "priv-api", 1, 0.008, 0.008, 0.0, unit="GigabyteHours")])
         r = self.run_cli("--org", ORG, "--since", "2026-06", "--until", "2026-07", "--out", self.out,
                          "--usage-csv", self.csv)
         self.assertEqual(r.returncode, 1)
@@ -706,6 +886,19 @@ class SharedCommonTest(unittest.TestCase):
             fb.nonneg_num({"k": -1}, "k")
         self.assertIn("API の数値フィールド k が不正（有限の非負数ではない）", str(cm.exception))
         self.assertEqual(fb.nonneg_num({}, "k", False), 0.0)
+
+    def test_atomic_write_json_rejects_non_finite(self):
+        # JSON に Infinity / NaN を書かない。拒否時は既存ファイルを残し、一時ファイルも残さない
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "out.json")
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("previous\n")
+            for bad in (float("inf"), float("nan")):
+                with self.assertRaises(ValueError):
+                    fb.atomic_write_json(out, {"rows": [{"minutes": bad}]})
+            with open(out, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "previous\n")
+            self.assertEqual(os.listdir(d), ["out.json"])
 
     def test_nonneg_num_huge_int(self):
         # float の範囲を超える巨大な整数は OverflowError ではなく FetchError にする（Issue #189）

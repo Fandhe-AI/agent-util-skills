@@ -129,7 +129,8 @@ def atomic_write_json(path, obj):
     fd, tmp = tempfile.mkstemp(prefix=".%s." % os.path.basename(path), suffix=".tmp", dir=d)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=1)
+            # Infinity / NaN は JSON の規格外で、読む側（ページ・jq）が壊れる。書かずに ValueError で止める
+            json.dump(obj, f, ensure_ascii=False, indent=1, allow_nan=False)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())

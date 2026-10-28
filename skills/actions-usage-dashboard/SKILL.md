@@ -46,7 +46,8 @@ python3 <skill-root>/scripts/build_dashboard.py --org "<org>" --rows "<billing.j
 python3 <skill-root>/scripts/build_dashboard.py --org "<org>" --out-dir "<dir>" --update --refresh-template --template-only --template-if-version N
 ```
 
-- fetch_billing の `--usage-csv` は、請求画面の詳細の使用量 CSV（31 日以内）から Dependabot の分を見分けて含有枠の消費から除く（`dependabot_free`）。billing usage API の代わりに読む経路で、同じ期間の API の rows とは併用しない。CSV を渡した rows をダッシュボードへ初めて載せる更新では `--refresh-template` を付ける（古い雛形は Dependabot の分を区分不明と表示する）。利用者名は rows に入れない。判定規則・列・制約は data-sources.md「使用量 CSV」節
+- fetch_billing の `--usage-csv` は、請求画面の詳細の使用量 CSV（31 日以内）から Dependabot の更新ジョブ（workflow_path が `dynamic/dependabot/`）の分を見分けて含有枠の消費から除く（`dependabot_free`）。Dependabot の PR が起動した通常のワークフローは課金されるので除かない。セルフホストの SKU の行は除き（セルフホスト分は fetch_jobs が担当）、SKU は API と同じ表記にそろえる。billing usage API の代わりに読む経路で、同じ期間の API の rows とは併用しない。CSV を渡した rows をダッシュボードへ初めて載せる更新では `--refresh-template` を付ける（古い雛形は Dependabot の分を区分不明と表示する）。利用者名は rows に入れない。判定規則・列・SKU の写像・制約は data-sources.md「使用量 CSV」節
+  - CSV は非公開リポジトリ名・利用者名・金額を含むので、作業ツリーの外（`mktemp -d`）に置く
 - fetch_billing の `--assume-current-visibility`、fetch_jobs の重複除去・キャッシュ・`--min-remaining`、summarize の含有分（`--plan`）の扱いは data-sources.md の該当節を参照する
 - 大きな org では初回の fetch_jobs が前景の timeout を超える。所要時間の目安と実行の仕方は「大きな org での実行」を参照する
 - `--plan` を省くと summarize は `gh api orgs/<org>` を呼ぶ

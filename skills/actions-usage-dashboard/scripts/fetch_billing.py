@@ -31,15 +31,24 @@
 入力の 2 経路:
   既定は billing usage API。API の明細には起動した利用者もワークフローも無く、Dependabot の分を
   見分けられないため、含有枠の消費は請求画面より上振れする（Issue #221）。
-  --usage-csv に請求画面からダウンロードした「詳細」の使用量 CSV を渡すと、username /
-  workflow_path から Dependabot を判定して dependabot_free に分ける（Issue #228）。公式文書は
-  Dependabot ジョブを含有分に数えないと書く
+  --usage-csv に請求画面からダウンロードした「詳細」の使用量 CSV を渡すと、workflow_path から
+  Dependabot の更新ジョブを判定して dependabot_free に分ける（Issue #228）。公式文書は
+  Dependabot ジョブ（更新ジョブ・graph job）を含有分に数えないと書く
   （https://docs.github.com/en/billing/reference/billing-reports ・
-  https://docs.github.com/en/billing/concepts/product-billing/github-actions）。
+  https://docs.github.com/en/billing/concepts/product-billing/github-actions）。Dependabot の PR が
+  起動した通常のワークフロー（username は dependabot[bot] だが workflow_path は通常の .yml）は
+  無料とは書かれておらず課金されるため、判定に username を使わず、件数だけを記録する。
+  CSV にはセルフホストの SKU（例 actions_self_hosted_linux）の行もある。billing usage API は
+  セルフホストの明細を返さない（このスクリプトは API 経路で SKU による除外をしていない）ため、
+  CSV 経路だけが読み込み時に除き、API 経路と同じく GitHub ホストだけにする。セルフホスト分は
+  fetch_jobs.py の rows が担当し、残すと二重に数える。
+  CSV の SKU 表記（actions_linux 等）は API の表記（Actions Linux 等）と違うため、CSV_SKU_TO_API で
+  そろえる。写像に無い SKU は API 経路の未知 SKU と同じく名前のまま通し、件数と名前を warnings に出す。
   CSV 経路は API 経路の代わりであり、同じ期間の API の rows と併用すると summarize が重複で止める。
-  CSV 経路は出力に "input": "usage_csv"、"dependabot": {判定規則と件数}、"warnings" を足す
-  （API 経路は "input": "api"）。username / workflow_path の値は判定にだけ使い、出力・標準出力・
-  標準エラー・例外文のどこにも入れない（rows は閲覧者全員が読める）。
+  CSV 経路は出力に "input": "usage_csv"、"dependabot": {判定規則と件数}、
+  "self_hosted_excluded": {件数と分数}、"warnings" を足す（API 経路は "input": "api"）。
+  username / workflow_path の値は判定にだけ使い、出力・標準出力・標準エラー・例外文のどこにも
+  入れない（rows は閲覧者全員が読める）。
 
 アクセス: gh api 経由のみ（CSV 経路でもリポジトリ一覧のために gh を呼ぶ）。トークンは扱わない。標準ライブラリだけで動く。
 helper の共有: FetchError / nonneg_num / gh_api / atomic_write_json / ORG_RE / MONTH_RE / parse_concatenated_json は _common.py から import する。
@@ -49,6 +58,7 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 
@@ -73,6 +83,7 @@ RUNNER_TYPE_RULES = (
     (("macos",), "macos"),
     (("windows",), "windows"),
 )
+NUM_COLS = ("minutes", "quota_minutes", "billable_minutes", "gross_usd", "discount_usd", "net_usd")
 SUMMARY_MONTHS_MAX = 12
 # 取得期間の上限（月数）。同系エンドポイント（usage/summary 等）の公式記載「過去 24 か月のみ」に合わせた値。
 # usage 本体のページ（https://docs.github.com/en/rest/billing/usage ）に保持期間の記載は無く未確認（2026-10-24）。`--since 0001-01` のような入力で gh を大量に呼ばないための多層防御。
@@ -82,18 +93,44 @@ MAX_MONTHS = 24
 MAX_CSV_BYTES = 64 * 1024 * 1024
 MAX_CSV_ROWS = 1_000_000
 # 詳細の使用量 CSV の列名（公式 billing-reports のフィールド表）。列名の別名表は持たず、
-# 公式名と違えば推測で合わせず止める。discount_amount と organization は任意。
+# 公式名と違えば推測で合わせず止める。discount_amount だけ任意。organization は行の出どころを
+# 確かめるために必須とする（無いと他の org の行を --org の行として数えうる）。
 CSV_REQUIRED = ("date", "product", "sku", "quantity", "unit_type", "applied_cost_per_quantity",
-                "gross_amount", "net_amount", "repository", "username", "workflow_path")
-# Dependabot の判定規則。値は判定にだけ使い、出力へは固定文言として規則だけを残す。
+                "gross_amount", "net_amount", "organization", "repository", "username", "workflow_path")
+# Dependabot の判定規則。workflow_path の前置一致だけで判定する。username が dependabot[bot] でも
+# 通常のワークフローの行は Dependabot の PR が起動した CI で、課金される（含有枠を消費する）。
+# 値は判定にだけ使い、出力へは固定文言として規則だけを残す。
 DEPENDABOT_USER = "dependabot[bot]"
 DEPENDABOT_PATH_PREFIX = "dynamic/dependabot/"
-DEPENDABOT_RULE = "username=dependabot[bot] or workflow_path=dynamic/dependabot/*"
+DEPENDABOT_RULE = "workflow_path=dynamic/dependabot/*"
+# 使用量 CSV の SKU 表記 → billing usage API の SKU 表記。経路によって sku 列・runner_type・
+# Linux 単価の決定（LINUX_PRICE_SKU）が変わらないようにそろえる。キーは前後の空白を除いた小文字。
+# 値は実 org の API 出力で観測した表記。公式の product-and-sku-names の説明文（"Actions Linux runners"
+# 等）は API の表記と一致しないため根拠にしない。actions_macos は公式の actions-runner-pricing で
+# 「macOS 3-core or 4-core（M1 or Intel）」の単一 SKU・単一単価で、コア数は SKU として分かれていない。
+# よって "Actions macOS 3-core" はこの単一 SKU に API が付ける表示名であり、実際のコア数を表さない。
+# larger runner や actions_windows_arm などは API の表記を確かめていないため載せない（推測で埋めない）。
+CSV_SKU_TO_API = {
+    "actions_linux": "Actions Linux",
+    "actions_linux_slim": "Actions Linux Slim",
+    "actions_linux_arm": "Actions Linux ARM",
+    "actions_windows": "Actions Windows",
+    "actions_macos": "Actions macOS 3-core",
+}
+# warnings に名前を出してよい未写像 SKU の形（CSV 由来の非信頼値のため、識別子の形だけを出す）と上限
+SKU_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_ .-]{0,63}\Z")
+MAX_UNMAPPED_NAMES = 10
 
 
 def normalize_sku(sku):
     s = str(sku).lower().replace("_", " ").replace("-", " ")
     return " ".join(s.split())
+
+
+def is_self_hosted_sku(sku):
+    """セルフホストの SKU か。公式の SKU 一覧に無く実 CSV で観測した名前のため、固定の一覧ではなく
+    正規化後の名前に "self hosted"（空白を詰めて selfhosted）を含むかで判定する。"""
+    return "selfhosted" in normalize_sku(sku).replace(" ", "")
 
 
 def runner_type_for(sku):
@@ -249,14 +286,19 @@ def build_rows(month_payloads, visibility, org, assume_current=False):
                     raise FetchError("%s: Linux 単価を決められず quota を換算できない" % month)
                 else:
                     quota = gross_c / price
-                rows.append({
+                row = {
                     "day": day, "repo": repo, "visibility": vis, "sku": sku,
                     "runner_type": runner_type_for(sku), "charge_class": cls,
                     "minutes": _r(m), "quota_minutes": _r(quota),
                     "billable_minutes": _r(m) if cls == "paid" else 0.0,
                     "gross_usd": gross_c, "discount_usd": _r(max(gross_c - net_c, 0.0)),
                     "net_usd": _r(net_c),
-                })
+                }
+                # 入力の各値は有限でも、合計や単価での割り算で inf / nan になりうる。JSON に
+                # Infinity / NaN を書かないよう、ここで止める（値は出さない）
+                if not all(math.isfinite(row[k]) for k in NUM_COLS):
+                    raise FetchError("%s: 集計値が有限の数ではない（入力の数値が大きすぎる）" % month)
+                rows.append(row)
     rows.sort(key=lambda r: (r["day"], r["repo"], r["sku"], CHARGE_ORDER[r["charge_class"]]))
     return rows, price_map
 
@@ -309,10 +351,13 @@ def _csv_num(row, idx, col, lineno, required=True):
 def load_usage_csv(path, org, months):
     """請求画面の詳細の使用量 CSV を読み、月別の payload 相当 dict と統計を返す。
 
-    入力は非信頼。必須列の欠落（集計レポートを含む）・数値の不正・上限超過・非通常ファイルは
-    FetchError で止める（fail-closed）。username / workflow_path は Dependabot の判定にだけ使い、
-    返す明細にもエラー文にも載せない。戻り値の明細は API の usageItems と同じキーに
-    `dependabot: bool` を足した形で、select_items にそのまま渡せる。
+    入力は非信頼。必須列の欠落（集計レポートを含む）・数値の不正・上限超過・非通常ファイル・
+    organization が空か --org と違う Actions の行は FetchError で止める（fail-closed）。
+    username / workflow_path は Dependabot の判定と件数にだけ使い、返す明細にもエラー文にも載せない。
+    セルフホストの SKU の行は除いて件数・分数だけを stats に残す（API 経路は API が返さない）。
+    SKU は CSV_SKU_TO_API で API の表記にそろえ、写像に無いものは名前のまま通して stats に残す。
+    戻り値の明細は API の usageItems と同じキーに `dependabot: bool` を足した形で、
+    select_items にそのまま渡せる。
     """
     if not os.path.isfile(path):
         raise FetchError("--usage-csv が通常ファイルではない")
@@ -324,8 +369,11 @@ def load_usage_csv(path, org, months):
         raise FetchError("--usage-csv を開けない: %s" % safe(e.strerror))
     allowed = set(months)
     payloads = {m: {"usageItems": []} for m in months}
-    stats = {"items": 0, "by_username": 0, "by_path_only": 0, "minutes": 0.0,
-             "other_org": 0, "out_of_period": 0, "dates": []}
+    stats = {"items": 0, "minutes": 0.0, "pr_items": 0, "pr_minutes": 0.0,
+             "out_of_period": 0, "dates": [],
+             "self_hosted": {"items": 0, "minutes": 0.0, "dependabot_items": 0, "with_amount_items": 0},
+             "unmapped": {"items": 0, "skus": []}}
+    unmapped_names = set()
     with fh:
         try:
             reader = csv.reader(fh)
@@ -340,7 +388,7 @@ def load_usage_csv(path, org, months):
             if missing:
                 raise FetchError("--usage-csv に必須列が無い: %s" % ", ".join(missing))
             col = {}
-            for c in CSV_REQUIRED + ("discount_amount", "organization"):
+            for c in CSV_REQUIRED + ("discount_amount",):
                 if names.count(c) > 1:
                     raise FetchError("--usage-csv の列 %s が重複している" % c)
                 col[c] = names.index(c) if c in names else None
@@ -363,10 +411,14 @@ def load_usage_csv(path, org, months):
                 day = _day_of(cell(row, "date"))
                 if cell(row, "product").lower() != "actions" or cell(row, "unit_type").lower() != "minutes":
                     continue
+                # 出どころを確かめられない行は捨てて続けず止める。捨てると他の org の CSV や
+                # 結合した CSV を渡されても気づけない（org 名は出さない）
                 org_cell = cell(row, "organization")
-                if org_cell and org_cell.lower() != org.lower():
-                    stats["other_org"] += 1
-                    continue
+                if not org_cell:
+                    raise FetchError("CSV 行 %d: organization が空で、行の出どころを確かめられない" % lineno)
+                if org_cell.lower() != org.lower():
+                    raise FetchError("CSV 行 %d: organization が --org と一致しない。対象 org の請求画面の"
+                                     "使用量 CSV を使う" % lineno)
                 # 範囲確認は対象 org・Actions 分の行だけで行う（他 org・他 product の行が欠損を隠さない）
                 stats["dates"].append(day)
                 month = "%04d-%02d" % (day.year, day.month)
@@ -374,8 +426,9 @@ def load_usage_csv(path, org, months):
                     stats["out_of_period"] += 1
                     continue
                 q = _csv_num(row, col["quantity"], "quantity", lineno)
+                raw_sku = cell(row, "sku")
                 it = {
-                    "date": day.isoformat(), "product": "Actions", "sku": cell(row, "sku"),
+                    "date": day.isoformat(), "product": "Actions", "sku": raw_sku,
                     "quantity": q, "unitType": "Minutes",
                     "pricePerUnit": _csv_num(row, col["applied_cost_per_quantity"],
                                              "applied_cost_per_quantity", lineno),
@@ -384,31 +437,60 @@ def load_usage_csv(path, org, months):
                     "netAmount": _csv_num(row, col["net_amount"], "net_amount", lineno),
                     "repositoryName": cell(row, "repository"),
                 }
-                by_user = cell(row, "username") == DEPENDABOT_USER
                 by_path = cell(row, "workflow_path").startswith(DEPENDABOT_PATH_PREFIX)
-                it["dependabot"] = by_user or by_path
-                if it["dependabot"]:
+                # セルフホストは Dependabot の集計より前に除く（Dependabot の件数・分数に混ぜない）
+                if is_self_hosted_sku(raw_sku):
+                    sh = stats["self_hosted"]
+                    sh["items"] += 1
+                    sh["minutes"] += q
+                    sh["dependabot_items"] += by_path
+                    sh["with_amount_items"] += it["grossAmount"] > 0 or it["netAmount"] > 0
+                    continue
+                mapped = CSV_SKU_TO_API.get(raw_sku.lower())
+                if mapped is None:
+                    stats["unmapped"]["items"] += 1
+                    unmapped_names.add(raw_sku)
+                else:
+                    it["sku"] = mapped
+                it["dependabot"] = by_path
+                if by_path:
                     stats["items"] += 1
                     stats["minutes"] += q
-                    if by_user:
-                        stats["by_username"] += 1
-                    else:
-                        stats["by_path_only"] += 1
+                elif cell(row, "username") == DEPENDABOT_USER:
+                    # Dependabot の PR が起動した通常のワークフロー。課金されるので通常の行のまま
+                    stats["pr_items"] += 1
+                    stats["pr_minutes"] += q
                 payloads[month]["usageItems"].append(it)
         except csv.Error:
             raise FetchError("--usage-csv を CSV として解析できない") from None
         except UnicodeDecodeError:
             raise FetchError("--usage-csv が UTF-8 ではない") from None
+    stats["unmapped"]["skus"] = sorted(unmapped_names)
+    if not all(math.isfinite(v) for v in (stats["minutes"], stats["pr_minutes"],
+                                          stats["self_hosted"]["minutes"])):
+        raise FetchError("--usage-csv の分数の合計が有限の数ではない（入力の数値が大きすぎる）")
     return payloads, stats
 
 
 def csv_warnings(stats, months, today):
-    """CSV 経路の warnings。件数・日付・固定文言だけにし、利用者名・org 名・リポ名・金額を含めない。"""
-    w = ["使用量 CSV から Dependabot のジョブを %d 明細・%.1f 分と判定し、含有枠の消費から除いた"
-         "（username 一致 %d / workflow_path のみ %d）" % (
-             stats["items"], stats["minutes"], stats["by_username"], stats["by_path_only"])]
-    if stats["other_org"]:
-        w.append("他の org の行 %d 件を捨てた" % stats["other_org"])
+    """CSV 経路の warnings。件数・分数・日付・SKU 名・固定文言だけにし、利用者名・org 名・リポ名・金額を含めない。"""
+    w = ["使用量 CSV から Dependabot の更新ジョブ（workflow_path が dynamic/dependabot/）を %d 明細・%.1f 分と"
+         "判定し、含有枠の消費から除いた。Dependabot の PR が起動した通常のワークフロー %d 明細・%.1f 分"
+         "（無料扱いしない）は通常の行として残した" % (stats["items"], stats["minutes"], stats["pr_items"], stats["pr_minutes"])]
+    sh = stats["self_hosted"]
+    if sh["items"]:
+        w.append("使用量 CSV からセルフホストの SKU の明細 %d 件・%.1f 分を除いた（うち Dependabot の更新ジョブ %d 件）。"
+                 "セルフホスト分は fetch_jobs.py の rows が担当する" % (sh["items"], sh["minutes"], sh["dependabot_items"]))
+    if sh["with_amount_items"]:
+        w.append("除いたセルフホストの明細のうち金額が付いた明細 %d 件がある。その金額は rows に入れていない"
+                 % sh["with_amount_items"])
+    um = stats["unmapped"]
+    if um["items"]:
+        shown = [n for n in um["skus"] if SKU_NAME_RE.match(n)][:MAX_UNMAPPED_NAMES]
+        rest = len(um["skus"]) - len(shown)
+        w.append("API の表記へ写像できない SKU の明細 %d 件を、CSV の表記のまま残した（SKU: %s%s）。"
+                 "runner_type は名前のキーワードで判定した" % (
+                     um["items"], ", ".join(shown) or "-", "、他 %d 種" % rest if rest else ""))
     if stats["out_of_period"]:
         w.append("対象期間外の明細 %d 件を捨てた" % stats["out_of_period"])
     y, m = int(months[0][:4]), int(months[0][5:])
@@ -458,7 +540,7 @@ def main(argv=None):
     ap.add_argument("--assume-current-visibility", action="store_true",
                     help="期間中に公開範囲が変わっていない前提で、現在の公開範囲により included / public_free を確定する")
     ap.add_argument("--usage-csv", help="請求画面の詳細の使用量 CSV。billing usage API の代わりに読み、"
-                    "Dependabot の分を dependabot_free に分ける")
+                    "Dependabot の更新ジョブの分を dependabot_free に分ける（セルフホストの SKU は除く）")
     a = ap.parse_args(argv)
     now = datetime.now(timezone.utc)
     current = "%04d-%02d" % (now.year, now.month)
@@ -492,11 +574,16 @@ def main(argv=None):
                 raise FetchError("--usage-csv に対象 org の Actions 明細が無い月がある（%s）。"
                                  "--since / --until を CSV の範囲に合わせる" % ", ".join(absent))
             warnings = csv_warnings(cstats, months, now.date())
+            sh = cstats["self_hosted"]
             extra = {"input": "usage_csv", "dependabot": {
                 "rule": DEPENDABOT_RULE, "items": cstats["items"],
-                "by_username": cstats["by_username"],
-                "by_workflow_path_only": cstats["by_path_only"],
-                "minutes": round(cstats["minutes"], 6)}}
+                "minutes": round(cstats["minutes"], 6),
+                "pr_workflow_items": cstats["pr_items"],
+                "pr_workflow_minutes": round(cstats["pr_minutes"], 6)},
+                "self_hosted_excluded": {
+                    "items": sh["items"], "minutes": round(sh["minutes"], 6),
+                    "dependabot_items": sh["dependabot_items"],
+                    "with_amount_items": sh["with_amount_items"]}}
             visibility = fetch_visibility(a.org)
         else:
             visibility = fetch_visibility(a.org)
@@ -517,7 +604,11 @@ def main(argv=None):
         doc.update(extra)
         if warnings:
             doc["warnings"] = warnings
-        atomic_write_json(a.out, doc)
+        try:
+            atomic_write_json(a.out, doc)
+        except ValueError:
+            # allow_nan=False が inf / nan を拒んだ（build_rows の検査をすり抜けた値）。部分ファイルは残らない
+            raise FetchError("出力に有限でない数値があり書き込みを中止した")
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)
         return 1
