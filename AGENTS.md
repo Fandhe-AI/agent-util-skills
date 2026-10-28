@@ -99,9 +99,9 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
   検証、文書 256 KB 未満・rows 8 MB 以下の上限を外す変更
 - **読み戻し文書の扱い（P1）**: ストアから読み戻した文書を信頼できるものとして扱う変更、
   ページを書き込んだフローで check 文書の読み取りを省く変更、`failed` のまま・上限まで `checking`
-  のままで完了とする変更、文書が無いことを「成功」と断定する変更、文書なしを検証の証拠なしに完了へ置き換える変更
-  （型には成功を表す状態が無く、文書なしは合否を区別できず検証未確認。完了にできるのは
-  ユーザー本人の目視確認の返答という代替の証拠があるときだけ）。テンプレートへの数値の埋め込み
+  のままで完了とする変更、文書が無いことを「成功」と断定する変更、文書なしや目視の返答だけで完了へ置き換える変更、
+  ページを書かない更新から公開後の読み戻し確認を除く変更
+  （型には成功を表す状態が無く、文書なしは合否を区別できず検証未確認として維持する）。テンプレートへの数値の埋め込み
 
 ### 共通
 
@@ -149,7 +149,7 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
 - **完了ゲートの保持（P1）**: `create-html-report` の `validate_report.py` 実行・
   `setup-firebase-hosting` の CI 経路確認・`create-pitch-deck` の `validate_slides.py`・
   `create-design-doc` の `check_overflow.py`・`setup-github-pages` の `check_site.py` と
-  `build-local.sh` の帰属表記確認・`actions-usage-dashboard` の `tests/` と check 文書の確認（ページを書き込んだとき）等、SKILL.md に明記された検証ステップを省略・弱体化
+  `build-local.sh` の帰属表記確認・`actions-usage-dashboard` の `tests/` と check 文書の確認（ページを書き込んだとき）と公開後の読み戻し確認（書き込まないとき）等、SKILL.md に明記された検証ステップを省略・弱体化
   する編集は `verification.md` 違反として指摘する
 - **索引の同期（P2）**: SKILL.md の参照ファイル一覧・README.md のスキル一覧・CLAUDE.md の
   Current Skills 一覧・`docs/skill-network-requirements.md` の判定一覧と各スキルの詳細節は
