@@ -310,12 +310,20 @@ class CliStubTest(unittest.TestCase):
             data = json.load(f)
         self.assertEqual(data["schema_version"], 1)
         self.assertEqual(data["source"], "billing")
+        self.assertIs(data["assume_current_visibility"], False)
         rows, _ = fb.build_rows(PAYLOADS, VISIBILITY, ORG)
         self.assertEqual(data["rows"], rows)
         self.assertEqual(data["linux_price_per_minute"]["2026-08"], 0.008)
         self.assertLessEqual(len(r.stdout.splitlines()), 10)
         self.assertNotIn("priv-api", r.stdout)
         self.assertEqual([f for f in os.listdir(self.work)], ["billing.json"])
+
+    def test_success_records_assume_current_flag(self):
+        r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-09", "--out", self.out,
+                         "--assume-current-visibility")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.out) as f:
+            self.assertIs(json.load(f)["assume_current_visibility"], True)
 
     def test_month_failure_leaves_no_output(self):
         r = self.run_cli("--org", ORG, "--since", "2026-07", "--until", "2026-09", "--out", self.out,

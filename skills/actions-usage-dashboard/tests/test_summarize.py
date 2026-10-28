@@ -31,13 +31,16 @@ def row(day, repo, cls, minutes, quota=0.0, usd=0.0, vis="private", rt="ubuntu")
             "quota_minutes": quota, "net_usd": usd}
 
 
-def doc(source, rows, org=ORG, since=None, until=None):
+def doc(source, rows, org=ORG, since=None, until=None, assume_current="absent"):
     if source == "billing":
         since, until = since or "2026-09", until or "2026-10"
     else:
         since, until = since or "2026-09-01", until or "2026-10-31"
-    return {"schema_version": 1, "source": source, "org": org, "since": since,
-            "until": until, "rows": rows}
+    d = {"schema_version": 1, "source": source, "org": org, "since": since,
+         "until": until, "rows": rows}
+    if source == "billing" and assume_current != "absent":
+        d["assume_current_visibility"] = assume_current
+    return d
 
 
 BILLING = [
@@ -51,6 +54,19 @@ BILLING = [
     row("2026-10-07", "mac-repo", "paid", 20, usd=1.6, rt="macos"),
 ]
 JOBS = [row("2026-10-08", "self-repo", "self_hosted", 40, rt="self-hosted")]
+
+
+def inc_approx(bd):
+    return bd["included"]["approximate"] and not bd["included"]["lower_bound"]
+
+
+# 既定モード（--assume-current-visibility なし）の billing: 非有料分はすべて unknown で quota 0
+DEFAULT_MODE = [
+    row("2026-10-01", "priv-api", "paid", 100, usd=0.8),
+    row("2026-10-02", "priv-api", "unknown", 500),
+    row("2026-10-03", "pub-site", "unknown", 700, vis="public"),
+]
+NO_UNKNOWN = [r for r in BILLING if r["charge_class"] != "unknown"]
 
 
 class Base(unittest.TestCase):
@@ -81,6 +97,11 @@ class Base(unittest.TestCase):
         return subprocess.run([sys.executable, "-I", "-B", SCRIPT] + args,
                               capture_output=True, text=True, env=env)
 
+    def build(self, rows, flag, plan="team"):
+        org, rd, src, w, est, ac = sm._load([self.write("b.json", doc("billing", rows, assume_current=flag))])
+        return sm.build_summary(org, rd, src, "2026-10", plan, None, "repo", 5, w, today="2026-10-31",
+                                assume_current=ac)
+
     def files(self, billing=BILLING, jobs=JOBS):
         a = ["--rows", self.write("b.json", doc("billing", billing))]
         if jobs is not None:
@@ -106,7 +127,8 @@ class SummaryTests(Base):
         self.assertEqual(bd["public_free"]["minutes"], 700.0)
         self.assertEqual(bd["self_hosted"], {"minutes": 40.0, "available": True, "estimated": False})
         self.assertEqual(bd["unknown"]["minutes"], 50.0)
-        self.assertTrue(any("下限" in w for w in s["warnings"]))
+        self.assertTrue(inc_approx(bd))  # included 行ありは分類済みなので概算
+        self.assertFalse(any("下限" in w for w in s["warnings"]))
 
     def test_no_jobs(self):
         s = self.summary(jobs=False)
@@ -200,7 +222,7 @@ class WarningAndMissingBillingTests(Base):
             sm.load_rows([self.write("b.json", d)])
 
     def test_unknown_guidance_states_precondition(self):
-        org, rows, src, w = sm.load_rows([self.write("b.json", doc("billing", BILLING))])
+        org, rows, src, w = sm.load_rows([self.write("b.json", doc("billing", DEFAULT_MODE))])
         s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w)
         msg = " ".join(s["warnings"])
         self.assertIn("保証できる場合だけ", msg)
@@ -210,11 +232,13 @@ class WarningAndMissingBillingTests(Base):
         org, rows, src, w = sm.load_rows([self.write("b.json", doc("billing", BILLING))])
         s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w, today="2026-10-31")
         inc = s["breakdown"]["included"]
-        self.assertTrue(inc["lower_bound"])
+        self.assertFalse(inc["lower_bound"])
+        self.assertTrue(inc["approximate"])
         self.assertIsNone(inc["remaining"])
         self.assertIsNone(inc["ratio"])
         text = "\n".join(sm.render_text(s))
-        self.assertIn("下限", text)
+        self.assertIn("概算", text)
+        self.assertNotIn("下限", text)
         self.assertNotIn("残り", text)
         self.assertNotIn("%、", text)
 
@@ -224,9 +248,77 @@ class WarningAndMissingBillingTests(Base):
         s = sm.build_summary(org, rows, src, "2026-10", "team", None, "repo", 5, w, today="2026-10-31")
         inc = s["breakdown"]["included"]
         self.assertFalse(inc["lower_bound"])
+        self.assertTrue(inc["approximate"])
         self.assertIsNotNone(inc["remaining"])
         self.assertIsNotNone(inc["ratio"])
-        self.assertIn("残り", "\n".join(sm.render_text(s)))
+        text = "\n".join(sm.render_text(s))
+        self.assertIn("残り 約", text)
+        self.assertNotIn("下限", text)
+
+    def test_default_mode_with_unknown_is_lower_bound(self):
+        for flag in (False, "absent"):
+            with self.subTest(flag=flag):
+                s = self.build(DEFAULT_MODE, flag)
+                inc = s["breakdown"]["included"]
+                self.assertTrue(inc["lower_bound"])
+                self.assertFalse(inc["approximate"])
+                self.assertIsNone(inc["remaining"])
+                self.assertIsNone(inc["ratio"])
+                self.assertIn("下限", "\n".join(sm.render_text(s)))
+                self.assertTrue(any("下限" in w for w in s["warnings"]))
+
+    def test_flag_true_with_unknown_never_says_lower_bound(self):
+        s = self.build(BILLING, True)
+        inc = s["breakdown"]["included"]
+        self.assertTrue(inc["approximate"])
+        self.assertFalse(inc["lower_bound"])
+        self.assertIsNone(inc["remaining"])
+        self.assertIsNone(inc["ratio"])
+        blob = "\n".join(sm.render_text(s)) + json.dumps(s, ensure_ascii=False)
+        self.assertNotIn("下限", blob)
+        self.assertNotIn("以上", blob)
+        self.assertIn("概算", blob)
+        self.assertIn("約", blob)
+
+    def test_legacy_doc_with_included_rows_is_approximate(self):
+        for flag in (False, "absent"):  # False は矛盾する文書。どちらも安全側
+            with self.subTest(flag=flag):
+                s = self.build(BILLING, flag)
+                self.assertTrue(s["breakdown"]["included"]["approximate"])
+                self.assertFalse(s["breakdown"]["included"]["lower_bound"])
+
+    def test_flag_true_without_unknown_over_quota(self):
+        rows = [row("2026-10-01", "r", "included", 2500, quota=2500)]
+        s = self.build(rows, True, plan="free")
+        text = "\n".join(sm.render_text(s))
+        self.assertIn("超過 約 500.0 分", text)
+        self.assertNotIn("以上", text)
+
+    def test_no_unknown_no_classification_is_exact(self):
+        rows = [row("2026-10-01", "r", "paid", 10, usd=0.08)]
+        s = self.build(rows, False)
+        inc = s["breakdown"]["included"]
+        self.assertFalse(inc["approximate"])
+        self.assertFalse(inc["lower_bound"])
+        self.assertEqual(inc["ratio"], 0.0)
+        text = "\n".join(sm.render_text(s))
+        self.assertNotIn("約", text)
+        self.assertNotIn("下限", text)
+
+    def test_assume_current_type_checked(self):
+        for bad in ("yes", 1, None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(sm.FetchError):
+                    sm._load([self.write("b.json", doc("billing", BILLING, assume_current=bad))])
+
+    def test_cli_json_has_approximate(self):
+        bindir, _ = self.fake_gh()
+        p = self.write("b.json", doc("billing", BILLING, assume_current=True))
+        r = self.run_cli(["--rows", p, "--month", "2026-10", "--json"], bindir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        inc = json.loads(r.stdout)["breakdown"]["included"]
+        self.assertTrue(inc["approximate"])
+        self.assertFalse(inc["lower_bound"])
 
     def test_jobs_only_shows_no_data(self):
         org, rows, src, w = sm.load_rows([self.write("j.json", doc("jobs", JOBS))])

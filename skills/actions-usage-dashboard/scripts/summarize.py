@@ -27,6 +27,11 @@ helper の共有: FetchError / gh_api / nonneg_num / safe / CTRL_RE / MAX_NAME_L
   estimate の中身（method・件数）は読まず出力もしない（非信頼値を端末へ出さない）。オブジェクト以外なら止める。
   billing 側の estimate は無視する。
 
+含有枠の表示: 「下限」と出すのは quota が構造上 0 の既定モード（included / public_free 行がなく
+  billing の assume_current_visibility が真でない）で unknown があるときだけ。分類済みの quota は
+  現在の公開範囲と換算式に依存し上振れもあるため「約 X 分（概算）」と出す。規則は
+  references/data-sources.md「含有枠の消費の確度」。
+
 アクセス: gh api（読み取り 1 回、--plan 指定時は 0 回）のみ。トークンは扱わない。標準ライブラリだけで動く。
 """
 import argparse
@@ -117,12 +122,14 @@ def load_rows(paths):
 
 
 def _load(paths):
-    """rows ファイルを検証して (org, rows, sources, warnings, estimated) を返す。非信頼入力として fail-closed。
+    """rows ファイルを検証して (org, rows, sources, warnings, estimated, assume_current) を返す。非信頼入力として fail-closed。
 
     warnings は取得元（fetch_*.py）が記録した欠損・取得時点の警告で、出力へ引き継ぐ。
     estimated は jobs 文書が推定を含むか（estimate キーがあるか）。
+    assume_current は billing 文書の assume_current_visibility（True / False / 旧形式で欠落なら None）。
     """
     org, rows, sources, warnings, estimated = None, [], {}, [], False
+    assume_current = None
     for p in paths:
         try:
             if os.path.getsize(p) > MAX_ROWS_BYTES:
@@ -145,6 +152,11 @@ def _load(paths):
             if not isinstance(data["estimate"], dict):
                 raise FetchError("rows の estimate がオブジェクトではない: %s" % safe(p))
             estimated = True
+        if src == "billing" and "assume_current_visibility" in data:
+            # 表示文言を選ぶ入力なので、bool 以外は null を含めて拒否する（欠落とは区別する）
+            if not isinstance(data["assume_current_visibility"], bool):
+                raise FetchError("rows の assume_current_visibility が真偽値ではない: %s" % safe(p))
+            assume_current = data["assume_current_visibility"]
         o = data.get("org")
         if not isinstance(o, str) or not ORG_RE.match(o):
             raise FetchError("rows の org が不正: %s" % safe(p))
@@ -178,7 +190,7 @@ def _load(paths):
                 "quota_minutes": nonneg_num(r, "quota_minutes", False, origin="rows"),
                 "net_usd": nonneg_num(r, "net_usd", False, origin="rows"),
             })
-    return org, rows, sources, warnings, estimated
+    return org, rows, sources, warnings, estimated, assume_current
 
 
 def included_for(plan):
@@ -201,9 +213,14 @@ def _r(x):
     return round(x, 6)
 
 
-def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=False):
-    """内訳を作る。unknown 区分の利用がある月は含有枠の消費が過小になるため、
-    remaining / ratio を確定値にせず None（不明）にし、quota_minutes は下限として扱う。
+def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=False, assume_current=None):
+    """内訳を作る。含有枠の消費の確度を approximate / lower_bound / 確定の 3 通りに分ける。
+
+    「下限」と言えるのは quota が構造上 0 の既定モード（非有料分がすべて unknown）で、
+    unknown 分だけ少なく数えている場合に限る。--assume-current-visibility で分類した quota は
+    現在の公開範囲と定価 ÷ Linux 単価の換算に依存し、上振れも下振れもあり得るため概算（approximate）とする。
+    assume_current が None（旧形式）でも included / public_free 行や quota > 0 があれば分類済みとみなす
+    （安全側。過大な値を下限と誤認させない）。条件は references/data-sources.md「含有枠の消費の確度」。
     """
     # 推定は jobs 文書全体の属性。セルフホストの分を取れているときだけ真にする。
     est = bool(estimated and has_jobs)
@@ -216,11 +233,15 @@ def breakdown(rows, included_minutes, has_jobs, has_billing=True, estimated=Fals
     quota = s["included"]["quota"]
     inc = {"minutes": _r(s["included"]["minutes"]), "quota_minutes": _r(quota),
            "included_minutes": included_minutes, "remaining": None, "over": None, "ratio": None}
-    inc["lower_bound"] = s["unknown"]["minutes"] > 0
+    has_unknown = s["unknown"]["minutes"] > 0
+    classified = (assume_current is True or s["included"]["minutes"] > 0
+                  or s["public_free"]["minutes"] > 0 or quota > 0)
+    inc["approximate"] = classified
+    inc["lower_bound"] = has_unknown and not classified
     if included_minutes:
-        # 消費は下限でも超過分は確定するため over は残す。残量と割合は下限からは決まらない。
+        # 下限・概算のどちらでも超過分は表示できるが、残量と割合は unknown があると決まらない。
         inc["over"] = _r(max(quota - included_minutes, 0.0))
-        if not inc["lower_bound"]:
+        if not has_unknown:
             inc["remaining"] = _r(max(included_minutes - quota, 0.0))
             inc["ratio"] = _r(quota / included_minutes)
     if not has_billing:
@@ -283,7 +304,8 @@ def candidates(month_rows, all_rows, top):
             "others": max(len(ordered) - top, 0)}
 
 
-def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=(), today=None, estimated=False):
+def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, src_warnings=(), today=None, estimated=False,
+                  assume_current=None):
     mrows = select_month(rows, month)
     inc_min = included_for(plan)
     warnings = list(src_warnings)
@@ -314,8 +336,14 @@ def build_summary(org, rows, sources, month, plan, plan_warning, group_by, top, 
         warnings.append(plan_warning)
     elif inc_min is None:
         warnings.append("プラン名「%s」の含有分が不明" % safe(plan))
-    bd = breakdown(mrows, inc_min, has_jobs, has_billing, estimated)
-    if has_billing and bd["unknown"]["minutes"] > 0:
+    bd = breakdown(mrows, inc_min, has_jobs, has_billing, estimated, assume_current)
+    inc_bd = bd["included"] or {}
+    if has_billing and inc_bd.get("approximate"):
+        if bd["unknown"]["minutes"] > 0:
+            warnings.append("区分不明あり（削除済み・権限不足のリポジトリ）。含有枠の残量・割合は不明")
+        warnings.append("含有枠の消費は現在の公開範囲での分類と定価 ÷ Linux 単価の換算による概算で、"
+                        "請求画面より多くも少なくもなり得る（references/data-sources.md「含有枠の消費の確度」）")
+    elif has_billing and bd["unknown"]["minutes"] > 0:
         warnings.append("区分不明あり。含有枠の消費は下限で、残量・割合は不明。期間中に公開範囲が変わっていないと保証できる場合だけ、"
                         "fetch_billing.py に --assume-current-visibility を付けると現在の公開範囲で分類できる"
                         "（削除済み・権限不足のリポジトリは unknown のまま残る）")
@@ -343,7 +371,16 @@ def render_text(s):
         out.append("公開リポの無料: データなし")
         return _render_tail(s, out)
     out.append("有料: %.1f 分 / %.2f USD" % (bd["paid"]["minutes"], bd["paid"]["net_usd"]))
-    if inc["included_minutes"] and inc["lower_bound"]:
+    if inc["included_minutes"] and inc["approximate"]:
+        txt = "含有枠: 消費 約 %.1f 分（概算）（実 %.1f 分）/ %d 分" % (
+            inc["quota_minutes"], inc["minutes"], inc["included_minutes"])
+        if inc["ratio"] is None:
+            txt += "、残量・割合は不明"
+        else:
+            txt += " = 約 %.1f%%、残り 約 %.1f 分" % (inc["ratio"] * 100, inc["remaining"])
+        if inc["over"] > 0:
+            txt += "、超過 約 %.1f 分" % inc["over"]
+    elif inc["included_minutes"] and inc["lower_bound"]:
         txt = "含有枠: 消費 %.1f 分以上（下限。区分不明あり）（実 %.1f 分）/ %d 分、残量・割合は不明" % (
             inc["quota_minutes"], inc["minutes"], inc["included_minutes"])
         if inc["over"] > 0:
@@ -406,7 +443,7 @@ def main(argv=None):
             raise FetchError("--rows は最大 2 件")
         if a.month is not None and not MONTH_RE.match(a.month):
             raise FetchError("--month は YYYY-MM 形式で指定する")
-        org, rows, sources, src_warnings, estimated = _load(a.rows)
+        org, rows, sources, src_warnings, estimated, assume_current = _load(a.rows)
         month = a.month or (max(r["day"][:7] for r in rows) if rows
                             else datetime.now(timezone.utc).strftime("%Y-%m"))
         plan, plan_warning = a.plan, None
@@ -416,7 +453,7 @@ def main(argv=None):
             except FetchError as e:
                 plan, plan_warning = None, "プラン取得に失敗（含有分は不明）: %s" % safe(e, MAX_WARNING_LEN)
         summary = build_summary(org, rows, sources, month, plan, plan_warning, a.group_by, a.top, src_warnings,
-                                estimated=estimated)
+                                estimated=estimated, assume_current=assume_current)
     except FetchError as e:
         print("エラー: %s" % e, file=sys.stderr)
         return 1
