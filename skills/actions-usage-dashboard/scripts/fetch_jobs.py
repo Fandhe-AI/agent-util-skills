@@ -120,9 +120,10 @@ REPO_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 SELF_HOSTED_LABEL = "self-hosted"
 UNKNOWN_GROUP = "(unknown)"
 RUNS_SEARCH_CAP = 1000
-# 1 日で上限を超えたときの時刻二分の下限（秒）。1 日 = 86,400 秒なので 1 日あたりの検索は高々
-# 約 2 * 86400 / 60 回（各 10 ページ以内）。created_at は秒精度のため、これより細かくしても
-# 同じ秒に 1,000 件を超える run は分けられない
+# 1 日で上限を超えたときの時刻二分の下限（秒）。86,400 秒を 60 秒以下まで二分すると葉は
+# 2^11 = 2,048 個（約 42.2 秒）、検索は最大 4,095 回（内部ノード 2,047 は 1 ページ、葉は最大 10 ページ
+# なので、ページ呼び出しは最大 2,047 + 2,048 * 10 = 22,527 回）。実際は上限超えの日が稀で数回で済む。
+# created_at は秒精度のため、同じ秒に 1,000 件を超える run はこれ以上分けられない
 SUBDAY_MIN_SPAN_SECONDS = 60
 PER_PAGE = 100
 MAX_JOB_PAGES = 100
@@ -581,7 +582,13 @@ class GhClient:
             self._since_check += max(pages, 1)
         return repos
 
-    def _runs_pages(self, repo, org, created):
+    def _runs_pages(self, repo, org, created, stop_if_over_cap=False):
+        """created の範囲の run を最大 10 ページ取る。
+
+        stop_if_over_cap が真で 1 ページ目に total_count > RUNS_SEARCH_CAP と分かったときは、
+        呼び出し側が二分して結果を捨てるので、1 ページ目だけ返して打ち切る（内部ノードで約 9 回の
+        無駄な呼び出しを避ける）。このとき返す runs は不完全なので、呼び出し側は total で判断する。
+        """
         runs, total, page = [], None, 1
         while True:
             self.check_rate()  # 二分探索で呼び出しが増えても残量を確認する（runs 一覧は途中中断してもキャッシュを壊さない）
@@ -596,6 +603,8 @@ class GhClient:
             if total is None:
                 total = tc
             runs.extend(wr)
+            if stop_if_over_cap and total > RUNS_SEARCH_CAP:
+                return runs, total
             if len(wr) < PER_PAGE or page * PER_PAGE >= RUNS_SEARCH_CAP:
                 return runs, total
             page += 1
@@ -606,7 +615,9 @@ class GhClient:
         日単位で二分しても 1 日が上限を超えるときは、その日を UTC の時刻範囲（秒単位）で二分する。
         created の日時範囲は検索構文 `YYYY-MM-DDTHH:MM:SSZ..YYYY-MM-DDTHH:MM:SSZ`。端点の包含を
         実装依存にしないため、二分した 2 区間は境界の 1 秒を共有する（欠落は出ず、重複は run id の
-        dict で除かれる）。日の終端は翌日 00:00:00Z とし、23:59:59 の run を端点の扱いで落とさない。
+        dict で除かれる）。二分点は整数秒に切り捨てる（境界秒を共有する側に寄るので欠落は出ず、
+        小数秒の区間も作らない）。日の終端は翌日 00:00:00Z とし、23:59:59 の run を端点の扱いで
+        落とさない。二分する内部ノードは 1 ページ目で打ち切る（_runs_pages の stop_if_over_cap）。
         区間が SUBDAY_MIN_SPAN_SECONDS 以下になっても超えるときだけ truncated に積む。
         """
         out = {}
@@ -616,9 +627,12 @@ class GhClient:
                 out[_run_key(r)[0]] = r
 
         def collect_time(a, b):
-            runs, total = self._runs_pages(repo, org, "%s..%s" % (_utc_s(a), _utc_s(b)))
-            if total > RUNS_SEARCH_CAP and (b - a).total_seconds() > SUBDAY_MIN_SPAN_SECONDS:
-                mid = a + (b - a) // 2
+            span = int((b - a).total_seconds())
+            splittable = span > SUBDAY_MIN_SPAN_SECONDS
+            runs, total = self._runs_pages(repo, org, "%s..%s" % (_utc_s(a), _utc_s(b)),
+                                           stop_if_over_cap=splittable)
+            if total > RUNS_SEARCH_CAP and splittable:
+                mid = a + timedelta(seconds=span // 2)
                 collect_time(a, mid)
                 collect_time(mid, b)
                 return
@@ -628,7 +642,7 @@ class GhClient:
             add(runs)
 
         def collect(lo, hi, spec):
-            runs, total = self._runs_pages(repo, org, spec)
+            runs, total = self._runs_pages(repo, org, spec, stop_if_over_cap=True)
             if total > RUNS_SEARCH_CAP:
                 if lo >= hi:
                     start = datetime(lo.year, lo.month, lo.day, tzinfo=timezone.utc)

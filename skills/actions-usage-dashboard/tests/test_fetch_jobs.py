@@ -1014,6 +1014,11 @@ class Cli(unittest.TestCase):
         specs = [c for c in self.runs_list_calls() if "Z..20" in c]
         self.assertGreaterEqual(len(specs), 2)
         self.assertIn("run: 一覧 1100 ", r.stdout)
+        # 日全体の範囲（二分する内部ノード）は 1 ページ目で打ち切る。旧実装は 10 ページ取っていた
+        nxt = (datetime.fromisoformat(D0).date() + timedelta(days=1)).isoformat()
+        root = [c for c in self.runs_list_calls()
+                if "created=%sT00:00:00Z..%sT00:00:00Z" % (D0, nxt) in c]
+        self.assertEqual(len(root), 1, root)
 
     def test_subday_min_span_still_over_cap_is_truncated(self):
         self.cfg["repos"] = self.cfg["repos"][:1]
