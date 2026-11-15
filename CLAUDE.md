@@ -195,6 +195,8 @@ create-html-report, setup-firebase-hosting, create-pitch-deck, create-design-doc
 
 create-skill, create-agent
 
+管理スキルの frontmatter には `metadata.internal: "true"` を付ける（付けないと skills CLI の `--list` と `--all` に出て downstream に誤って配布されるため。新しく管理スキルを足すときも同じにする）。
+
 ### vendored スキル（消費専用・.agents/skills/ に配置。編集は上流リポジトリで行う）
 
 - **Fandhe-AI/agent-cli-skills 由来（24件）**: comment-code, contribute-skill, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, init-claude, project-add-items, project-archive-done, project-create-issues, project-init, project-sync-issues, project-update-items, project-view-status, setup-repo-guards, sync-skills-lock, update-claude, update-docs, update-issue-tree
